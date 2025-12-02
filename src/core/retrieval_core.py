@@ -9,11 +9,13 @@ properly tracking backend timings and utilizing the hybrid search architecture.
 S3 Paraphrase Robustness Improvements:
 - Phase 2: Multi-Query Expansion (MQE) integration
 - Phase 3: Search enhancements integration
+- Phase 3.5: Cross-encoder re-ranking integration
 - Phase 4: Query normalization integration
 """
 
 import logging
 import os
+import time
 from typing import Dict, List, Any, Optional
 
 from ..interfaces.backend_interface import SearchOptions
@@ -59,6 +61,15 @@ except ImportError:
     get_hyde_generator = None
     HyDEResult = None
 
+# Import cross-encoder reranker (Phase 3.5)
+try:
+    from ..storage.reranker_bulletproof import get_bulletproof_reranker
+
+    CROSS_ENCODER_AVAILABLE = True
+except ImportError:
+    CROSS_ENCODER_AVAILABLE = False
+    get_bulletproof_reranker = None
+
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +78,11 @@ ENABLE_MQE = os.getenv("MQE_ENABLED", "true").lower() == "true"
 ENABLE_SEARCH_ENHANCEMENTS = os.getenv("SEARCH_ENHANCEMENTS_ENABLED", "true").lower() == "true"
 ENABLE_QUERY_NORMALIZATION = os.getenv("QUERY_NORMALIZATION_ENABLED", "true").lower() == "true"
 ENABLE_HYDE = os.getenv("HYDE_ENABLED", "false").lower() == "true"  # Disabled by default
+
+# Cross-encoder reranker configuration (Phase 3.5)
+ENABLE_CROSS_ENCODER = os.getenv("CROSS_ENCODER_RERANKER_ENABLED", "false").lower() == "true"
+CROSS_ENCODER_TOP_K = int(os.getenv("CROSS_ENCODER_TOP_K", "50"))  # Candidates to re-rank
+CROSS_ENCODER_RETURN_K = int(os.getenv("CROSS_ENCODER_RETURN_K", "10"))  # Results to return
 
 
 class RetrievalCore:
@@ -101,6 +117,7 @@ class RetrievalCore:
         Includes S3 Paraphrase Robustness improvements:
         - Phase 2: Multi-Query Expansion (MQE) for paraphrase consistency
         - Phase 3: Search enhancements for result boosting
+        - Phase 3.5: Cross-encoder re-ranking for improved semantic ranking
         - Phase 4: Query normalization for semantic consistency
 
         Args:
@@ -163,7 +180,8 @@ class RetrievalCore:
                 f"RetrievalCore executing search: query_length={len(effective_query)}, "
                 f"mode={search_mode}, limit={limit}, score_threshold={score_threshold}, "
                 f"hyde_enabled={ENABLE_HYDE and HYDE_AVAILABLE}, "
-                f"mqe_enabled={ENABLE_MQE and MQE_AVAILABLE}"
+                f"mqe_enabled={ENABLE_MQE and MQE_AVAILABLE}, "
+                f"cross_encoder_enabled={ENABLE_CROSS_ENCODER and CROSS_ENCODER_AVAILABLE}"
             )
 
             # PHASE 5: HyDE (Hypothetical Document Embeddings)
@@ -252,6 +270,74 @@ class RetrievalCore:
                     search_mode=search_mode_enum
                 )
 
+            # PHASE 3.5: Cross-Encoder Re-ranking (ML-based semantic re-ranking)
+            cross_encoder_used = False
+            if (
+                ENABLE_CROSS_ENCODER
+                and CROSS_ENCODER_AVAILABLE
+                and get_bulletproof_reranker is not None
+                and search_response
+                and search_response.results
+                and len(search_response.results) > 1
+            ):
+                rerank_start = time.time()
+                try:
+                    # Get reranker instance
+                    reranker = get_bulletproof_reranker()
+
+                    # Convert MemoryResult to dict format expected by reranker
+                    candidates = []
+                    for result in search_response.results[:CROSS_ENCODER_TOP_K]:
+                        candidates.append({
+                            "id": result.id,
+                            "payload": {
+                                "text": result.text,
+                                "type": result.type.value if hasattr(result.type, 'value') else str(result.type),
+                                "metadata": result.metadata,
+                            },
+                            "score": result.score,
+                        })
+
+                    # Apply cross-encoder re-ranking
+                    reranked = reranker.rerank(
+                        query=effective_query,
+                        candidates=candidates
+                    )
+
+                    # Update search_response with re-ranked results (limited to RETURN_K)
+                    reranked_results = []
+                    id_to_original = {r.id: r for r in search_response.results}
+
+                    for reranked_item in reranked[:CROSS_ENCODER_RETURN_K]:
+                        original = id_to_original.get(reranked_item["id"])
+                        if original:
+                            # Create updated result with cross-encoder score
+                            reranked_results.append(MemoryResult(
+                                id=original.id,
+                                score=reranked_item.get("rerank_score", original.score),
+                                text=original.text,
+                                type=original.type,
+                                metadata={
+                                    **original.metadata,
+                                    "original_vector_score": reranked_item.get("original_score", original.score),
+                                    "cross_encoder_reranked": True,
+                                },
+                                source=original.source,
+                            ))
+
+                    if reranked_results:
+                        search_response.results = reranked_results
+                        cross_encoder_used = True
+                        rerank_time_ms = (time.time() - rerank_start) * 1000
+
+                        logger.info(
+                            f"Cross-encoder re-ranking: {len(candidates)} candidates -> "
+                            f"{len(reranked_results)} results in {rerank_time_ms:.1f}ms"
+                        )
+
+                except Exception as e:
+                    logger.warning(f"Cross-encoder re-ranking failed, using original results: {e}")
+
             # PHASE 3: Apply Search Enhancements
             if (
                 ENABLE_SEARCH_ENHANCEMENTS
@@ -295,7 +381,8 @@ class RetrievalCore:
             logger.info(
                 f"RetrievalCore search completed: results={len(search_response.results)}, "
                 f"backends_used={search_response.backends_used}, "
-                f"hyde_used={hyde_used}, mqe_used={mqe_used}, query_normalized={query_normalization_applied}"
+                f"hyde_used={hyde_used}, mqe_used={mqe_used}, "
+                f"cross_encoder_used={cross_encoder_used}, query_normalized={query_normalization_applied}"
             )
 
             return search_response

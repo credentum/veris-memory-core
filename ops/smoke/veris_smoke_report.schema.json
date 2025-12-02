@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://veris-memory/schemas/veris_smoke_report.schema.json",
+  "title": "Veris Smoke Report",
+  "type": "object",
+  "required": ["suite_id", "run_id", "timestamp", "env", "namespace", "summary", "tests"],
+  "properties": {
+    "suite_id": { 
+      "type": "string", 
+      "const": "veris-smoke-60s" 
+    },
+    "run_id": { 
+      "type": "string"
+    },
+    "timestamp": { 
+      "type": "string", 
+      "format": "date-time" 
+    },
+    "env": { 
+      "type": "string"
+    },
+    "namespace": { 
+      "type": "string"
+    },
+
+    "summary": {
+      "type": "object",
+      "required": ["overall_status", "p95_latency_ms", "error_rate_pct", "recovery_top1_pct", "index_freshness_s", "failed_tests"],
+      "properties": {
+        "overall_status": { 
+          "type": "string", 
+          "enum": ["pass", "fail"] 
+        },
+        "p95_latency_ms": { 
+          "type": "number"
+        },
+        "error_rate_pct": { 
+          "type": "number"
+        },
+        "recovery_top1_pct": { 
+          "type": "number"
+        },
+        "index_freshness_s": { 
+          "type": "number"
+        },
+        "failed_tests": { 
+          "type": "array", 
+          "items": { 
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "thresholds": {
+      "type": "object",
+      "required": ["p95_latency_ms", "error_rate_pct", "recovery_top1_pct", "index_freshness_s"],
+      "properties": {
+        "p95_latency_ms": { 
+          "type": "number", 
+          "default": 300
+        },
+        "error_rate_pct": { 
+          "type": "number", 
+          "default": 0.5
+        },
+        "recovery_top1_pct": { 
+          "type": "number", 
+          "default": 95
+        },
+        "index_freshness_s": { 
+          "type": "number", 
+          "default": 1
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "tests": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "status", "latency_ms"],
+        "properties": {
+          "id": { 
+            "type": "string"
+          },
+          "name": { 
+            "type": "string"
+          },
+          "status": { 
+            "type": "string", 
+            "enum": ["pass", "fail", "skip"] 
+          },
+          "latency_ms": { 
+            "type": "number"
+          },
+          "metrics": { 
+            "type": "object"
+          },
+          "error": { 
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

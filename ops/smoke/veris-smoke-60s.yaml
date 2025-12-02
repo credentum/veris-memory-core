@@ -1,0 +1,125 @@
+schema_version: 1.0
+suite_id: "veris-smoke-60s"
+purpose: "Daily 60s production smoke: health, write→read, paraphrase, index freshness."
+created: "2025-08-08"
+
+config_defaults:
+  RERANKER_ENABLED: true
+  RERANK_TOP_K: 10
+  HYBRID_ALPHA: 0.7
+  HYBRID_BETA: 0.3
+  QDRANT_WAIT_WRITES: true
+  TIMEOUT_MS: 60000            # hard cap for whole suite
+  NAMESPACE: "smoke"           # isolated, throwaway
+  TTL_SECONDS: 120             # self-cleans after run
+
+phases:
+  - phase: smoke
+    title: "60-second production smoke"
+    description: "Fail-fast checks to verify core functionality & SLOs."
+
+    tests:
+      - id: SM-1
+        name: "Health probe"
+        component: api
+        timeout_ms: 5000
+        steps:
+          1: "GET /health"
+        expected:
+          http_200: true
+          deps_ok: ["qdrant","redis"]    # ignore graph here
+        metrics: [latency_ms]
+
+      - id: SM-2
+        name: "Store → index → count"
+        component: ingestion
+        timeout_ms: 8000
+        input:
+          doc:
+            title: "Smoke Needle"
+            text: "Microservices architecture improves scalability and team autonomy."
+        steps:
+          1: "POST /tools/store_context (namespace=${NAMESPACE}, ttl=${TTL_SECONDS}, wait=true)."
+          2: "GET /admin/count?namespace=${NAMESPACE}."
+        expected:
+          count_increases_by: 1
+        metrics: [latency_ms, count_after]
+
+      - id: SM-3
+        name: "Needle retrieval (semantic)"
+        component: retrieval
+        timeout_ms: 8000
+        input:
+          query: "What are the benefits of microservices?"
+          top_k_dense: 20
+        steps:
+          1: "POST /tools/retrieve_context with query (namespace=${NAMESPACE})."
+        expected:
+          precision_at_1: ">= 1.0"     # top1 should be 'Smoke Needle'
+        metrics: [latency_ms, score_top1, score_gap_top1_top2]
+
+      - id: SM-4
+        name: "Paraphrase robustness (MQE-lite)"
+        component: retrieval
+        timeout_ms: 8000
+        input:
+          paraphrases:
+            - "Why do teams choose microservices?"
+            - "Key advantages of a microservice approach?"
+        steps:
+          1: "Run retrieve_context for both paraphrases."
+          2: "Aggregate per-doc with max score."
+        expected:
+          top_doc_is_smoke_needle: true
+        metrics: [latency_ms, precision_at_1]
+
+      - id: SM-5
+        name: "Index freshness (visibility < 1s)"
+        component: storage
+        timeout_ms: 6000
+        steps:
+          1: "Immediately query the same needle again."
+        expected:
+          visible_under_seconds: "<= 1"
+        metrics: [latency_ms, visible_under_seconds]
+
+      - id: SM-6
+        name: "SLO spot-check"
+        component: ops
+        timeout_ms: 4000
+        steps:
+          1: "Evaluate metrics observed across SM-1..SM-5."
+        expected:
+          p95_latency_ms: "<= 300"
+          error_rate_pct: "<= 0.5"
+          recovery_top1: ">= 95"   # known-answer set here is 1 doc
+        metrics: [p95_latency_ms, error_rate_pct, recovery_top1]
+
+      # Optional: only if graph RO is configured; skip if unavailable.
+      - id: SM-7
+        name: "Graph RO sanity (optional)"
+        component: graph
+        optional: true
+        timeout_ms: 5000
+        input:
+          cypher: "RETURN 1 AS ok"
+        steps:
+          1: "query_graph with read-only user."
+        expected:
+          ro_read_ok: true
+        metrics: [latency_ms]
+
+success_criteria:
+  - "SM-1.http_200 == true"
+  - "SM-2.count_increases_by == 1"
+  - "SM-3.precision_at_1 >= 1.0"
+  - "SM-4.top_doc_is_smoke_needle == true"
+  - "SM-5.visible_under_seconds <= 1"
+  - "SM-6.p95_latency_ms <= 300"
+  - "SM-6.error_rate_pct <= 0.5"
+
+notes: |
+  - Use a throwaway namespace and short TTL to avoid residue.
+  - All writes must set wait=true to guarantee visibility in SM-3/5.
+  - Fail fast: abort suite on first unmet success_criterion.
+  - Log a single JSON summary for deploy_guard to parse and gate releases.

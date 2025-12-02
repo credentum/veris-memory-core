@@ -41,6 +41,15 @@ services:
       - STRICT_EMBEDDINGS=${STRICT_EMBEDDINGS:-false}
       - EMBEDDING_DIM=${EMBEDDING_DIM:-384}  # v1.0 compliance: must be 384
       - QDRANT_COLLECTION_NAME=${QDRANT_COLLECTION_NAME:-context_embeddings}  # Collection name for vector storage
+      # HyDE (Hypothetical Document Embeddings) Configuration
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - HYDE_ENABLED=${HYDE_ENABLED:-false}
+      - HYDE_API_PROVIDER=${HYDE_API_PROVIDER:-openrouter}
+      - HYDE_MODEL=${HYDE_MODEL:-x-ai/grok-4.1-fast:free}
+      # Cross-Encoder Reranker Configuration (Phase 3.5)
+      - CROSS_ENCODER_RERANKER_ENABLED=${CROSS_ENCODER_RERANKER_ENABLED:-false}
+      - CROSS_ENCODER_TOP_K=${CROSS_ENCODER_TOP_K:-50}
+      - CROSS_ENCODER_RETURN_K=${CROSS_ENCODER_RETURN_K:-10}
     command: ["python", "-m", "uvicorn", "src.mcp_server.main:app", "--host", "0.0.0.0", "--port", "8000"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]

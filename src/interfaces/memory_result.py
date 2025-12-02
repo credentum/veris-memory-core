@@ -44,7 +44,7 @@ class MemoryResult(BaseModel):
     id: str = Field(..., description="Unique identifier for the result")
     text: str = Field(..., description="Primary content text", min_length=1)
     type: ContentType = Field(default=ContentType.GENERAL, description="Content type classification")
-    score: float = Field(default=1.0, ge=0.0, le=1.0, description="Relevance score (0.0 to 1.0)")
+    score: float = Field(default=1.0, description="Relevance score (can exceed 1.0 for boosted/reranked results)")
     timestamp: datetime = Field(default_factory=datetime.utcnow, description="Creation timestamp (UTC)")
     source: ResultSource = Field(..., description="Backend that provided this result")
     tags: List[str] = Field(default_factory=list, description="Associated tags for categorization")
@@ -66,10 +66,10 @@ class MemoryResult(BaseModel):
     @field_validator('score')
     @classmethod
     def score_valid_range(cls, v):
-        """Ensure score is within valid range."""
-        if not 0.0 <= v <= 1.0:
-            raise ValueError('Score must be between 0.0 and 1.0')
-        return v
+        """Ensure score is a valid number (can exceed 1.0 for boosted/reranked results)."""
+        if v is None or (isinstance(v, float) and (v != v)):  # Check for None or NaN
+            raise ValueError('Score must be a valid number')
+        return float(v)
     
     @field_validator('tags')
     @classmethod
