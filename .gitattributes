@@ -1,0 +1,20 @@
+# Collapse source directories in GitHub view to highlight README
+src/* linguist-documentation
+schemas/* linguist-documentation
+contracts/* linguist-documentation
+docker/* linguist-documentation
+tests/* linguist-documentation
+*.json linguist-documentation
+*.yaml linguist-documentation
+*.yml linguist-documentation
+package-lock.json linguist-generated
+
+# Mark configuration files as documentation to reduce clutter
+.ctxrc.yaml linguist-documentation
+supervisord.conf linguist-documentation
+fly.toml linguist-documentation
+
+# Mark build and deployment files appropriately
+Dockerfile* linguist-generated
+*.sh linguist-generated
+requirements.txt linguist-generated

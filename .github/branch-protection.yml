@@ -1,0 +1,148 @@
+# Branch Protection Rules Configuration
+# Apply these rules via GitHub Settings > Branches
+
+main:
+  protection_rules:
+    # Require pull request reviews before merging
+    required_reviews:
+      dismiss_stale_reviews: true
+      require_code_owner_reviews: true
+      required_approving_review_count: 2
+      dismissal_restrictions:
+        users: []
+        teams:
+          - platform-lead
+          - senior-engineers
+    
+    # Status checks that must pass
+    required_status_checks:
+      strict: true  # Require branches to be up to date before merging
+      contexts:
+        - "Parity Verification / Verify Manifest Parity"
+        - "Parity Verification / Check Dimension Consistency"
+        - "Parity Verification / Run Smoke Tests"
+        - "CI / Lint"
+        - "CI / Type Check"
+        - "CI / Unit Tests"
+        - "CI / Integration Tests"
+        - "Security / Dependency Check"
+        - "Security / Code Scanning"
+    
+    # Restrictions
+    restrictions:
+      users: []
+      teams:
+        - platform-team
+        - senior-engineers
+      apps: []
+    
+    # Enforcement
+    enforce_admins: true
+    allow_force_pushes: false
+    allow_deletions: false
+    required_linear_history: true
+    
+    # Require conversation resolution
+    required_conversation_resolution: true
+    
+    # Require signed commits
+    required_signatures: true
+
+develop:
+  protection_rules:
+    required_reviews:
+      dismiss_stale_reviews: true
+      require_code_owner_reviews: true
+      required_approving_review_count: 1
+      dismissal_restrictions:
+        users: []
+        teams:
+          - platform-team
+    
+    required_status_checks:
+      strict: false
+      contexts:
+        - "CI / Lint"
+        - "CI / Type Check"
+        - "CI / Unit Tests"
+    
+    restrictions: null
+    
+    enforce_admins: false
+    allow_force_pushes: false
+    allow_deletions: false
+    required_linear_history: false
+    required_conversation_resolution: true
+    required_signatures: false
+
+release/*:
+  protection_rules:
+    required_reviews:
+      dismiss_stale_reviews: true
+      require_code_owner_reviews: true
+      required_approving_review_count: 2
+      dismissal_restrictions:
+        users: []
+        teams:
+          - platform-lead
+          - release-managers
+    
+    required_status_checks:
+      strict: true
+      contexts:
+        - "Parity Verification / Verify Manifest Parity"
+        - "Parity Verification / Check Dimension Consistency"
+        - "Parity Verification / Run Smoke Tests"
+        - "CI / Lint"
+        - "CI / Type Check"
+        - "CI / Unit Tests"
+        - "CI / Integration Tests"
+        - "CI / E2E Tests"
+        - "Security / Dependency Check"
+        - "Security / Code Scanning"
+        - "Performance / Load Tests"
+    
+    restrictions:
+      users: []
+      teams:
+        - release-managers
+        - platform-lead
+    
+    enforce_admins: true
+    allow_force_pushes: false
+    allow_deletions: false
+    required_linear_history: true
+    required_conversation_resolution: true
+    required_signatures: true
+
+# Automated rules for specific file patterns
+file_specific_rules:
+  - pattern: "production_locked_config.yaml"
+    min_reviews: 3
+    required_teams:
+      - senior-engineers
+      - platform-lead
+    block_during_freeze: true
+  
+  - pattern: "**/*.sh"
+    min_reviews: 2
+    required_teams:
+      - devops
+    requires_security_review: true
+  
+  - pattern: "**/Dockerfile*"
+    min_reviews: 2
+    required_teams:
+      - devops
+    requires_security_scan: true
+  
+  - pattern: ".github/workflows/*.yml"
+    min_reviews: 2
+    required_teams:
+      - devops
+      - platform-team
+  
+  - pattern: "**/test_*.py"
+    min_reviews: 1
+    required_teams:
+      - qa-team

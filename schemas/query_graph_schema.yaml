@@ -1,0 +1,149 @@
+---
+schema_version: "1.0"
+tool_name: "query_graph"
+description: "Execute read-only Cypher queries on the graph database with security validation"
+
+input_schema:
+  type: object
+  properties:
+    query:
+      type: string
+      description: "Cypher query to execute (read-only operations only)"
+      minLength: 1
+      maxLength: 5000
+      pattern: "^(?i)\\s*(MATCH|WITH|RETURN|WHERE|ORDER|LIMIT|SKIP|UNION|UNWIND|CASE|COUNT|SUM|AVG|MIN|MAX|COLLECT).*"
+      examples:
+        - "MATCH (n:Context) WHERE n.type = $type RETURN n.title LIMIT 10"
+        - "MATCH (n:Context)-[:RELATES_TO]->(m) RETURN n.id, m.id"
+
+    parameters:
+      type: object
+      description: "Query parameters for parameterized queries"
+      additionalProperties:
+        oneOf:
+          - type: string
+          - type: number
+          - type: boolean
+      examples:
+        - type: "design"
+          limit: 10
+
+    limit:
+      type: integer
+      description: "Maximum number of results to return"
+      minimum: 1
+      maximum: 1000
+      default: 100
+
+  required:
+    - query
+
+output_schema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: "Whether the query execution succeeded"
+
+    results:
+      type: array
+      description: "Query results as array of objects"
+      items:
+        type: object
+
+    row_count:
+      type: integer
+      description: "Number of rows returned"
+      minimum: 0
+
+    error:
+      type: string
+      description: "Error message if query failed"
+
+    error_type:
+      type: string
+      description: "Classification of error type"
+      enum:
+        - "rate_limit"
+        - "forbidden_operation"
+        - "complexity_too_high"
+        - "query_too_long"
+        - "potential_injection"
+        - "limit_too_large"
+        - "validation_exception"
+        - "storage_unavailable"
+
+  required:
+    - success
+
+security_requirements:
+  - "Only read operations are permitted (MATCH, RETURN, WHERE, etc.)"
+  - "Write operations (CREATE, DELETE, SET, REMOVE, MERGE, DROP) are blocked"
+  - "Query complexity is analyzed and limited to prevent resource abuse"
+  - "Parameters are validated to prevent injection attacks"
+  - "Query length is limited to 5000 characters"
+  - "Result sets are limited to 1000 rows maximum"
+
+validation_rules:
+  query_complexity:
+    max_score: 100
+    factors:
+      - "MATCH clauses: 10 points each"
+      - "WHERE clauses: 5 points each"
+      - "WITH clauses: 8 points each"
+      - "UNION clauses: 15 points each"
+      - "Nested patterns: 20 points each"
+      - "Relationship patterns: 5 points each"
+
+  forbidden_operations:
+    - CREATE
+    - DELETE
+    - REMOVE
+    - SET
+    - MERGE
+    - DROP
+    - DETACH
+    - FOREACH
+    - LOAD
+    - USING
+    - PERIODIC
+    - CALL
+    - YIELD
+
+  parameter_validation:
+    name_pattern: "^[a-zA-Z_][a-zA-Z0-9_]*$"
+    max_string_length: 1000
+    suspicious_content:
+      - "DROP"
+      - "DELETE"
+      - "CREATE"
+      - "SET"
+      - "MERGE"
+      - "REMOVE"
+
+rate_limiting:
+  requests_per_minute: 60
+  requests_per_hour: 1000
+
+examples:
+  safe_queries:
+    - query: "MATCH (n:Context) WHERE n.type = $type RETURN n.id, n.title LIMIT 10"
+      parameters:
+        type: "design"
+      description: "Find design contexts with type filter"
+
+    - query: "MATCH (n:Context)-[:RELATES_TO]->(m:Context) RETURN n.id, m.id"
+      description: "Find relationships between contexts"
+
+    - query: "MATCH (n:Context) RETURN n.type, COUNT(n) ORDER BY COUNT(n) DESC"
+      description: "Count contexts by type"
+
+  blocked_queries:
+    - query: "CREATE (n:Context {title: 'test'})"
+      reason: "Contains forbidden CREATE operation"
+
+    - query: "MATCH (n) SET n.title = 'updated'"
+      reason: "Contains forbidden SET operation"
+
+    - query: "MATCH (n) DELETE n"
+      reason: "Contains forbidden DELETE operation"

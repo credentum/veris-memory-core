@@ -1,0 +1,94 @@
+# CI/CD Test Environment Container
+# This container includes all dependencies needed for running tests and code review
+FROM python:3.11-slim
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    wget \
+    unzip \
+    bash \
+    bc \
+    jq \
+    procps \
+    ca-certificates \
+    build-essential \
+    gcc \
+    g++ \
+    make \
+    nodejs \
+    npm \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create working directory
+WORKDIR /app
+
+# Copy dependency files first (for better layer caching)
+COPY requirements.txt requirements-dev.txt ./
+
+# Install Python dependencies
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install -r requirements-dev.txt
+
+# Install additional CI tools
+RUN pip install \
+    yamale \
+    python-gnupg \
+    tenacity \
+    pytest-xdist \
+    pytest-timeout \
+    docker \
+    aiohttp[speedups]
+
+# Install Node.js dependencies for schema validation
+RUN npm install -g ajv-cli
+
+# Install Bun
+RUN curl -fsSL https://bun.sh/install | bash && \
+    mv /root/.bun/bin/bun /usr/local/bin/ && \
+    chmod +x /usr/local/bin/bun
+
+# Pre-compile Python files for faster startup
+RUN python -m compileall -q /usr/local/lib/python3.11
+
+# Create directories that the CI workflow expects
+RUN mkdir -p \
+    context/.duckdb \
+    context/.graph_cache \
+    context/.vector_cache \
+    context/.embeddings_cache \
+    context/trace \
+    context/archive \
+    context/mcp_contracts \
+    context/logs/cleanup \
+    context/logs/eval \
+    context/logs/kv \
+    context/logs/prompts \
+    context/logs/signatures
+
+# Set up git safe directory (for GitHub Actions)
+# Use system-wide config to ensure it applies to all users in the container
+# GitHub Actions mounts repos at /__w and changes user context
+RUN git config --system --add safe.directory /github/workspace && \
+    git config --system --add safe.directory /__w/veris-memory/veris-memory && \
+    git config --system --add safe.directory /__w && \
+    git config --system --add safe.directory '*' && \
+    # Also set for root user specifically
+    git config --global --add safe.directory '*'
+
+# Labels for GitHub Container Registry
+LABEL org.opencontainers.image.source="https://github.com/credentum/veris-memory"
+LABEL org.opencontainers.image.description="CI/CD test environment for Veris Memory"
+LABEL org.opencontainers.image.licenses="MIT"
+
+# Default command
+CMD ["/bin/bash"]

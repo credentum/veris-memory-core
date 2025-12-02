@@ -1,0 +1,78 @@
+[run]
+# Source paths to measure coverage for
+source = src/
+
+# Include only Python files
+include =
+    src/*.py
+    src/*/*.py
+    src/*/*/*.py
+
+# Exclude test files and common non-source files
+omit =
+    */tests/*
+    */test_*.py
+    */__pycache__/*
+    */.*
+    setup.py
+    conftest.py
+    */conftest.py
+
+# Branch coverage
+branch = True
+
+# Data file location
+data_file = .coverage
+
+# Parallel processing support for pytest-xdist  
+parallel = True
+
+[report]
+# Reporting options
+exclude_lines =
+    # Have to re-enable the standard pragma
+    pragma: no cover
+
+    # Don't complain about missing debug-only code:
+    def __repr__
+    if self\.debug
+
+    # Don't complain if tests don't hit defensive assertion code:
+    raise AssertionError
+    raise NotImplementedError
+
+    # Don't complain if non-runnable code isn't run:
+    if 0:
+    if __name__ == .__main__.:
+
+    # Don't complain about abstract methods
+    @(abc\.)?abstractmethod
+
+# Show missing lines
+show_missing = True
+
+# Skip files with 100% coverage
+skip_covered = False
+
+# Skip empty files
+skip_empty = True
+
+# Precision for percentages
+precision = 1
+
+# Sort by coverage percentage
+sort = Cover
+
+[html]
+# HTML report directory
+directory = coverage_html
+
+# Skip files with 100% coverage in HTML report
+skip_covered = False
+
+# Show contexts
+show_contexts = True
+
+[xml]
+# XML report file
+output = coverage.xml

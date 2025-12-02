@@ -1,0 +1,132 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "schema_version": "1.0",
+  "name": "select_tools",
+  "description": "Select relevant tools based on query using multiple selection algorithms",
+  "version": "1.0.0",
+  "inputSchema": {
+    "type": "object",
+    "required": ["query"],
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Search query or context description for tool selection"
+      },
+      "max_tools": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 20,
+        "default": 5,
+        "description": "Maximum number of tools to return (≤ N)"
+      },
+      "method": {
+        "type": "string",
+        "enum": ["dot_product", "rule_based", "hybrid"],
+        "default": "hybrid",
+        "description": "Selection method to use"
+      },
+      "category_filter": {
+        "type": "string",
+        "description": "Filter tools by category (optional)"
+      },
+      "include_scores": {
+        "type": "boolean",
+        "default": true,
+        "description": "Include relevance scores in response"
+      }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["success", "tools", "total_available"],
+    "properties": {
+      "success": {
+        "type": "boolean",
+        "description": "Whether the tool selection was successful"
+      },
+      "tools": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Tool name"
+            },
+            "description": {
+              "type": "string",
+              "description": "Tool description"
+            },
+            "category": {
+              "type": "string",
+              "description": "Tool category"
+            },
+            "keywords": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Tool keywords"
+            },
+            "relevance_score": {
+              "type": "number",
+              "description": "Relevance score (if included)"
+            },
+            "metadata": {
+              "type": "object",
+              "description": "Additional tool metadata"
+            }
+          }
+        },
+        "description": "Selected tools sorted by relevance"
+      },
+      "total_available": {
+        "type": "integer",
+        "description": "Total number of tools available"
+      },
+      "method_used": {
+        "type": "string",
+        "description": "Selection method that was used"
+      },
+      "selection_log": {
+        "type": "object",
+        "description": "YAML-formatted selection log for audit trail"
+      },
+      "message": {
+        "type": "string",
+        "description": "Success or error message"
+      }
+    }
+  },
+  "examples": [
+    {
+      "input": {
+        "query": "code analysis and debugging",
+        "max_tools": 3,
+        "method": "hybrid"
+      },
+      "output": {
+        "success": true,
+        "tools": [
+          {
+            "name": "Code Analyzer",
+            "description": "Analyzes code structure, complexity, and patterns",
+            "category": "analysis",
+            "keywords": ["code", "analysis", "complexity"],
+            "relevance_score": 2.4,
+            "metadata": { "file_path": "context/tools/code_analyzer.md" }
+          },
+          {
+            "name": "Debugger",
+            "description": "Interactive debugging tool for step-by-step execution",
+            "category": "debugging",
+            "keywords": ["debug", "debugging", "breakpoint"],
+            "relevance_score": 1.8,
+            "metadata": { "file_path": "context/tools/debugger.md" }
+          }
+        ],
+        "total_available": 4,
+        "method_used": "hybrid",
+        "message": "Selected 2 tools using hybrid method"
+      }
+    }
+  ]
+}

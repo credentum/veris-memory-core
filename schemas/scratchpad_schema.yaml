@@ -1,0 +1,226 @@
+---
+schema_version: "1.0"
+tool_name: "update_scratchpad"
+description: "Update agent scratchpad with transient storage and TTL support"
+
+input_schema:
+  type: object
+  properties:
+    agent_id:
+      type: string
+      description: "Agent identifier for namespace isolation"
+      pattern: "^[a-zA-Z0-9_-]{1,64}$"
+      examples:
+        - "agent-123"
+        - "user_456"
+        - "bot-assistant"
+
+    key:
+      type: string
+      description: "Scratchpad key for the data"
+      pattern: "^[a-zA-Z0-9_.-]{1,128}$"
+      examples:
+        - "working_memory"
+        - "current_task"
+        - "temp_data"
+
+    content:
+      type: string
+      description: "Content to store in the scratchpad"
+      minLength: 1
+      maxLength: 100000 # 100KB limit
+      examples:
+        - "Current task: analyze user requirements"
+        - "Progress: completed step 1 of 5"
+
+    mode:
+      type: string
+      description: "Update mode for the content"
+      enum:
+        - "overwrite"
+        - "append"
+      default: "overwrite"
+      examples:
+        - "overwrite"
+        - "append"
+
+    ttl:
+      type: integer
+      description: "Time to live in seconds (auto-expiration)"
+      minimum: 60 # 1 minute minimum
+      maximum: 86400 # 24 hours maximum
+      default: 3600 # 1 hour default
+      examples:
+        - 3600 # 1 hour
+        - 7200 # 2 hours
+        - 86400 # 24 hours
+
+  required:
+    - agent_id
+    - key
+    - content
+
+output_schema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: "Whether the operation succeeded"
+
+    message:
+      type: string
+      description: "Success or error message"
+
+    key:
+      type: string
+      description: "The namespaced key used for storage"
+
+    ttl:
+      type: integer
+      description: "TTL applied in seconds"
+
+    content_size:
+      type: integer
+      description: "Size of stored content in bytes"
+
+    error_type:
+      type: string
+      description: "Classification of error type"
+      enum:
+        - "rate_limit"
+        - "invalid_agent_id"
+        - "invalid_key"
+        - "invalid_content_type"
+        - "content_too_large"
+        - "invalid_ttl"
+        - "namespace_error"
+        - "storage_unavailable"
+        - "storage_error"
+        - "storage_exception"
+        - "missing_parameter"
+        - "unexpected_error"
+
+  required:
+    - success
+    - message
+
+namespace_isolation:
+  pattern: "agent:{agent_id}:scratchpad:{key}"
+  description: "Each agent has isolated namespace preventing cross-agent access"
+  examples:
+    - "agent:user-123:scratchpad:working_memory"
+    - "agent:bot-assistant:scratchpad:current_task"
+
+validation_rules:
+  agent_id:
+    pattern: "^[a-zA-Z0-9_-]{1,64}$"
+    description: "Alphanumeric, underscore, and hyphen only, 1-64 characters"
+
+  key:
+    pattern: "^[a-zA-Z0-9_.-]{1,128}$"
+    description: "Alphanumeric, underscore, dot, and hyphen only, 1-128 characters"
+
+  content:
+    max_size_bytes: 100000
+    encoding: "utf-8"
+    validation:
+      - "Must be valid UTF-8 string"
+      - "No null bytes or control characters"
+
+  ttl:
+    min_seconds: 60 # 1 minute
+    max_seconds: 86400 # 24 hours
+    default_seconds: 3600 # 1 hour
+
+storage_backend:
+  type: "Redis"
+  operations:
+    overwrite: "SET with TTL"
+    append: "GET + concatenate + SET with TTL"
+  key_pattern: "agent:{agent_id}:scratchpad:{key}"
+
+rate_limiting:
+  requests_per_minute: 120 # Higher limit for scratchpad operations
+  requests_per_hour: 2000
+
+security_features:
+  - "Namespace isolation prevents cross-agent access"
+  - "Agent ID validation ensures proper format"
+  - "Content size limits prevent resource abuse"
+  - "TTL ensures automatic cleanup of temporary data"
+  - "Rate limiting prevents excessive usage"
+
+use_cases:
+  working_memory:
+    description: "Store temporary working memory for agents"
+    example:
+      agent_id: "agent-123"
+      key: "working_memory"
+      content: "Current analysis: user wants to implement login feature"
+      ttl: 7200
+
+  progress_tracking:
+    description: "Track progress on long-running tasks"
+    example:
+      agent_id: "task-runner"
+      key: "build_progress"
+      content: "Step 3/10: Running tests"
+      mode: "overwrite"
+      ttl: 3600
+
+  conversation_context:
+    description: "Maintain conversation context between interactions"
+    example:
+      agent_id: "chat-bot"
+      key: "conversation_history"
+      content: "User asked about pricing, provided basic info"
+      mode: "append"
+      ttl: 14400 # 4 hours
+
+examples:
+  basic_usage:
+    input:
+      agent_id: "agent-123"
+      key: "working_memory"
+      content: "Analyzing user requirements for login system"
+      ttl: 3600
+    expected_output:
+      success: true
+      message: "Scratchpad updated successfully (mode: overwrite)"
+      key: "agent:agent-123:scratchpad:working_memory"
+      ttl: 3600
+      content_size: 45
+
+  append_mode:
+    input:
+      agent_id: "agent-123"
+      key: "progress_log"
+      content: "Step 2: Completed validation"
+      mode: "append"
+      ttl: 7200
+    expected_output:
+      success: true
+      message: "Scratchpad updated successfully (mode: append)"
+      key: "agent:agent-123:scratchpad:progress_log"
+      ttl: 7200
+
+error_examples:
+  invalid_agent_id:
+    input:
+      agent_id: "invalid agent id"
+      key: "test"
+      content: "test"
+    expected_output:
+      success: false
+      message: "Invalid agent ID format: invalid agent id"
+      error_type: "invalid_agent_id"
+
+  content_too_large:
+    input:
+      agent_id: "agent-123"
+      key: "large_data"
+      content: "[100KB+ content]"
+    expected_output:
+      success: false
+      message: "Content exceeds maximum size (100KB)"
+      error_type: "content_too_large"

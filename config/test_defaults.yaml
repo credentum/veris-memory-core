@@ -1,0 +1,146 @@
+# Test Configuration Defaults for Veris Memory
+# This file centralizes all hardcoded test values to make them configurable
+# and easily maintainable across all test files.
+
+# Database connection settings for testing
+databases:
+  neo4j:
+    host: "localhost"
+    port: 7687
+    database: "test_context"
+    username: "neo4j"
+    password: "test_password"
+    ssl: false
+    uri_template: "bolt://{host}:{port}"
+    ssl_uri_template: "bolt+s://{host}:{port}"
+    
+  qdrant:
+    host: "localhost"
+    port: 6333
+    collection_name: "test_contexts"
+    dimensions: 384
+    https: false
+    url_template: "http://{host}:{port}"
+    ssl_url_template: "https://{host}:{port}"
+    
+  redis:
+    host: "localhost"
+    port: 6379
+    database: 0
+    password: null
+    ssl: false
+    url_template: "redis://{host}:{port}"
+
+# Storage configuration for testing
+storage:
+  base_path: "/tmp/test_storage"
+  cache_ttl: 3600
+  max_cache_size: 100
+
+# Embedding configuration for testing
+embedding:
+  model: "all-MiniLM-L6-v2"
+  cache_embeddings: true
+  batch_size: 32
+
+# Security settings for testing
+security:
+  auth_enabled: false
+  ssl_enabled: false
+
+# Test data for various test scenarios
+test_data:
+  # Sample contexts for testing
+  sample_contexts:
+    - id: "test-context-1"
+      content: "This is a test context for verification"
+      tags: ["test", "sample"]
+      metadata:
+        source: "test_suite"
+        created_by: "automated_test"
+        
+    - id: "test-context-2"
+      content: "Another test context with different content"
+      tags: ["test", "validation"]
+      metadata:
+        source: "test_suite"
+        created_by: "automated_test"
+
+  # Sample vectors for Qdrant testing
+  sample_vectors:
+    - vector: [0.1, 0.2, 0.3, 0.4]  # Simplified 4-dim for testing
+      payload:
+        context_id: "test-context-1"
+        tags: ["test"]
+        
+  # Sample graph data for Neo4j testing
+  sample_graph_nodes:
+    - id: "node-1"
+      labels: ["Context"]
+      properties:
+        name: "Test Node 1"
+        type: "test"
+        
+    - id: "node-2"
+      labels: ["Context"]
+      properties:
+        name: "Test Node 2"
+        type: "test"
+
+  sample_graph_relationships:
+    - from: "node-1"
+      to: "node-2"
+      type: "RELATES_TO"
+      properties:
+        weight: 0.8
+        created_at: "2024-01-01T00:00:00Z"
+
+# Test credentials (non-production placeholders)
+test_credentials:
+  neo4j:
+    test_user: "test_user"
+    test_pass: "test_pass"
+    prompted_password: "prompted_password"
+    
+  redis:
+    test_password: "test_password"
+    
+  qdrant:
+    test_api_key: "test_api_key"
+
+# Alternative configurations for different test scenarios
+alternative_configs:
+  integration_test:
+    neo4j:
+      database: "integration_test"
+      
+  performance_test:
+    qdrant:
+      collection_name: "performance_test"
+      dimensions: 768
+      
+  ssl_test:
+    neo4j:
+      ssl: true
+    qdrant:
+      https: true
+    redis:
+      ssl: true
+
+# Mock service responses for testing
+mock_responses:
+  neo4j:
+    successful_connection: "✓ Connected to Neo4j at bolt://localhost:7687"
+    successful_ssl_connection: "✓ Connected to Neo4j at bolt+s://localhost:7687"
+    
+  qdrant:
+    successful_connection: "✓ Connected to Qdrant at localhost:6333"
+    
+  redis:
+    successful_connection: "Connected to Redis at localhost:6379"
+
+# Path configurations
+paths:
+  ca_cert_path: "/path/to/ca.crt"
+  test_config_file: "/tmp/test_config.yaml"
+  temp_storage: "/tmp/test_storage"

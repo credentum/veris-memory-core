@@ -1,0 +1,57 @@
+# DEBUG Dockerfile for API - Maximum error visibility
+FROM python:3.11-slim
+
+# Install ALL debugging tools
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        gcc g++ libc6-dev \
+        curl wget netcat-openbsd \
+        vim less \
+        procps htop \
+        strace ltrace \
+        ca-certificates && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create user
+RUN useradd -m -u 1000 appuser
+
+WORKDIR /app
+
+# Copy requirements and install with verbose output
+COPY requirements.txt .
+RUN pip install --no-cache-dir --verbose --upgrade pip && \
+    pip install --no-cache-dir --verbose -r requirements.txt 2>&1 | tee /tmp/pip-install.log
+
+# Copy ALL application code
+COPY --chown=appuser:appuser src/ ./src/
+COPY --chown=appuser:appuser schemas/ ./schemas/
+COPY --chown=appuser:appuser contracts/ ./contracts/
+COPY --chown=appuser:appuser scripts/api-debug-wrapper.sh ./api-debug-wrapper.sh
+
+# Copy config - with error checking
+COPY --chown=appuser:appuser config/.ctxrc.docker.yaml ./.ctxrc.yaml
+RUN ls -la .ctxrc.yaml && echo "Config file copied successfully"
+
+# Create directories
+RUN mkdir -p /app/logs /app/data && \
+    chown -R appuser:appuser /app && \
+    chmod +x api-debug-wrapper.sh
+
+# Debug environment
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONFAULTHANDLER=1
+ENV PYTHONHASHSEED=random
+ENV API_SERVER_PORT=8001
+ENV LOG_LEVEL=DEBUG
+ENV ENVIRONMENT=debug
+
+# NO HEALTH CHECK in debug mode - we want to see the errors
+# HEALTHCHECK NONE
+
+USER appuser
+EXPOSE 8001
+
+# Use debug wrapper instead of direct command
+CMD ["/bin/bash", "/app/api-debug-wrapper.sh"]

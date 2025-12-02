@@ -1,0 +1,109 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "schema_version": "1.0",
+  "name": "query_graph",
+  "description": "Execute Cypher queries on the graph database",
+  "version": "1.0.0",
+  "inputSchema": {
+    "type": "object",
+    "required": ["query"],
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Cypher query to execute (read-only queries only)"
+      },
+      "parameters": {
+        "type": "object",
+        "description": "Parameters for the Cypher query"
+      },
+      "limit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000,
+        "default": 100,
+        "description": "Maximum number of results"
+      },
+      "timeout": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 30000,
+        "default": 5000,
+        "description": "Query timeout in milliseconds"
+      }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["success"],
+    "properties": {
+      "success": {
+        "type": "boolean",
+        "description": "Whether the query executed successfully"
+      },
+      "results": {
+        "type": "array",
+        "description": "Query results"
+      },
+      "columns": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Column names for the results"
+      },
+      "row_count": {
+        "type": "integer",
+        "description": "Number of rows returned"
+      },
+      "execution_time": {
+        "type": "integer",
+        "description": "Query execution time in milliseconds"
+      },
+      "error": {
+        "type": "string",
+        "description": "Error message if query failed"
+      }
+    }
+  },
+  "security": {
+    "allowed_operations": [
+      "MATCH",
+      "WITH",
+      "RETURN",
+      "WHERE",
+      "ORDER BY",
+      "LIMIT"
+    ],
+    "forbidden_operations": [
+      "CREATE",
+      "DELETE",
+      "SET",
+      "REMOVE",
+      "MERGE",
+      "CALL"
+    ],
+    "note": "Only read operations are permitted for security"
+  },
+  "examples": [
+    {
+      "input": {
+        "query": "MATCH (n:Context {type: $type}) RETURN n.id, n.title LIMIT 10",
+        "parameters": {
+          "type": "design"
+        }
+      },
+      "output": {
+        "success": true,
+        "results": [
+          {
+            "n.id": "design-001",
+            "n.title": "System Architecture"
+          }
+        ],
+        "columns": ["n.id", "n.title"],
+        "row_count": 1,
+        "execution_time": 45
+      }
+    }
+  ]
+}

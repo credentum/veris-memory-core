@@ -1,0 +1,221 @@
+{
+  "schema_version": "1.0",
+  "tool_name": "get_agent_state",
+  "description": "Retrieve agent state with namespace isolation and filtering",
+  "version": "1.0.0",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "agent_id": {
+        "type": "string",
+        "description": "Agent identifier for namespace isolation",
+        "pattern": "^[a-zA-Z0-9_-]{1,64}$",
+        "examples": ["agent-123", "user_456", "bot-assistant"]
+      },
+      "key": {
+        "type": "string",
+        "description": "Specific state data key to retrieve (optional - omit for all keys)",
+        "pattern": "^[a-zA-Z0-9_.-]{1,128}$",
+        "examples": ["working_memory", "current_task", "user_preferences"]
+      },
+      "prefix": {
+        "type": "string",
+        "description": "State type to retrieve",
+        "enum": ["state", "scratchpad", "memory", "config"],
+        "default": "state",
+        "examples": ["state", "scratchpad", "memory"]
+      }
+    },
+    "required": ["agent_id"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "success": {
+        "type": "boolean",
+        "description": "Whether the operation succeeded"
+      },
+      "data": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Retrieved state data (single key)",
+            "properties": {
+              "key": {
+                "type": "string",
+                "description": "The requested key"
+              },
+              "content": {
+                "type": "string",
+                "description": "The stored content"
+              },
+              "namespaced_key": {
+                "type": "string",
+                "description": "The full namespaced key used"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Retrieved state data (multiple keys)",
+            "additionalProperties": {
+              "type": "string",
+              "description": "Content for each key"
+            }
+          }
+        ]
+      },
+      "keys": {
+        "type": "array",
+        "description": "List of available keys (when retrieving all)",
+        "items": {
+          "type": "string"
+        }
+      },
+      "message": {
+        "type": "string",
+        "description": "Success or error message"
+      },
+      "total_available": {
+        "type": "integer",
+        "description": "Total number of keys available (when listing)"
+      },
+      "error_type": {
+        "type": "string",
+        "description": "Classification of error type",
+        "enum": [
+          "rate_limit",
+          "invalid_agent_id",
+          "invalid_prefix",
+          "invalid_key",
+          "access_denied",
+          "key_not_found",
+          "storage_unavailable",
+          "storage_exception",
+          "missing_parameter",
+          "unexpected_error"
+        ]
+      }
+    },
+    "required": ["success", "data", "message"],
+    "additionalProperties": false
+  },
+  "namespace_isolation": {
+    "pattern": "agent:{agent_id}:{prefix}:{key}",
+    "description": "Each agent has isolated namespace preventing cross-agent access",
+    "access_control": "Agents can only access their own namespaced data",
+    "examples": [
+      "agent:user-123:state:preferences",
+      "agent:bot-assistant:scratchpad:working_memory",
+      "agent:task-runner:memory:context"
+    ]
+  },
+  "security_features": [
+    "Namespace isolation prevents cross-agent access",
+    "Agent access verification for all requests",
+    "Agent ID validation ensures proper format",
+    "Key pattern validation prevents injection",
+    "Result size limits prevent resource abuse",
+    "Rate limiting prevents excessive usage"
+  ],
+  "rate_limiting": {
+    "requests_per_minute": 180,
+    "requests_per_hour": 3000
+  },
+  "data_types": {
+    "state": {
+      "description": "Persistent agent state and configuration",
+      "ttl": "No automatic expiration",
+      "examples": ["user_preferences", "agent_config", "learned_patterns"]
+    },
+    "scratchpad": {
+      "description": "Temporary working data with TTL",
+      "ttl": "Automatic expiration (60s - 24h)",
+      "examples": ["working_memory", "current_task", "temp_calculations"]
+    },
+    "memory": {
+      "description": "Agent memory and context data",
+      "ttl": "Long-term storage",
+      "examples": [
+        "conversation_context",
+        "learned_facts",
+        "interaction_history"
+      ]
+    },
+    "config": {
+      "description": "Agent configuration and settings",
+      "ttl": "Persistent",
+      "examples": ["api_endpoints", "feature_flags", "permissions"]
+    }
+  },
+  "examples": {
+    "retrieve_specific_key": {
+      "input": {
+        "agent_id": "agent-123",
+        "key": "user_preferences",
+        "prefix": "state"
+      },
+      "expected_output": {
+        "success": true,
+        "data": {
+          "key": "user_preferences",
+          "content": "{\"theme\": \"dark\", \"language\": \"en\"}",
+          "namespaced_key": "agent:agent-123:state:user_preferences"
+        },
+        "message": "State retrieved successfully"
+      }
+    },
+    "list_scratchpad_keys": {
+      "input": {
+        "agent_id": "agent-123",
+        "prefix": "scratchpad"
+      },
+      "expected_output": {
+        "success": true,
+        "data": {
+          "working_memory": "Current task: implement login",
+          "progress_log": "Step 1: Requirements gathered\\nStep 2: Design completed"
+        },
+        "keys": ["working_memory", "progress_log"],
+        "message": "Retrieved 2 scratchpad entries",
+        "total_available": 2
+      }
+    },
+    "no_data_found": {
+      "input": {
+        "agent_id": "new-agent",
+        "prefix": "state"
+      },
+      "expected_output": {
+        "success": true,
+        "data": {},
+        "keys": [],
+        "message": "No state data found for agent"
+      }
+    },
+    "error_invalid_agent_id": {
+      "input": {
+        "agent_id": "invalid agent"
+      },
+      "expected_output": {
+        "success": false,
+        "data": {},
+        "message": "Invalid agent ID format: invalid agent",
+        "error_type": "invalid_agent_id"
+      }
+    },
+    "error_access_denied": {
+      "input": {
+        "agent_id": "agent-123",
+        "key": "restricted_data"
+      },
+      "expected_output": {
+        "success": false,
+        "data": {},
+        "message": "Access denied to requested resource",
+        "error_type": "access_denied"
+      }
+    }
+  }
+}

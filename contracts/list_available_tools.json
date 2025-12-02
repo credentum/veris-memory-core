@@ -1,0 +1,110 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "schema_version": "1.0",
+  "name": "list_available_tools",
+  "description": "List all available tools in the tool selector system",
+  "version": "1.0.0",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "category_filter": {
+        "type": "string",
+        "description": "Filter tools by category (optional)"
+      },
+      "include_metadata": {
+        "type": "boolean",
+        "default": true,
+        "description": "Include tool metadata in response"
+      },
+      "sort_by": {
+        "type": "string",
+        "enum": ["name", "category", "keywords"],
+        "default": "name",
+        "description": "Sort tools by specified field"
+      }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["success", "tools", "total_count"],
+    "properties": {
+      "success": {
+        "type": "boolean",
+        "description": "Whether the operation was successful"
+      },
+      "tools": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Tool name"
+            },
+            "description": {
+              "type": "string",
+              "description": "Tool description"
+            },
+            "category": {
+              "type": "string",
+              "description": "Tool category"
+            },
+            "keywords": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Tool keywords"
+            },
+            "metadata": {
+              "type": "object",
+              "description": "Additional tool metadata (if included)"
+            }
+          }
+        },
+        "description": "List of available tools"
+      },
+      "total_count": {
+        "type": "integer",
+        "description": "Total number of tools"
+      },
+      "categories": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Available categories"
+      },
+      "message": {
+        "type": "string",
+        "description": "Success or error message"
+      }
+    }
+  },
+  "examples": [
+    {
+      "input": {
+        "include_metadata": true,
+        "sort_by": "category"
+      },
+      "output": {
+        "success": true,
+        "tools": [
+          {
+            "name": "Code Analyzer",
+            "description": "Analyzes code structure, complexity, and patterns",
+            "category": "analysis",
+            "keywords": ["code", "analysis", "complexity"],
+            "metadata": { "file_path": "context/tools/code_analyzer.md" }
+          },
+          {
+            "name": "Debugger",
+            "description": "Interactive debugging tool",
+            "category": "debugging",
+            "keywords": ["debug", "debugging", "breakpoint"],
+            "metadata": { "file_path": "context/tools/debugger.md" }
+          }
+        ],
+        "total_count": 4,
+        "categories": ["analysis", "debugging", "testing", "performance"],
+        "message": "Listed 4 available tools"
+      }
+    }
+  ]
+}

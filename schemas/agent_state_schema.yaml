@@ -1,0 +1,299 @@
+---
+schema_version: "1.0"
+tool_name: "get_agent_state"
+description: "Retrieve agent state with namespace isolation and filtering"
+
+input_schema:
+  type: object
+  properties:
+    agent_id:
+      type: string
+      description: "Agent identifier for namespace isolation"
+      pattern: "^[a-zA-Z0-9_-]{1,64}$"
+      examples:
+        - "agent-123"
+        - "user_456"
+        - "bot-assistant"
+
+    key:
+      type: string
+      description: "Specific state key to retrieve (optional - omit for all keys)"
+      pattern: "^[a-zA-Z0-9_.-]{1,128}$"
+      examples:
+        - "working_memory"
+        - "current_task"
+        - "user_preferences"
+
+    prefix:
+      type: string
+      description: "State type to retrieve"
+      enum:
+        - "state"
+        - "scratchpad"
+        - "memory"
+        - "config"
+      default: "state"
+      examples:
+        - "state"
+        - "scratchpad"
+        - "memory"
+
+  required:
+    - agent_id
+
+output_schema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: "Whether the operation succeeded"
+
+    data:
+      oneOf:
+        - type: object
+          description: "Retrieved state data (single key)"
+          properties:
+            key:
+              type: string
+              description: "The requested key"
+            content:
+              type: string
+              description: "The stored content"
+            namespaced_key:
+              type: string
+              description: "The full namespaced key used"
+        - type: object
+          description: "Retrieved state data (multiple keys)"
+          additionalProperties:
+            type: string
+            description: "Content for each key"
+
+    keys:
+      type: array
+      description: "List of available keys (when retrieving all)"
+      items:
+        type: string
+
+    message:
+      type: string
+      description: "Success or error message"
+
+    total_available:
+      type: integer
+      description: "Total number of keys available (when listing)"
+
+    error_type:
+      type: string
+      description: "Classification of error type"
+      enum:
+        - "rate_limit"
+        - "invalid_agent_id"
+        - "invalid_prefix"
+        - "invalid_key"
+        - "access_denied"
+        - "key_not_found"
+        - "storage_unavailable"
+        - "storage_exception"
+        - "missing_parameter"
+        - "unexpected_error"
+
+  required:
+    - success
+    - data
+    - message
+
+namespace_isolation:
+  pattern: "agent:{agent_id}:{prefix}:{key}"
+  description: "Each agent has isolated namespace preventing cross-agent access"
+  access_control: "Agents can only access their own namespaced data"
+  examples:
+    - "agent:user-123:state:preferences"
+    - "agent:bot-assistant:scratchpad:working_memory"
+    - "agent:task-runner:memory:context"
+
+validation_rules:
+  agent_id:
+    pattern: "^[a-zA-Z0-9_-]{1,64}$"
+    description: "Alphanumeric, underscore, and hyphen only, 1-64 characters"
+
+  key:
+    pattern: "^[a-zA-Z0-9_.-]{1,128}$"
+    description: "Alphanumeric, underscore, dot, and hyphen only, 1-128 characters"
+    optional: true
+
+  prefix:
+    allowed_values:
+      - "state" # Persistent agent state
+      - "scratchpad" # Temporary working data
+      - "memory" # Agent memory/context
+      - "config" # Agent configuration
+    default: "state"
+
+storage_backend:
+  type: "Redis"
+  operations:
+    single_key: "GET with namespaced key"
+    multiple_keys: "KEYS pattern + GET for each key"
+  key_pattern: "agent:{agent_id}:{prefix}:{key}"
+  max_keys_returned: 100 # Limit for performance
+
+rate_limiting:
+  requests_per_minute: 180 # Higher limit for state retrieval
+  requests_per_hour: 3000
+
+security_features:
+  - "Namespace isolation prevents cross-agent access"
+  - "Agent access verification for all requests"
+  - "Agent ID validation ensures proper format"
+  - "Key pattern validation prevents injection"
+  - "Result size limits prevent resource abuse"
+  - "Rate limiting prevents excessive usage"
+
+access_patterns:
+  single_key_retrieval:
+    description: "Retrieve specific key for an agent"
+    example:
+      agent_id: "agent-123"
+      key: "user_preferences"
+      prefix: "state"
+    use_case: "Get specific configuration or state value"
+
+  list_all_keys:
+    description: "List all keys of a specific type for an agent"
+    example:
+      agent_id: "agent-123"
+      prefix: "scratchpad"
+    use_case: "Debug agent state or admin operations"
+
+  state_dump:
+    description: "Get all state data for an agent"
+    example:
+      agent_id: "agent-123"
+      prefix: "state"
+    use_case: "Agent initialization or context restoration"
+
+data_types:
+  state:
+    description: "Persistent agent state and configuration"
+    ttl: "No automatic expiration"
+    examples:
+      - "user_preferences"
+      - "agent_config"
+      - "learned_patterns"
+
+  scratchpad:
+    description: "Temporary working data with TTL"
+    ttl: "Automatic expiration (60s - 24h)"
+    examples:
+      - "working_memory"
+      - "current_task"
+      - "temp_calculations"
+
+  memory:
+    description: "Agent memory and context data"
+    ttl: "Long-term storage"
+    examples:
+      - "conversation_context"
+      - "learned_facts"
+      - "interaction_history"
+
+  config:
+    description: "Agent configuration and settings"
+    ttl: "Persistent"
+    examples:
+      - "api_endpoints"
+      - "feature_flags"
+      - "permissions"
+
+examples:
+  retrieve_specific_key:
+    input:
+      agent_id: "agent-123"
+      key: "user_preferences"
+      prefix: "state"
+    expected_output:
+      success: true
+      data:
+        key: "user_preferences"
+        content: '{"theme": "dark", "language": "en"}'
+        namespaced_key: "agent:agent-123:state:user_preferences"
+      message: "State retrieved successfully"
+
+  list_scratchpad_keys:
+    input:
+      agent_id: "agent-123"
+      prefix: "scratchpad"
+    expected_output:
+      success: true
+      data:
+        working_memory: "Current task: implement login"
+        progress_log: "Step 1: Requirements gathered\nStep 2: Design completed"
+      keys:
+        - "working_memory"
+        - "progress_log"
+      message: "Retrieved 2 scratchpad entries"
+      total_available: 2
+
+  no_data_found:
+    input:
+      agent_id: "new-agent"
+      prefix: "state"
+    expected_output:
+      success: true
+      data: {}
+      keys: []
+      message: "No state data found for agent"
+
+error_examples:
+  invalid_agent_id:
+    input:
+      agent_id: "invalid agent"
+    expected_output:
+      success: false
+      data: {}
+      message: "Invalid agent ID format: invalid agent"
+      error_type: "invalid_agent_id"
+
+  key_not_found:
+    input:
+      agent_id: "agent-123"
+      key: "nonexistent_key"
+    expected_output:
+      success: false
+      data: {}
+      message: "Key 'nonexistent_key' not found"
+      error_type: "key_not_found"
+
+  access_denied:
+    input:
+      agent_id: "agent-123"
+      key: "restricted_data"
+    expected_output:
+      success: false
+      data: {}
+      message: "Access denied to requested resource"
+      error_type: "access_denied"
+
+  invalid_prefix:
+    input:
+      agent_id: "agent-123"
+      prefix: "invalid_type"
+    expected_output:
+      success: false
+      data: {}
+      message: "Invalid prefix: invalid_type"
+      error_type: "invalid_prefix"
+
+performance_considerations:
+  - "Single key retrieval: O(1) operation"
+  - "Multiple key listing: O(n) where n is number of keys"
+  - "Result size limited to 100 keys maximum"
+  - "Memory usage proportional to data size"
+  - "Network transfer optimized for JSON serialization"
+
+monitoring_metrics:
+  - "Request count by agent_id and prefix"
+  - "Response time percentiles"
+  - "Error rate by error_type"
+  - "Data size transferred"
+  - "Cache hit/miss ratios (if caching implemented)"

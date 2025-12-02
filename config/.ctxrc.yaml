@@ -1,0 +1,200 @@
+# Context Store Configuration for Fly.io Production Deployment
+# Production configuration for Veris Memory
+
+# System configuration
+system:
+  environment: production
+  debug: false
+
+# Embedding configuration - ALIGNED WITH PRODUCTION LOCKED CONFIG
+# Note: Key is "embeddings" (plural) to match EmbeddingConfig expectations
+embeddings:
+  provider: huggingface  # Required: huggingface, openai, or development
+  dimensions: 384
+  model: sentence-transformers/all-MiniLM-L6-v2  # Full HuggingFace model path
+  batch_size: 50
+  max_retries: 3
+  timeout: 30
+
+# Reranker configuration for improved precision
+reranker:
+  enabled: true
+  model: cross-encoder/ms-marco-MiniLM-L-6-v2
+  top_k: 20          # Number of results to rerank
+  return_k: 5        # Number of results to return after reranking
+  score_threshold: -1000.0  # Minimum score threshold (very permissive)
+
+# Hybrid retrieval configuration (dense + lexical + graph)
+hybrid_retrieval:
+  enabled: true
+  alpha: 0.6         # Dense vector weight
+  beta: 0.35         # Lexical/BM25 weight  
+  gamma: 0.05        # Graph relationship boost weight
+  normalization: min_max  # Score normalization method
+
+# Advanced chunking configuration
+chunking:
+  target_tokens: 700      # Target chunk size (600-800 range)
+  overlap_tokens: 80      # Overlap between chunks
+  min_chunk_tokens: 100   # Minimum viable chunk size
+  max_chunk_tokens: 1000  # Maximum chunk size
+  inject_metadata: true   # Include doc title/headers in chunks
+  strip_boilerplate: true # Remove TOC/navigation content
+  preserve_structure: true # Maintain document structure
+
+# Storage configuration
+storage:
+  backend: multi
+  primary: neo4j
+  cache: redis
+  analytics: duckdb
+
+# Agent configuration
+agents:
+  max_concurrent: 10
+  timeout: 300
+  retry_policy:
+    max_attempts: 3
+    backoff_multiplier: 2
+
+# Database configurations
+qdrant:
+  host: localhost
+  port: 6333
+  # Collection name for vector storage (should match QDRANT_COLLECTION_NAME env var in docker-compose.yml)
+  collection_name: context_embeddings
+  ssl: false
+  grpc_port: 6334
+  prefer_grpc: false
+  connection_pool:
+    min_size: 2
+    max_size: 10
+  # Optimized HNSW parameters for better precision
+  hnsw:
+    m: 32                    # Number of connections per node (recommended: 32+)
+    ef_construct: 256        # Size of candidate set during construction
+  search:
+    ef_search: 256           # Size of candidate set during search (recommended: 256+)
+    distance: cosine         # Distance metric (cosine for semantic similarity)
+    enable_payload_index: true  # Enable full-text search on payload
+
+neo4j:
+  uri: bolt://localhost:7687
+  database: neo4j
+  ssl: false
+  connection_pool:
+    min_size: 2
+    max_size: 10
+    acquisition_timeout: 30
+    max_lifetime: 3600
+  # Read-only credentials for query_graph security
+  readonly:
+    enabled: true
+    username: veris_ro
+    # Password set via NEO4J_RO_PASSWORD environment variable
+
+redis:
+  host: localhost
+  port: 6379
+  database: 0
+  ssl: false
+  connection_pool:
+    min_size: 2
+    max_size: 20
+    socket_timeout: 5
+    socket_connect_timeout: 5
+
+duckdb:
+  database_path: /app/data/analytics.db
+  threads: 2
+  memory_limit: 1GB
+  temp_directory: /app/data/tmp
+
+# MCP Server configuration
+mcp:
+  server_port: 8000
+  host: 0.0.0.0
+  tools:
+    - store_context
+    - retrieve_context
+    - query_graph
+  cors:
+    enabled: true
+    origins:
+      - "*"
+
+# Security configuration
+security:
+  max_query_length: 10000
+  query_timeout: 30
+  allowed_operations:
+    - MATCH
+    - WITH
+    - RETURN
+    - WHERE
+    - ORDER BY
+    - LIMIT
+    - SKIP
+  forbidden_operations:
+    - CREATE
+    - DELETE
+    - SET
+    - REMOVE
+    - MERGE
+    - DROP
+  rate_limiting:
+    enabled: true
+    requests_per_minute: 60
+    burst_size: 10
+
+# Cache configuration
+cache:
+  ttl_seconds: 3600
+  max_size: 1000
+  eviction_policy: lru
+
+# Logging configuration
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: /app/data/logs/app.log
+  max_bytes: 10485760 # 10MB
+  backup_count: 5
+
+# Monitoring configuration
+monitoring:
+  enabled: true
+  metrics_port: 9090
+  health_check_path: /health
+  readiness_check_path: /ready
+
+# Performance tuning for 8GB memory
+performance:
+  vector_db:
+    embedding:
+      batch_size: 50
+      max_retries: 3
+      request_timeout: 30
+    search:
+      default_limit: 10
+      max_limit: 100
+      score_threshold: 0.7
+  graph_db:
+    connection_pool:
+      min_size: 2
+      max_size: 10
+    query:
+      max_path_length: 5
+      timeout: 30
+  kv_store:
+    redis:
+      connection_pool:
+        min_size: 2
+        max_size: 20
+      cache:
+        ttl_seconds: 3600
+    duckdb:
+      batch_insert:
+        size: 500
+      analytics:
+        retention_days: 90

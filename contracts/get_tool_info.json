@@ -1,0 +1,114 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "schema_version": "1.0",
+  "name": "get_tool_info",
+  "description": "Get detailed information about a specific tool",
+  "version": "1.0.0",
+  "inputSchema": {
+    "type": "object",
+    "required": ["tool_name"],
+    "properties": {
+      "tool_name": {
+        "type": "string",
+        "description": "Name of the tool to get information about"
+      },
+      "include_usage_examples": {
+        "type": "boolean",
+        "default": true,
+        "description": "Include usage examples if available"
+      }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["success"],
+    "properties": {
+      "success": {
+        "type": "boolean",
+        "description": "Whether the tool was found"
+      },
+      "tool": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Tool name"
+          },
+          "description": {
+            "type": "string",
+            "description": "Tool description"
+          },
+          "category": {
+            "type": "string",
+            "description": "Tool category"
+          },
+          "keywords": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Tool keywords"
+          },
+          "metadata": {
+            "type": "object",
+            "description": "Additional tool metadata"
+          },
+          "documentation": {
+            "type": "string",
+            "description": "Full tool documentation if available"
+          },
+          "usage_examples": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "description": {
+                  "type": "string",
+                  "description": "Description of the usage example"
+                },
+                "language": {
+                  "type": "string",
+                  "description": "Programming language or format"
+                },
+                "code": {
+                  "type": "string",
+                  "description": "The example code"
+                }
+              }
+            },
+            "description": "Usage examples extracted from documentation"
+          }
+        },
+        "description": "Detailed tool information"
+      },
+      "message": {
+        "type": "string",
+        "description": "Success or error message"
+      }
+    }
+  },
+  "examples": [
+    {
+      "input": {
+        "tool_name": "Code Analyzer",
+        "include_usage_examples": true
+      },
+      "output": {
+        "success": true,
+        "tool": {
+          "name": "Code Analyzer",
+          "description": "Analyzes code structure, complexity, and patterns to provide insights",
+          "category": "analysis",
+          "keywords": [
+            "code",
+            "analysis",
+            "complexity",
+            "structure",
+            "patterns"
+          ],
+          "metadata": { "file_path": "context/tools/code_analyzer.md" },
+          "documentation": "# Code Analyzer\n\n## Description\nAnalyzes code structure..."
+        },
+        "message": "Tool information retrieved successfully"
+      }
+    }
+  ]
+}

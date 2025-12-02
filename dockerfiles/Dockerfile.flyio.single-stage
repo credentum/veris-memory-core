@@ -1,0 +1,104 @@
+# Multi-service Dockerfile for Fly.io deployment
+# Runs all services: MCP Server + Qdrant + Neo4j + Redis on one machine
+FROM ubuntu:22.04@sha256:965fbcae990b0467ed5657caceaec165018ef44a4d2d46c7cdea80a9dff0d1ea
+
+# Prevent interactive prompts during apt install
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    # Python and pip
+    python3.11 \
+    python3.11-venv \
+    python3-pip \
+    # Java for Neo4j
+    openjdk-11-jre-headless \
+    # System utilities
+    curl \
+    wget \
+    supervisor \
+    netcat-openbsd \
+    # Redis
+    redis-server \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create application directory
+WORKDIR /app
+
+# Install Qdrant with mandatory checksum verification
+RUN QDRANT_VERSION=1.14.0 \
+    && QDRANT_URL="https://github.com/qdrant/qdrant/releases/download/v${QDRANT_VERSION}/qdrant-x86_64-unknown-linux-gnu.tar.gz" \
+    && EXPECTED_SHA256="28e344971b38fc4682b8a7bf4952be6bb46f6f6604b0630a79db897164d2cc12" \
+    && wget "${QDRANT_URL}" -O qdrant.tar.gz \
+    && echo "Verifying Qdrant binary checksum..." \
+    && ACTUAL_SHA256=$(sha256sum qdrant.tar.gz | cut -d' ' -f1) \
+    && echo "Expected: ${EXPECTED_SHA256}" \
+    && echo "Actual:   ${ACTUAL_SHA256}" \
+    && if [ "${ACTUAL_SHA256}" != "${EXPECTED_SHA256}" ]; then \
+        echo "ERROR: Checksum verification failed! Aborting build for security." && exit 1; \
+    fi \
+    && echo "Checksum verification passed" \
+    && tar xzf qdrant.tar.gz \
+    && mv qdrant /usr/local/bin/ \
+    && rm qdrant.tar.gz
+
+# Install Neo4j with proper GPG verification
+RUN mkdir -p /etc/apt/keyrings \
+    && wget -O - https://debian.neo4j.com/neotechnology.gpg.key | gpg --dearmor -o /etc/apt/keyrings/neo4j.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/neo4j.gpg] https://debian.neo4j.com stable 5.x" > /etc/apt/sources.list.d/neo4j.list \
+    && apt-get update \
+    && apt-get install -y neo4j=1:5.15.0-1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create data directories
+RUN mkdir -p /app/data/qdrant /app/data/neo4j /app/data/redis /app/logs \
+    && mkdir -p /var/lib/neo4j/data /var/lib/neo4j/logs
+
+# Copy Python application
+COPY requirements.txt requirements-dev.txt ./
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+COPY src/ ./src/
+COPY schemas/ ./schemas/
+COPY contracts/ ./contracts/
+
+# Copy configuration files
+COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY start-services.sh /app/start-services.sh
+RUN chmod +x /app/start-services.sh
+
+# Configure Redis (memory limits will be set dynamically in start script)
+RUN echo "bind 127.0.0.1" >> /etc/redis/redis.conf \
+    && echo "port 6379" >> /etc/redis/redis.conf \
+    && echo "dir /app/data/redis" >> /etc/redis/redis.conf \
+    && echo "maxmemory-policy allkeys-lru" >> /etc/redis/redis.conf
+
+# Configure Neo4j
+ENV NEO4J_HOME=/var/lib/neo4j
+# Neo4j password will be set via environment variable NEO4J_PASSWORD at runtime
+RUN echo "server.default_listen_address=0.0.0.0" >> /var/lib/neo4j/conf/neo4j.conf \
+    && echo "server.bolt.listen_address=0.0.0.0:7687" >> /var/lib/neo4j/conf/neo4j.conf \
+    && echo "server.http.listen_address=0.0.0.0:7474" >> /var/lib/neo4j/conf/neo4j.conf \
+    && echo "server.directories.data=/app/data/neo4j" >> /var/lib/neo4j/conf/neo4j.conf \
+    && echo "server.directories.logs=/app/logs" >> /var/lib/neo4j/conf/neo4j.conf
+
+# Expose ports
+EXPOSE 8000 6333 6334 7474 7687 6379
+
+# Environment variables
+ENV QDRANT_URL=http://localhost:6333
+ENV NEO4J_URI=bolt://localhost:7687
+ENV NEO4J_USER=neo4j
+ENV NEO4J_PASSWORD=changeme123
+ENV REDIS_URL=redis://localhost:6379
+ENV MCP_SERVER_PORT=8000
+ENV LOG_LEVEL=info
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Start all services using supervisor
+CMD ["/app/start-services.sh"]

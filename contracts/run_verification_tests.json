@@ -1,0 +1,366 @@
+{
+  "schema_version": "1.0", 
+  "tool_name": "run_verification_tests",
+  "description": "Execute standalone verification tests for TLS/mTLS configuration and backup restore procedures",
+  "version": "1.0.0",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "test_type": {
+        "type": "string",
+        "description": "Type of verification test to run",
+        "enum": ["tls", "restore_drill", "comprehensive", "quick"],
+        "examples": ["tls", "restore_drill", "comprehensive", "quick"]
+      },
+      "config": {
+        "type": "object",
+        "description": "Test configuration parameters",
+        "properties": {
+          "target_restore_time_seconds": {
+            "type": "integer",
+            "description": "Maximum allowed restore time for backup drills",
+            "minimum": 60,
+            "maximum": 3600,
+            "default": 300
+          },
+          "connection_timeout_seconds": {
+            "type": "integer",
+            "description": "Network connection timeout for TLS tests", 
+            "minimum": 5,
+            "maximum": 60,
+            "default": 10
+          },
+          "certificate_warning_days": {
+            "type": "integer",
+            "description": "Certificate expiry warning threshold in days",
+            "minimum": 1,
+            "maximum": 365,
+            "default": 30
+          },
+          "services_to_test": {
+            "type": "array",
+            "description": "Services to test for TLS verification",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {"type": "string"},
+                "host": {"type": "string"},
+                "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+                "requires_client_cert": {"type": "boolean", "default": false}
+              },
+              "required": ["name", "host", "port"]
+            },
+            "default": [
+              {"name": "Veris API", "host": "localhost", "port": 8080},
+              {"name": "Qdrant Vector DB", "host": "localhost", "port": 6334},
+              {"name": "Neo4j Graph DB", "host": "localhost", "port": 7687}
+            ]
+          },
+          "databases_to_test": {
+            "type": "array",
+            "description": "Databases to test for restore drills",
+            "items": {
+              "type": "string",
+              "enum": ["redis", "qdrant", "neo4j"]
+            },
+            "uniqueItems": true,
+            "default": ["redis", "qdrant", "neo4j"]
+          },
+          "cleanup_after_test": {
+            "type": "boolean",
+            "description": "Clean up temporary test files after completion",
+            "default": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_format": {
+        "type": "string", 
+        "description": "Format for test results output",
+        "enum": ["json", "summary", "detailed"],
+        "default": "json",
+        "examples": ["json", "summary", "detailed"]
+      }
+    },
+    "required": ["test_type"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "success": {
+        "type": "boolean",
+        "description": "Whether the verification test completed successfully"
+      },
+      "test_type": {
+        "type": "string",
+        "description": "Type of test that was executed"
+      },
+      "timestamp": {
+        "type": "string",
+        "format": "date-time",
+        "description": "Test execution timestamp"
+      },
+      "duration_seconds": {
+        "type": "number",
+        "description": "Total test execution time",
+        "minimum": 0
+      },
+      "results": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "TLS verification test results",
+            "properties": {
+              "total_services_tested": {"type": "integer", "minimum": 0},
+              "tls_enabled_services": {"type": "integer", "minimum": 0},
+              "valid_certificates": {"type": "integer", "minimum": 0}, 
+              "certificates_expiring_soon": {"type": "integer", "minimum": 0},
+              "overall_tls_health": {"type": "string", "enum": ["PASS", "WARNING", "FAIL"]},
+              "service_results": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "service_name": {"type": "string"},
+                    "host": {"type": "string"},
+                    "port": {"type": "integer"},
+                    "tls_enabled": {"type": "boolean"},
+                    "certificate_valid": {"type": "boolean"},
+                    "certificate_expires": {"type": "string", "format": "date-time"},
+                    "cipher_suite": {"type": "string"},
+                    "protocol_version": {"type": "string"},
+                    "error_message": {"type": "string"}
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object", 
+            "description": "Backup restore drill results",
+            "properties": {
+              "databases_tested": {"type": "integer", "minimum": 0},
+              "successful_restores": {"type": "integer", "minimum": 0},
+              "failed_restores": {"type": "integer", "minimum": 0},
+              "target_compliance": {"type": "boolean"},
+              "data_integrity_pass_rate": {"type": "number", "minimum": 0, "maximum": 100},
+              "max_restore_time": {"type": "number", "minimum": 0},
+              "restore_results": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "database_type": {"type": "string"},
+                    "backup_file": {"type": "string"},
+                    "restore_duration_seconds": {"type": "number"},
+                    "success": {"type": "boolean"},
+                    "data_integrity_verified": {"type": "boolean"},
+                    "restored_size_gb": {"type": "number"},
+                    "target_compliance": {"type": "boolean"},
+                    "error_message": {"type": "string"}
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Comprehensive test results",
+            "properties": {
+              "overall_status": {"type": "string", "enum": ["PASS", "WARNING", "FAIL"]},
+              "tls_results": {"type": "object"},
+              "restore_results": {"type": "object"},
+              "recommendations": {
+                "type": "array",
+                "items": {"type": "string"}
+              }
+            }
+          }
+        ]
+      },
+      "output_format": {
+        "type": "string",
+        "description": "Format of the returned results"
+      },
+      "message": {
+        "type": "string",
+        "description": "Test completion message or error description"
+      },
+      "warnings": {
+        "type": "array",
+        "description": "Non-critical warnings encountered during testing",
+        "items": {"type": "string"}
+      },
+      "errors": {
+        "type": "array",
+        "description": "Errors encountered during test execution",
+        "items": {"type": "string"}
+      },
+      "error_type": {
+        "type": "string",
+        "description": "Classification of test execution error",
+        "enum": [
+          "invalid_test_type",
+          "configuration_error",
+          "test_execution_failed",
+          "timeout",
+          "insufficient_permissions",
+          "service_unavailable",
+          "unexpected_error"
+        ]
+      }
+    },
+    "required": ["success", "test_type", "timestamp", "results", "message"],
+    "additionalProperties": false
+  },
+  "test_types": {
+    "tls": {
+      "description": "TLS/mTLS configuration verification",
+      "tests": [
+        "Certificate validation and expiry checking",
+        "Cipher suite security assessment",
+        "Protocol version compliance",
+        "Client certificate authentication (mTLS)"
+      ],
+      "typical_duration": "30-60 seconds",
+      "requirements": ["Network connectivity to target services"]
+    },
+    "restore_drill": {
+      "description": "Backup restore procedure testing",
+      "tests": [
+        "Redis AOF restore simulation",
+        "Qdrant snapshot restore simulation", 
+        "Neo4j dump restore simulation",
+        "Timing and integrity verification"
+      ],
+      "typical_duration": "2-5 minutes",
+      "requirements": ["Temporary disk space for test artifacts"]
+    },
+    "comprehensive": {
+      "description": "Complete verification test suite",
+      "tests": [
+        "All TLS verification tests",
+        "All backup restore drill tests",
+        "Cross-component integration checks",
+        "Performance and compliance assessment"
+      ],
+      "typical_duration": "3-8 minutes",
+      "requirements": ["Network connectivity and disk space"]
+    },
+    "quick": {
+      "description": "Fast verification check",
+      "tests": [
+        "Basic TLS connectivity checks",
+        "Basic restore capability checks",
+        "High-level status verification"
+      ],
+      "typical_duration": "10-30 seconds",
+      "requirements": ["Minimal system resources"]
+    }
+  },
+  "security_features": [
+    "No sensitive data exposure in test results",
+    "Temporary test files cleaned up automatically",
+    "Rate limiting prevents test abuse",
+    "Input validation prevents configuration injection",
+    "Mock implementations for safe testing"
+  ],
+  "rate_limiting": {
+    "requests_per_minute": 10,
+    "requests_per_hour": 120,
+    "concurrent_tests_per_client": 1
+  },
+  "examples": {
+    "run_tls_verification": {
+      "input": {
+        "test_type": "tls",
+        "output_format": "json"
+      },
+      "expected_output": {
+        "success": true,
+        "test_type": "tls",
+        "timestamp": "2025-08-14T18:41:00Z",
+        "duration_seconds": 45.3,
+        "results": {
+          "total_services_tested": 3,
+          "tls_enabled_services": 2,
+          "valid_certificates": 2,
+          "certificates_expiring_soon": 0,
+          "overall_tls_health": "PASS",
+          "service_results": [
+            {
+              "service_name": "Veris API",
+              "host": "localhost", 
+              "port": 8080,
+              "tls_enabled": true,
+              "certificate_valid": true,
+              "certificate_expires": "2025-11-14T18:41:00Z",
+              "cipher_suite": "ECDHE-RSA-AES256-GCM-SHA384",
+              "protocol_version": "TLSv1.3"
+            }
+          ]
+        },
+        "output_format": "json",
+        "message": "TLS verification completed successfully"
+      }
+    },
+    "run_restore_drill": {
+      "input": {
+        "test_type": "restore_drill",
+        "config": {
+          "target_restore_time_seconds": 300,
+          "databases_to_test": ["redis", "qdrant"]
+        },
+        "output_format": "summary"
+      },
+      "expected_output": {
+        "success": true,
+        "test_type": "restore_drill",
+        "timestamp": "2025-08-14T18:41:00Z", 
+        "duration_seconds": 125.7,
+        "results": {
+          "databases_tested": 2,
+          "successful_restores": 2,
+          "failed_restores": 0,
+          "target_compliance": true,
+          "data_integrity_pass_rate": 100.0,
+          "max_restore_time": 142.3
+        },
+        "output_format": "summary",
+        "message": "Backup restore drill completed - all tests passed"
+      }
+    },
+    "run_quick_check": {
+      "input": {
+        "test_type": "quick",
+        "output_format": "summary"
+      },
+      "expected_output": {
+        "success": true,
+        "test_type": "quick",
+        "timestamp": "2025-08-14T18:41:00Z",
+        "duration_seconds": 15.2,
+        "results": {
+          "overall_status": "PASS",
+          "tls_results": {"overall_tls_health": "PASS"},
+          "restore_results": {"target_compliance": true}
+        },
+        "message": "Quick verification check passed"
+      }
+    },
+    "error_invalid_test_type": {
+      "input": {
+        "test_type": "invalid_test"
+      },
+      "expected_output": {
+        "success": false,
+        "test_type": "invalid_test",
+        "timestamp": "2025-08-14T18:41:00Z",
+        "results": {},
+        "message": "Invalid test type: invalid_test",
+        "error_type": "invalid_test_type"
+      }
+    }
+  }
+}

@@ -1,0 +1,321 @@
+{
+  "schema_version": "1.0",
+  "tool_name": "get_dashboard_metrics",
+  "description": "Retrieve comprehensive system monitoring dashboard metrics including system resources, service health, and security status",
+  "version": "1.0.0",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "format": {
+        "type": "string",
+        "description": "Output format for dashboard data",
+        "enum": ["json", "ascii"],
+        "default": "json",
+        "examples": ["json", "ascii"]
+      },
+      "sections": {
+        "type": "array",
+        "description": "Specific dashboard sections to retrieve (optional - omit for all sections)",
+        "items": {
+          "type": "string",
+          "enum": ["system", "services", "veris", "security", "backups"]
+        },
+        "uniqueItems": true,
+        "examples": [["system", "services"], ["security"], ["system", "veris", "backups"]]
+      },
+      "force_refresh": {
+        "type": "boolean",
+        "description": "Force refresh of metrics bypassing cache",
+        "default": false,
+        "examples": [true, false]
+      }
+    },
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "success": {
+        "type": "boolean",
+        "description": "Whether the operation succeeded"
+      },
+      "format": {
+        "type": "string",
+        "description": "Format of returned data",
+        "enum": ["json", "ascii"]
+      },
+      "data": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "JSON format dashboard metrics",
+            "properties": {
+              "timestamp": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Timestamp of metrics collection"
+              },
+              "system": {
+                "type": "object",
+                "description": "System resource metrics",
+                "properties": {
+                  "cpu_percent": {"type": "number", "minimum": 0, "maximum": 100},
+                  "memory_total_gb": {"type": "number", "minimum": 0},
+                  "memory_used_gb": {"type": "number", "minimum": 0},
+                  "memory_percent": {"type": "number", "minimum": 0, "maximum": 100},
+                  "disk_total_gb": {"type": "number", "minimum": 0},
+                  "disk_used_gb": {"type": "number", "minimum": 0},
+                  "disk_percent": {"type": "number", "minimum": 0, "maximum": 100},
+                  "load_average": {
+                    "type": "array",
+                    "items": {"type": "number", "minimum": 0},
+                    "minItems": 3,
+                    "maxItems": 3
+                  },
+                  "uptime_hours": {"type": "number", "minimum": 0}
+                }
+              },
+              "services": {
+                "type": "array",
+                "description": "Service health status",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {"type": "string"},
+                    "status": {"type": "string", "enum": ["healthy", "unhealthy", "unknown"]},
+                    "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+                    "uptime_hours": {"type": "number", "minimum": 0},
+                    "memory_mb": {"type": "number", "minimum": 0},
+                    "operations_per_sec": {"type": "integer", "minimum": 0},
+                    "connections": {"type": "integer", "minimum": 0}
+                  },
+                  "required": ["name", "status", "port"]
+                }
+              },
+              "veris": {
+                "type": "object",
+                "description": "Veris Memory specific metrics",
+                "properties": {
+                  "total_memories": {"type": "integer", "minimum": 0},
+                  "memories_today": {"type": "integer", "minimum": 0},
+                  "avg_query_latency_ms": {"type": "number", "minimum": 0},
+                  "p99_latency_ms": {"type": "number", "minimum": 0},
+                  "error_rate_percent": {"type": "number", "minimum": 0, "maximum": 100},
+                  "active_agents": {"type": "integer", "minimum": 0},
+                  "successful_operations_24h": {"type": "integer", "minimum": 0},
+                  "failed_operations_24h": {"type": "integer", "minimum": 0}
+                }
+              },
+              "security": {
+                "type": "object",
+                "description": "Security monitoring metrics",
+                "properties": {
+                  "failed_auth_attempts": {"type": "integer", "minimum": 0},
+                  "blocked_ips": {"type": "integer", "minimum": 0},
+                  "waf_blocks_today": {"type": "integer", "minimum": 0},
+                  "ssl_cert_expiry_days": {"type": "integer", "minimum": 0},
+                  "rbac_violations": {"type": "integer", "minimum": 0},
+                  "audit_events_24h": {"type": "integer", "minimum": 0}
+                }
+              },
+              "backups": {
+                "type": "object",
+                "description": "Backup and disaster recovery status",
+                "properties": {
+                  "last_backup_time": {"type": "string", "format": "date-time"},
+                  "backup_size_gb": {"type": "number", "minimum": 0},
+                  "restore_tested": {"type": "boolean"},
+                  "last_restore_time_seconds": {"type": "number", "minimum": 0},
+                  "backup_success_rate_percent": {"type": "number", "minimum": 0, "maximum": 100},
+                  "offsite_sync_status": {"type": "string", "enum": ["healthy", "degraded", "failed"]}
+                }
+              }
+            }
+          },
+          {
+            "type": "string",
+            "description": "ASCII format dashboard output with progress bars and emojis"
+          }
+        ]
+      },
+      "message": {
+        "type": "string",
+        "description": "Success or error message"
+      },
+      "cache_info": {
+        "type": "object",
+        "description": "Cache information",
+        "properties": {
+          "cache_hit": {"type": "boolean"},
+          "cache_age_seconds": {"type": "number", "minimum": 0},
+          "refresh_forced": {"type": "boolean"}
+        }
+      },
+      "collection_time_ms": {
+        "type": "number",
+        "description": "Time taken to collect metrics in milliseconds",
+        "minimum": 0
+      },
+      "error_type": {
+        "type": "string",
+        "description": "Classification of error type",
+        "enum": [
+          "metrics_collection_failed",
+          "invalid_format",
+          "invalid_sections",
+          "cache_error",
+          "timeout",
+          "service_unavailable",
+          "unexpected_error"
+        ]
+      }
+    },
+    "required": ["success", "format", "data", "message"],
+    "additionalProperties": false
+  },
+  "security_features": [
+    "No sensitive data exposure in metrics",
+    "Rate limiting prevents resource abuse",
+    "Input validation prevents injection attacks",
+    "Cache prevents excessive system load"
+  ],
+  "rate_limiting": {
+    "requests_per_minute": 60,
+    "requests_per_hour": 1800
+  },
+  "caching": {
+    "default_ttl_seconds": 30,
+    "force_refresh_available": true,
+    "description": "Metrics are cached to reduce system load"
+  },
+  "dashboard_sections": {
+    "system": {
+      "description": "CPU, memory, disk, load average, and uptime metrics",
+      "refresh_interval": "Real-time",
+      "examples": ["CPU usage", "memory consumption", "disk space"]
+    },
+    "services": {
+      "description": "Health status of core services (Redis, Neo4j, Qdrant, MCP Server)",
+      "refresh_interval": "30 seconds",
+      "examples": ["service availability", "connection counts", "response times"]
+    },
+    "veris": {
+      "description": "Veris Memory specific operational metrics",
+      "refresh_interval": "30 seconds", 
+      "examples": ["total memories stored", "query performance", "error rates"]
+    },
+    "security": {
+      "description": "Security monitoring and compliance status",
+      "refresh_interval": "60 seconds",
+      "examples": ["authentication failures", "WAF blocks", "certificate expiry"]
+    },
+    "backups": {
+      "description": "Backup and disaster recovery status",
+      "refresh_interval": "300 seconds",
+      "examples": ["last backup time", "restore test results", "offsite sync"]
+    }
+  },
+  "examples": {
+    "get_full_dashboard_json": {
+      "input": {
+        "format": "json",
+        "force_refresh": false
+      },
+      "expected_output": {
+        "success": true,
+        "format": "json",
+        "data": {
+          "timestamp": "2025-08-14T18:41:00Z",
+          "system": {
+            "cpu_percent": 0.9,
+            "memory_total_gb": 62.7,
+            "memory_used_gb": 2.9,
+            "memory_percent": 5.8,
+            "disk_total_gb": 435.8,
+            "disk_used_gb": 70.5,
+            "disk_percent": 16.2,
+            "load_average": [0.12, 0.25, 0.26],
+            "uptime_hours": 168.8
+          },
+          "services": [
+            {
+              "name": "Redis",
+              "status": "healthy",
+              "port": 6379,
+              "uptime_hours": 24.5,
+              "connections": 12
+            }
+          ],
+          "veris": {
+            "total_memories": 84532,
+            "memories_today": 1247,
+            "avg_query_latency_ms": 23.0,
+            "p99_latency_ms": 89.0,
+            "error_rate_percent": 0.02,
+            "active_agents": 5
+          }
+        },
+        "message": "Dashboard metrics retrieved successfully",
+        "cache_info": {
+          "cache_hit": true,
+          "cache_age_seconds": 15,
+          "refresh_forced": false
+        },
+        "collection_time_ms": 45
+      }
+    },
+    "get_ascii_dashboard": {
+      "input": {
+        "format": "ascii"
+      },
+      "expected_output": {
+        "success": true,
+        "format": "ascii",
+        "data": "🎯 VERIS MEMORY STATUS - Thu Aug 14 18:41 UTC\n════════════════════════════════════════════════\n\n💾 SYSTEM RESOURCES\nCPU    [░░░░░░░░░░] 0.9% ✅ HEALTHY\nMemory [░░░░░░░░░░] 5.8% (2.9GB/62.7GB) ✅ HEALTHY\nDisk   [█░░░░░░░░░] 16.2% (70.5GB/435.8GB) ✅ HEALTHY\n\n🧠 VERIS METRICS\nTotal Memories: 84,532 (+1,247 today ↗️)\nQuery Latency:  23ms avg | 89ms p99 ⚡ FAST\nError Rate:     0.02% 🎯 EXCELLENT",
+        "message": "ASCII dashboard generated successfully"
+      }
+    },
+    "get_specific_sections": {
+      "input": {
+        "format": "json",
+        "sections": ["system", "security"],
+        "force_refresh": true
+      },
+      "expected_output": {
+        "success": true,
+        "format": "json",
+        "data": {
+          "timestamp": "2025-08-14T18:41:00Z",
+          "system": {
+            "cpu_percent": 0.9,
+            "memory_percent": 5.8,
+            "disk_percent": 16.2
+          },
+          "security": {
+            "failed_auth_attempts": 0,
+            "blocked_ips": 0,
+            "waf_blocks_today": 5,
+            "ssl_cert_expiry_days": 87
+          }
+        },
+        "message": "Dashboard sections retrieved successfully",
+        "cache_info": {
+          "cache_hit": false,
+          "refresh_forced": true
+        }
+      }
+    },
+    "error_invalid_format": {
+      "input": {
+        "format": "xml"
+      },
+      "expected_output": {
+        "success": false,
+        "format": "json",
+        "data": {},
+        "message": "Invalid format specified: xml",
+        "error_type": "invalid_format"
+      }
+    }
+  }
+}

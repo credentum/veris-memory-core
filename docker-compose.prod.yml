@@ -1,0 +1,151 @@
+
+services:
+  # Context Store MCP Server - PRODUCTION Environment (alternate ports)
+  context-store:
+    build:
+      context: .
+      dockerfile: dockerfiles/Dockerfile
+    container_name: veris-memory-prod-api
+    ports:
+      - "127.0.0.1:8001:8000"  # Production API on 8001
+      - "127.0.0.1:8080:8080"  # Production monitoring dashboard on 8080
+    environment:
+      - ENVIRONMENT=production
+      - QDRANT_URL=http://qdrant:6333
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - NEO4J_RO_PASSWORD=${NEO4J_RO_PASSWORD}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - MCP_SERVER_PORT=8000
+      - DASHBOARD_PORT=8080
+      - LOG_LEVEL=info
+      # Monitoring configuration
+      - MONITORING_ENABLED=true
+      - METRICS_COLLECTION_INTERVAL=30
+      - ANALYTICS_RATE_LIMIT_PER_MIN=5
+      - DASHBOARD_RATE_LIMIT_PER_MIN=20
+      # Security settings for production
+      - ENABLE_CORS=false
+      - TRUSTED_HOSTS=127.0.0.1,localhost
+      - DASHBOARD_AUTH_REQUIRED=true
+      - ANALYTICS_AUTH_TOKEN=${ANALYTICS_AUTH_TOKEN}
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - veris-prod-network
+    # Resource limits for production stability
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+    # Health check for the main service
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Vector Database (Qdrant) - PRODUCTION
+  qdrant:
+    image: qdrant/qdrant:v1.15.1@sha256:d122138f76868edba68d36cb0833139c1d1761f00f09e48e61f8314196e6a4c6  # SECURITY: Pinned with SHA256
+    platform: linux/amd64
+    container_name: veris-memory-prod-qdrant
+    ports:
+      - "127.0.0.1:6334:6333"  # Production Qdrant on 6334
+      - "127.0.0.1:6335:6334"  # Production gRPC on 6335
+    volumes:
+      - qdrant_prod_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - veris-prod-network
+
+  # Graph Database (Neo4j) - PRODUCTION
+  neo4j:
+    image: neo4j:5.15-community@sha256:8e99853b616c90eb6bb973e96b2a3bb9538a37c31a946e0c87f00cbec7ee50d1
+    platform: linux/amd64
+    container_name: veris-memory-prod-neo4j
+    ports:
+      - "127.0.0.1:7475:7474"  # Production HTTP on 7475
+      - "127.0.0.1:7688:7687"  # Production Bolt on 7688
+    volumes:
+      - neo4j_prod_data:/data
+      - neo4j_prod_logs:/logs
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD}
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_default__listen__address=0.0.0.0
+    healthcheck:
+      test: ["CMD", "sh", "-c", "cypher-shell -u neo4j -p $$NEO4J_PASSWORD 'RETURN 1'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - veris-prod-network
+
+  # Cache/KV Store (Redis) - PRODUCTION
+  redis:
+    image: redis:7.2.5-alpine@sha256:6aaf3f5e6bc8a592fbfe2cccf19eb36d27c39d12dab4f4b01556b7449e7b1f44
+    platform: linux/amd64
+    container_name: veris-memory-prod-redis
+    ports:
+      - "127.0.0.1:6380:6379"  # Production Redis on 6380
+    volumes:
+      - redis_prod_data:/data
+    environment:
+      # SECURITY: Use REDISCLI_AUTH to avoid exposing password in process list
+      - REDISCLI_AUTH=${REDIS_PASSWORD}
+    # SECURITY: Redis with password authentication
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --protected-mode yes
+    healthcheck:
+      test: ["CMD", "sh", "-c", "redis-cli ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - veris-prod-network
+
+networks:
+  veris-prod-network:
+    name: veris-memory-prod-network
+    driver: bridge
+
+volumes:
+  qdrant_prod_data:
+    name: veris-memory-prod-qdrant-data
+  neo4j_prod_data:
+    name: veris-memory-prod-neo4j-data
+  neo4j_prod_logs:
+    name: veris-memory-prod-neo4j-logs
+  redis_prod_data:
+    name: veris-memory-prod-redis-data

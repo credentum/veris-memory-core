@@ -1,0 +1,39 @@
+FROM python:3.11-slim@sha256:2ec5a4a5c3e919570f57675471f081d6299668d909feabd8d4803c6c61af666c
+
+WORKDIR /app
+
+# Install system dependencies and security updates
+# Security: Explicitly upgrade vulnerable packages to fix CVEs detected in base image
+# CVE-2025-4802, CVE-2025-6965, CVE-2025-7458, CVE-2023-7104, CVE-2023-31484, CVE-2024-56406
+RUN apt-get update && apt-get install -y \
+    curl \
+    && apt-get upgrade -y \
+        libc-bin \
+        libc6 \
+        libsqlite3-0 \
+        perl-base \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy source code
+COPY src/ ./src/
+COPY config/ ./config/
+
+# Create necessary directories
+RUN mkdir -p /var/lib/sentinel
+
+# Environment variables (configured via docker-compose)
+ENV PYTHONPATH="/app"
+
+# Health check endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD curl -f http://localhost:9090/status || exit 1
+
+# Expose API port
+EXPOSE 9090
+
+# Run Sentinel with standalone mode
+CMD ["python", "-m", "src.monitoring.sentinel", "--standalone", "--api-port", "9090"]

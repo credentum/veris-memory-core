@@ -1,0 +1,49 @@
+{
+  "name": "veris_memory",
+  "version": "0.9.0",
+  "label": "◎ Veris Memory",
+  "subtitle": "memory with covenant",
+  "description": "Truthful memory for agents. For those who remember.",
+  "type": "tool",
+  "category": "memory_store",
+  "tags": [
+    "memory",
+    "semantic",
+    "agent-aligned",
+    "truth-preserving",
+    "long-term",
+    "context"
+  ],
+  "visibility": "public",
+  "protocol": "MCP-1.0",
+  "endpoints": {
+    "store_context": {
+      "method": "POST",
+      "description": "Store contextual memory with structured metadata and optional TTL.",
+      "path": "/tools/store_context"
+    },
+    "retrieve_context": {
+      "method": "POST",
+      "description": "Retrieve relevant context using semantic similarity and filters.",
+      "path": "/tools/retrieve_context"
+    },
+    "query_graph": {
+      "method": "POST",
+      "description": "Traverse graph relationships between stored memory nodes.",
+      "path": "/tools/query_graph"
+    }
+  },
+  "contracts": [
+    "store_context_tool.json",
+    "retrieve_context_tool.json",
+    "query_graph_tool.json"
+  ],
+  "symbol": {
+    "ascii": "◎ Veris Memory",
+    "meaning": "Memory core. Covenant of truth. Symbol of agent-aligned recall."
+  },
+  "author": "Credentum",
+  "license": "MIT",
+  "deprecation": false,
+  "note": "Veris is memory that persists through change. For agents who carry weight. For those who remember what others forget."
+}

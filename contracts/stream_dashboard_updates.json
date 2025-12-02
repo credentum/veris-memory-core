@@ -1,0 +1,301 @@
+{
+  "schema_version": "1.0",
+  "tool_name": "stream_dashboard_updates",
+  "description": "Establish WebSocket connection for real-time streaming dashboard updates with configurable refresh intervals",
+  "version": "1.0.0",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "websocket_endpoint": {
+        "type": "string",
+        "description": "WebSocket endpoint URL for streaming connection",
+        "format": "uri",
+        "pattern": "^wss?://",
+        "examples": ["ws://localhost:8080/ws/dashboard", "wss://api.example.com/ws/dashboard"]
+      },
+      "format": {
+        "type": "string",
+        "description": "Output format for streamed dashboard data",
+        "enum": ["json", "ascii"],
+        "default": "json",
+        "examples": ["json", "ascii"]
+      },
+      "sections": {
+        "type": "array",
+        "description": "Dashboard sections to stream (optional - omit for all sections)",
+        "items": {
+          "type": "string",
+          "enum": ["system", "services", "veris", "security", "backups"]
+        },
+        "uniqueItems": true,
+        "examples": [["system", "services"], ["veris"], ["system", "security", "backups"]]
+      },
+      "refresh_interval_seconds": {
+        "type": "integer",
+        "description": "Refresh interval for dashboard updates",
+        "minimum": 5,
+        "maximum": 300,
+        "default": 30,
+        "examples": [10, 30, 60]
+      },
+      "client_id": {
+        "type": "string",
+        "description": "Unique client identifier for connection tracking",
+        "pattern": "^[a-zA-Z0-9_-]{1,64}$",
+        "examples": ["dashboard-client-1", "monitoring-app", "admin-console"]
+      },
+      "filters": {
+        "type": "object",
+        "description": "Filtering options for dashboard data",
+        "properties": {
+          "min_change_threshold": {
+            "type": "number",
+            "description": "Minimum percentage change to trigger update (0-100)",
+            "minimum": 0,
+            "maximum": 100,
+            "default": 1.0
+          },
+          "include_unchanged": {
+            "type": "boolean",
+            "description": "Include metrics that haven't changed since last update",
+            "default": true
+          },
+          "priority_metrics": {
+            "type": "array",
+            "description": "High priority metrics to always include",
+            "items": {
+              "type": "string",
+              "enum": ["cpu_percent", "memory_percent", "error_rate_percent", "query_latency_ms"]
+            },
+            "uniqueItems": true
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "required": ["websocket_endpoint"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "success": {
+        "type": "boolean",
+        "description": "Whether the streaming connection was established"
+      },
+      "connection_status": {
+        "type": "string",
+        "description": "Status of WebSocket connection",
+        "enum": ["connected", "connecting", "disconnected", "error"]
+      },
+      "client_id": {
+        "type": "string",
+        "description": "Assigned client ID for this connection"
+      },
+      "stream_config": {
+        "type": "object",
+        "description": "Configuration for the established stream",
+        "properties": {
+          "format": {"type": "string"},
+          "sections": {"type": "array", "items": {"type": "string"}},
+          "refresh_interval_seconds": {"type": "integer"},
+          "filters": {"type": "object"}
+        }
+      },
+      "message": {
+        "type": "string",
+        "description": "Connection establishment message or error"
+      },
+      "websocket_url": {
+        "type": "string",
+        "description": "WebSocket URL being used for connection"
+      },
+      "estimated_bandwidth": {
+        "type": "object",
+        "description": "Estimated bandwidth usage for the stream",
+        "properties": {
+          "bytes_per_update": {"type": "integer", "minimum": 0},
+          "updates_per_hour": {"type": "integer", "minimum": 0},
+          "estimated_mb_per_hour": {"type": "number", "minimum": 0}
+        }
+      },
+      "error_type": {
+        "type": "string",
+        "description": "Classification of connection error",
+        "enum": [
+          "invalid_endpoint",
+          "connection_refused",
+          "authentication_failed",
+          "rate_limit_exceeded",
+          "invalid_client_id",
+          "server_unavailable",
+          "websocket_not_supported",
+          "timeout",
+          "unexpected_error"
+        ]
+      }
+    },
+    "required": ["success", "connection_status", "message"],
+    "additionalProperties": false
+  },
+  "streaming_protocol": {
+    "message_types": [
+      {
+        "type": "monitoring_update",
+        "description": "Regular dashboard metrics update",
+        "frequency": "Based on refresh_interval_seconds"
+      },
+      {
+        "type": "alert",
+        "description": "Critical system alert or threshold breach",
+        "frequency": "Immediate when triggered"
+      },
+      {
+        "type": "heartbeat",
+        "description": "Connection keepalive message",
+        "frequency": "Every 30 seconds"
+      },
+      {
+        "type": "error",
+        "description": "Stream error notification",
+        "frequency": "When errors occur"
+      }
+    ],
+    "message_format": {
+      "type": "object",
+      "properties": {
+        "type": {"type": "string"},
+        "timestamp": {"type": "string", "format": "date-time"},
+        "client_id": {"type": "string"},
+        "sequence_number": {"type": "integer"},
+        "data": {"type": "object"}
+      }
+    }
+  },
+  "security_features": [
+    "WebSocket connection authentication",
+    "Client ID validation and tracking",
+    "Rate limiting prevents connection abuse",
+    "Automatic disconnection on suspicious activity",
+    "Bandwidth monitoring and throttling"
+  ],
+  "rate_limiting": {
+    "connections_per_client": 3,
+    "max_concurrent_connections": 100,
+    "connection_attempts_per_minute": 10
+  },
+  "performance": {
+    "delta_compression": true,
+    "adaptive_refresh_rates": true,
+    "bandwidth_optimization": true,
+    "connection_pooling": true
+  },
+  "examples": {
+    "establish_basic_stream": {
+      "input": {
+        "websocket_endpoint": "ws://localhost:8080/ws/dashboard",
+        "format": "json",
+        "refresh_interval_seconds": 30,
+        "client_id": "monitoring-app-1"
+      },
+      "expected_output": {
+        "success": true,
+        "connection_status": "connected",
+        "client_id": "monitoring-app-1",
+        "stream_config": {
+          "format": "json",
+          "sections": ["system", "services", "veris", "security", "backups"],
+          "refresh_interval_seconds": 30,
+          "filters": {
+            "min_change_threshold": 1.0,
+            "include_unchanged": true
+          }
+        },
+        "message": "WebSocket connection established successfully",
+        "websocket_url": "ws://localhost:8080/ws/dashboard",
+        "estimated_bandwidth": {
+          "bytes_per_update": 2500,
+          "updates_per_hour": 120,
+          "estimated_mb_per_hour": 0.3
+        }
+      }
+    },
+    "filtered_high_frequency_stream": {
+      "input": {
+        "websocket_endpoint": "wss://api.veris.com/ws/dashboard",
+        "format": "json",
+        "sections": ["system", "veris"],
+        "refresh_interval_seconds": 10,
+        "client_id": "realtime-monitor",
+        "filters": {
+          "min_change_threshold": 5.0,
+          "include_unchanged": false,
+          "priority_metrics": ["cpu_percent", "error_rate_percent"]
+        }
+      },
+      "expected_output": {
+        "success": true,
+        "connection_status": "connected",
+        "client_id": "realtime-monitor",
+        "stream_config": {
+          "format": "json",
+          "sections": ["system", "veris"],
+          "refresh_interval_seconds": 10,
+          "filters": {
+            "min_change_threshold": 5.0,
+            "include_unchanged": false,
+            "priority_metrics": ["cpu_percent", "error_rate_percent"]
+          }
+        },
+        "message": "High-frequency filtered stream established",
+        "estimated_bandwidth": {
+          "bytes_per_update": 800,
+          "updates_per_hour": 360,
+          "estimated_mb_per_hour": 0.3
+        }
+      }
+    },
+    "ascii_dashboard_stream": {
+      "input": {
+        "websocket_endpoint": "ws://localhost:8080/ws/dashboard",
+        "format": "ascii",
+        "refresh_interval_seconds": 60,
+        "client_id": "terminal-dashboard"
+      },
+      "expected_output": {
+        "success": true,
+        "connection_status": "connected",
+        "client_id": "terminal-dashboard",
+        "stream_config": {
+          "format": "ascii",
+          "refresh_interval_seconds": 60
+        },
+        "message": "ASCII dashboard stream established for terminal display"
+      }
+    },
+    "error_invalid_endpoint": {
+      "input": {
+        "websocket_endpoint": "http://invalid-protocol",
+        "client_id": "test-client"
+      },
+      "expected_output": {
+        "success": false,
+        "connection_status": "error",
+        "message": "Invalid WebSocket endpoint: must use ws:// or wss:// protocol",
+        "error_type": "invalid_endpoint"
+      }
+    },
+    "error_connection_refused": {
+      "input": {
+        "websocket_endpoint": "ws://unreachable-server:8080/ws/dashboard",
+        "client_id": "test-client"
+      },
+      "expected_output": {
+        "success": false,
+        "connection_status": "disconnected",
+        "message": "Failed to connect to WebSocket endpoint: connection refused",
+        "error_type": "connection_refused"
+      }
+    }
+  }
+}

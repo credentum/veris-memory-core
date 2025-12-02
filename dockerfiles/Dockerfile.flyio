@@ -1,0 +1,177 @@
+# Multi-stage Dockerfile for Fly.io deployment
+# Stage 1: Build dependencies and download binaries
+FROM ubuntu:22.04@sha256:965fbcae990b0467ed5657caceaec165018ef44a4d2d46c7cdea80a9dff0d1ea AS builder
+
+# Prevent interactive prompts during apt install
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install build dependencies (minimal for size)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Essential build tools
+    wget \
+    curl \
+    gpg \
+    ca-certificates \
+    # Python build dependencies
+    python3.11 \
+    python3-pip \
+    python3.11-venv \
+    # Build tools for Python packages (minimal)
+    build-essential \
+    python3.11-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Create Python virtual environment
+RUN python3.11 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy and install Python requirements in builder stage (production only, no dev deps)
+COPY requirements.txt ./
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt \
+    && pip cache purge \
+    && find /opt/venv -name "*.pyc" -delete \
+    && find /opt/venv -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+
+# Build args for configurable Qdrant version and checksum
+# Using v1.9.7 which is compatible with GLIBC 2.35 (Ubuntu 22.04)
+ARG QDRANT_VERSION=1.9.7
+ARG QDRANT_SHA256=057dc933e4c35df4c874c799694cbd98e7231730bc0870a156396613a90bf1b3
+
+# Download and verify Qdrant binary
+RUN QDRANT_URL="https://github.com/qdrant/qdrant/releases/download/v${QDRANT_VERSION}/qdrant-x86_64-unknown-linux-gnu.tar.gz" \
+    && EXPECTED_SHA256="${QDRANT_SHA256}" \
+    && wget "${QDRANT_URL}" -O qdrant.tar.gz \
+    && echo "Verifying Qdrant binary checksum..." \
+    && ACTUAL_SHA256=$(sha256sum qdrant.tar.gz | cut -d' ' -f1) \
+    && echo "Expected: ${EXPECTED_SHA256}" \
+    && echo "Actual:   ${ACTUAL_SHA256}" \
+    && if [ "${ACTUAL_SHA256}" != "${EXPECTED_SHA256}" ]; then \
+        echo "ERROR: Checksum verification failed! Aborting build for security." && exit 1; \
+    fi \
+    && echo "Checksum verification passed" \
+    && tar xzf qdrant.tar.gz \
+    && mv qdrant /usr/local/bin/ \
+    && rm qdrant.tar.gz
+
+# Stage 2: Runtime image
+# Using Ubuntu 22.04 with compatible Qdrant v1.9.7 (GLIBC 2.35 compatible)
+FROM ubuntu:22.04@sha256:965fbcae990b0467ed5657caceaec165018ef44a4d2d46c7cdea80a9dff0d1ea AS runtime
+
+# Prevent interactive prompts during apt install
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Install only runtime dependencies (minimize size)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Python runtime (minimal)
+    python3.11 \
+    python3.11-venv \
+    # Java for Neo4j (JRE 21 required for latest Neo4j)
+    openjdk-21-jre-headless \
+    # Essential utilities only
+    curl \
+    supervisor \
+    netcat-openbsd \
+    procps \
+    # Redis server
+    redis-server \
+    # Required for Neo4j installation
+    wget \
+    gpg \
+    ca-certificates \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /usr/share/doc/* /usr/share/man/* /usr/share/locale/*
+
+# Copy Python virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy Qdrant binary from builder
+COPY --from=builder /usr/local/bin/qdrant /usr/local/bin/qdrant
+
+# Install Neo4j with proper GPG verification (minimize installation size)
+RUN mkdir -p /etc/apt/keyrings \
+    && wget -O - https://debian.neo4j.com/neotechnology.gpg.key | gpg --dearmor -o /etc/apt/keyrings/neo4j.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/neo4j.gpg] https://debian.neo4j.com stable latest" > /etc/apt/sources.list.d/neo4j.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends neo4j \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
+    && find /var/lib/neo4j -name "*.txt" -delete \
+    && find /var/lib/neo4j -name "README*" -delete
+
+# Create application directory
+WORKDIR /app
+
+# Create data directories (logs inside data volume to support single Fly.io volume limit)
+RUN mkdir -p /app/data/qdrant /app/data/neo4j /app/data/redis /app/data/logs \
+    && mkdir -p /var/lib/neo4j/data /var/lib/neo4j/logs
+
+# Copy Python application
+COPY src/ ./src/
+COPY schemas/ ./schemas/
+COPY contracts/ ./contracts/
+
+# Copy configuration files
+COPY config/.ctxrc.yaml /app/.ctxrc.yaml
+COPY dockerfiles/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY scripts/start-services.sh /app/start-services.sh
+RUN chmod +x /app/start-services.sh
+
+# Copy monitoring and secrets management
+COPY monitoring/ /app/monitoring/
+# COPY secrets/ /app/secrets/  # Optional - directory may not exist
+RUN chmod +x /app/monitoring/*.sh
+
+# Configure Redis (create user-writable config in /app)
+RUN mkdir -p /app/config \
+    && echo "bind 127.0.0.1" > /app/config/redis.conf \
+    && echo "port 6379" >> /app/config/redis.conf \
+    && echo "dir /app/data/redis" >> /app/config/redis.conf \
+    && echo "maxmemory-policy allkeys-lru" >> /app/config/redis.conf \
+    && echo "daemonize no" >> /app/config/redis.conf
+
+# Configure Neo4j
+ENV NEO4J_HOME=/var/lib/neo4j
+# Create Neo4j configuration directory and file
+RUN mkdir -p /var/lib/neo4j/conf /etc/neo4j \
+    && echo "server.default_listen_address=0.0.0.0" > /var/lib/neo4j/conf/neo4j.conf \
+    && echo "server.bolt.listen_address=0.0.0.0:7687" >> /var/lib/neo4j/conf/neo4j.conf \
+    && echo "server.http.listen_address=0.0.0.0:7474" >> /var/lib/neo4j/conf/neo4j.conf \
+    && echo "server.directories.data=/app/data/neo4j" >> /var/lib/neo4j/conf/neo4j.conf \
+    && echo "server.directories.logs=/app/data/logs" >> /var/lib/neo4j/conf/neo4j.conf \
+    && cp /var/lib/neo4j/conf/neo4j.conf /etc/neo4j/neo4j.conf
+
+# Set permissions for app user to access Neo4j directories
+# Create app user first to get proper UID, then set permissions
+RUN adduser --uid 1001 --disabled-password app \
+    && chown -R 1001:1001 /var/lib/neo4j 2>/dev/null || true \
+    && chmod -R 755 /var/lib/neo4j 2>/dev/null || true
+
+# Expose ports
+EXPOSE 8000 6333 6334 7474 7687 6379
+
+# Environment variables
+ENV QDRANT_URL=http://localhost:6333
+ENV NEO4J_URI=bolt://localhost:7687
+ENV NEO4J_USER=neo4j
+ENV REDIS_URL=redis://localhost:6379
+ENV MCP_SERVER_PORT=8000
+ENV LOG_LEVEL=info
+
+# Set ownership of app directories for the already-created app user
+RUN chown -R app:app /app \
+    && chown -R app:app /app/config
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Switch to non-root user
+USER app
+
+# Start all services using enhanced startup script
+CMD ["/app/start-services.sh"]

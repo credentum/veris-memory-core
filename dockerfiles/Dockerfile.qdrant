@@ -1,0 +1,17 @@
+# Custom Qdrant image with health check tools
+# Upgraded to v1.15.1 to match client version for API compatibility
+# SECURITY: Pinned with SHA256 to ensure immutable base image
+FROM qdrant/qdrant:v1.15.1@sha256:d122138f76868edba68d36cb0833139c1d1761f00f09e48e61f8314196e6a4c6
+
+# Install curl for health checks
+# Qdrant is based on Debian/Ubuntu
+# Stay as root user since qdrant user doesn't exist in this image
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Use the original entrypoint
+# The entrypoint will handle user switching if needed
+ENTRYPOINT ["./entrypoint.sh"]

@@ -1,0 +1,991 @@
+---
+###############################################################################
+# 🛠️  Enhanced GitHub Workflow — Claude Code Review (Agent-First, ARC-Reviewer)
+# Version: 2025-08-01 with automated_issues extraction and status check fixes
+#
+# Recent improvements:
+# - Fixed automated_issues extraction from YAML format in Create Automation Comment
+# - Added robust regex parsing for YAML automated_issues field
+# - Fixed verdict parsing to properly extract from YAML format for status checks
+# - Updated blocking issues check to use parsed verdict instead of text search
+# - Added explicit formatting instructions to direct_prompt
+# - Added comment format validation step
+# - Ensured consistent YAML structure across review iterations
+###############################################################################
+name: Claude Code Review
+on:
+  pull_request:
+    types: [opened, synchronize, closed]
+    # paths:
+    #   - "src/**"
+    #   - "context/**"
+    #   - "tests/**"
+    #   - "*.md"
+    #   - "*.yaml"
+    #   - "*.yml"
+
+jobs:
+  claude-pr-review:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/credentum/veris-memory-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --user root
+    timeout-minutes: 15 # Add timeout to prevent infinite hanging
+    permissions:
+      contents: read
+      pull-requests: write # allow comment / approval
+      issues: write # allow auto-file follow-up issues
+      statuses: write # allow setting commit status
+      id-token: write # for future Sigstore attestation
+      packages: read # allow pulling container from registry
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history for context diff
+
+      - name: Fix Git safe directory
+        run: |
+          # Fix Git safe directory issue in container
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "/__w/veris-memory/veris-memory"
+          git config --global --add safe.directory "/__w"
+          git config --global --add safe.directory "*"
+          # Verify Git is working
+          git status
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@beta
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # model: "claude-opus-4-1-20250805"
+          # model: "claude-sonnet-4-5-20250929"
+          model: "claude-opus-4-5-20251101"
+          # -------- ARC-Reviewer Prompt --------
+          direct_prompt: |
+            You are ARC-Reviewer, a senior staff engineer reviewing pull-requests on the context-store (MCP-based context storage service).
+
+            CRITICAL: Output ONLY valid YAML. No markdown, no explanations, no code blocks. Start directly with the YAML schema.
+            FORMATTING: Ensure consistent YAML formatting for both initial reviews and subsequent edits.
+            COMMENT_FORMAT: Use identical structure and indentation for all review iterations.
+
+            🔍 REVIEW SCOPE: You must review the ENTIRE cumulative PR state, not just recent changes.
+            Use 'git diff --name-only origin/main...HEAD' to see ALL changed files in the PR.
+            Read the complete current state of ALL modified files, not just the latest diff.
+            Consider all issues that may exist across the entire changeset, including:
+            - Issues identified in previous reviews that may still exist
+            - New issues introduced by any changes in the PR
+            - Cumulative effects of all changes together
+
+            Review criteria (any failure = REQUEST_CHANGES):
+            - Test Coverage: validators/* ≥ 90%, overall ≥ 30.0%
+            - MCP Compatibility: Tool contracts updated, valid JSON schema
+            - Storage Integrity: All storage implementations have tests
+            - Code Quality: Python typed, docstrings, pre-commit passes
+            - Security: Dockerfiles pinned digests, no secrets, CVE-free deps
+
+            For blocking issues, be specific about:
+            - What is wrong (description)
+            - Where it's located (file and line)
+            - What category it falls under
+            - How to fix it (actionable guidance)
+
+            Output this exact YAML structure (replace bracketed values with actuals).
+            IMPORTANT: Use identical formatting, indentation, and structure for all reviews:
+
+            schema_version: "1.0"
+            pr_number: [ACTUAL_PR_NUMBER]
+            timestamp: "[CURRENT_ISO_TIMESTAMP]"
+            reviewer: "ARC-Reviewer"
+            verdict: "APPROVE"
+            summary: "Brief review summary"
+            coverage:
+              current_pct: [ACTUAL_PERCENTAGE]
+              status: "PASS"
+              meets_baseline: true
+            issues:
+              blocking:
+                - description: "Specific actionable description of what must be fixed"
+                  file: "relative/path/to/file.py"
+                  line: 42
+                  category: "test_coverage"
+                  fix_guidance: "Add unit tests for the new function"
+              warnings:
+                - description: "High-priority improvement needed"
+                  file: "path/to/file.py"
+                  line: 15
+                  category: "code_quality"
+                  fix_guidance: "Add type hints to this function"
+              nits:
+                - description: "Style or minor improvement"
+                  file: "path/to/file.py"
+                  line: 8
+                  category: "style"
+                  fix_guidance: "Use more descriptive variable name"
+            automated_issues:
+              - title: "Follow-up issue title"
+                description: "Detailed description for GitHub issue"
+                labels: ["enhancement", "test"]
+                phase: "4.1"
+                priority: "high"
+                category: "test_coverage"
+          # enable sticky threaded comment
+          use_sticky_comment: true
+          # Tools Claude may invoke during review
+          allowed_tools: |
+            Bash(./scripts/run-tests.sh ci),
+            Bash(pre-commit run --all-files --config .pre-commit-config.yaml),
+            Bash(python -m src.validators.config_validator),
+            Bash(yamale -s schemas/ context/),
+            Bash(npm run test:mcp-types),
+            Bash(ajv validate -s mcp-schema.json -d context/mcp_contracts/*.json),
+            Bash(git diff --name-only origin/main...HEAD),
+            Bash(git log --oneline origin/main...HEAD),
+            Read,
+            Grep,
+            Glob
+
+      # ---------- Format Correction and Validation ----------
+      - name: Format Correction and Validation
+        if: always()
+        shell: bash
+        run: |
+          echo "🔍 Correcting and validating Claude Code Review comment format..."
+
+          # Get the raw response from Claude action
+          raw_response="${{ steps.claude-review.outputs.response }}"
+
+          if [[ -n "$raw_response" ]]; then
+            echo "✓ Claude action produced output"
+
+            # Save raw response for debugging
+            echo "$raw_response" > raw_review_output.txt
+
+            # Extract YAML content from mixed format response
+            python3 << 'EOF'
+          import re
+          import yaml
+          import sys
+          from datetime import datetime
+
+          # Read the raw response
+          with open('raw_review_output.txt', 'r') as f:
+              content = f.read()
+
+          print("🔧 Processing Claude response for format correction...")
+
+          # Strategy 1: Try to extract YAML block if it exists
+          yaml_match = re.search(r'```yaml\s*\n(.*?)\n```', content, re.DOTALL)
+          if yaml_match:
+              yaml_content = yaml_match.group(1)
+              print("✓ Found YAML block in response")
+          else:
+              # Strategy 2: Extract everything after markdown headers (---\n)
+              if '---\n' in content:
+                  parts = content.split('---\n', 1)
+                  if len(parts) > 1:
+                      yaml_content = parts[1].strip()
+                      print("✓ Extracted YAML after markdown separator")
+                  else:
+                      yaml_content = content
+              else:
+                  yaml_content = content
+
+          # Clean the YAML content
+          yaml_content = yaml_content.strip()
+
+          # Remove any remaining markdown formatting
+          yaml_content = re.sub(r'^\*\*.*?\*\*.*?\n', '', yaml_content, flags=re.MULTILINE)
+          yaml_content = re.sub(r'^---\s*$', '', yaml_content, flags=re.MULTILINE)
+
+          # Try to parse and validate the YAML
+          try:
+              data = yaml.safe_load(yaml_content)
+              if isinstance(data, dict):
+                  print("✓ YAML parsed successfully")
+
+                  # Ensure required fields exist with defaults
+                  if 'schema_version' not in data:
+                      data['schema_version'] = "1.0"
+                  if 'pr_number' not in data:
+                      data['pr_number'] = int("${{ github.event.pull_request.number }}")
+                  if 'timestamp' not in data:
+                      data['timestamp'] = datetime.utcnow().isoformat() + 'Z'
+                  if 'reviewer' not in data:
+                      data['reviewer'] = "ARC-Reviewer"
+                  if 'verdict' not in data:
+                      # Determine verdict based on coverage and blocking issues
+                      has_blockers = (data.get('issues', {}).get('blocking', []) and
+                                     len(data.get('issues', {}).get('blocking', [])) > 0)
+                      coverage_ok = (data.get('coverage', {}).get('current_pct', 0) >=
+                                   float("${{ env.COVERAGE_BASELINE }}"))
+
+                      if has_blockers or not coverage_ok:
+                          data['verdict'] = "REQUEST_CHANGES"
+                      else:
+                          data['verdict'] = "APPROVE"
+                  if 'summary' not in data:
+                      data['summary'] = "Code review completed"
+                  if 'coverage' not in data:
+                      # Use actual coverage if available
+                      actual_coverage = float("${{ env.COVERAGE_PCT }}" or "0")
+                      meets_baseline = actual_coverage >= float("${{ env.COVERAGE_BASELINE }}")
+                      data['coverage'] = {
+                          'current_pct': actual_coverage,
+                          'status': "PASS" if meets_baseline else "FAIL",
+                          'meets_baseline': meets_baseline
+                      }
+                  if 'issues' not in data:
+                      data['issues'] = {
+                          'blocking': [],
+                          'warnings': [],
+                          'nits': []
+                      }
+                  if 'automated_issues' not in data:
+                      data['automated_issues'] = []
+
+                  # Output clean YAML
+                  clean_yaml = yaml.dump(data, default_flow_style=False, sort_keys=False)
+                  with open('corrected_review.yaml', 'w') as f:
+                      f.write(clean_yaml)
+
+                  print("✅ Generated corrected YAML format")
+
+              else:
+                  print("❌ YAML content is not a valid dictionary")
+                  sys.exit(1)
+
+          except yaml.YAMLError as e:
+              print(f"❌ YAML parsing failed: {e}")
+              # Create minimal valid YAML as fallback
+              # Use actual coverage in fallback
+              actual_coverage = float("${{ env.COVERAGE_PCT }}" or "0")
+              meets_baseline = actual_coverage >= float("${{ env.COVERAGE_BASELINE }}")
+
+              fallback_data = {
+                  'schema_version': "1.0",
+                  'pr_number': int("${{ github.event.pull_request.number }}"),
+                  'timestamp': datetime.utcnow().isoformat() + 'Z',
+                  'reviewer': "ARC-Reviewer",
+                  'verdict': "APPROVE" if meets_baseline else "REQUEST_CHANGES",
+                  'summary': "Format correction applied - review completed",
+                  'coverage': {
+                      'current_pct': actual_coverage,
+                      'status': "PASS" if meets_baseline else "FAIL",
+                      'meets_baseline': meets_baseline
+                  },
+                  'issues': {
+                      'blocking': [] if meets_baseline else [{'description': f'Coverage below baseline: {actual_coverage}% < ${{ env.COVERAGE_BASELINE }}%', 'category': 'coverage'}],
+                      'warnings': [{'description': 'Original review format was invalid', 'category': 'format'}],
+                      'nits': []
+                  },
+                  'automated_issues': []
+              }
+
+              with open('corrected_review.yaml', 'w') as f:
+                  yaml.dump(fallback_data, f, default_flow_style=False, sort_keys=False)
+
+              print("✅ Generated fallback YAML format")
+
+          EOF
+
+            # Validate the corrected YAML
+            if python3 -c "import yaml; yaml.safe_load(open('corrected_review.yaml'))" 2>/dev/null; then
+              echo "✅ Corrected YAML format is valid"
+            else
+              echo "❌ Failed to create valid YAML format"
+              exit 1
+            fi
+
+            # Check for required fields in corrected version
+            if grep -q "schema_version" corrected_review.yaml && \
+               grep -q "pr_number" corrected_review.yaml && \
+               grep -q "timestamp" corrected_review.yaml && \
+               grep -q "reviewer" corrected_review.yaml; then
+              echo "✅ All required YAML fields present in corrected version"
+            else
+              echo "❌ Required YAML fields missing in corrected version"
+              exit 1
+            fi
+
+            # Store corrected output for downstream use
+            echo "CORRECTED_REVIEW<<EOF" >> $GITHUB_ENV
+            cat corrected_review.yaml >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+
+            # Store flag indicating format was corrected
+            echo "FORMAT_CORRECTED=true" >> $GITHUB_ENV
+
+            echo "🎯 Format correction completed successfully"
+
+          else
+            echo "⚠️ No output from Claude action"
+            echo "FORMAT_CORRECTED=false" >> $GITHUB_ENV
+          fi
+
+      # ---------- Load Coverage Configuration ----------
+      - name: Load Coverage Configuration
+        id: load-config
+        shell: bash
+        run: |
+          # Load baseline and tolerance buffer with fallback
+          if [ -f .coverage-config.json ]; then
+            config=$(python -c "import json; data=json.load(open('.coverage-config.json')); \
+                        print(f\"{data['baseline']},{data.get('tolerance_buffer', 0.0)}\")")
+            baseline=$(echo "$config" | cut -d',' -f1)
+            tolerance=$(echo "$config" | cut -d',' -f2)
+          else
+            echo "No .coverage-config.json found, using defaults"
+            baseline=30.0
+            tolerance=0.0
+          fi
+          effective_baseline=$(python -c "print(max(0, $baseline - $tolerance))")
+          echo "COVERAGE_BASELINE=$effective_baseline" >> $GITHUB_ENV
+          echo "Coverage baseline loaded: $baseline% (effective: $effective_baseline% with $tolerance% tolerance)"
+
+      # ---------- Detect Infrastructure Changes ----------
+      - name: Detect Infrastructure Changes
+        id: detect-infra
+        shell: bash
+        run: |
+          # Get list of changed files
+          echo "Fetching changed files for PR..."
+          changed_files=$(git diff --name-only origin/${{ github.base_ref }}...HEAD 2>/dev/null || \
+                         git diff --name-only HEAD~1...HEAD)
+          
+          echo "Changed files:"
+          echo "$changed_files"
+          
+          # Check if only infrastructure files were changed
+          is_infra_only=true
+          has_source_changes=false
+          
+          while IFS= read -r file; do
+            # Skip empty lines
+            [[ -z "$file" ]] && continue
+            
+            # Check if this is a source code file
+            if [[ "$file" == src/*.py ]] || \
+               [[ "$file" == tests/*.py ]] || \
+               [[ "$file" == "requirements.txt" ]] || \
+               [[ "$file" == "requirements-dev.txt" ]]; then
+              has_source_changes=true
+              is_infra_only=false
+              echo "Found source code change: $file"
+            fi
+            
+            # Infrastructure files (not requiring coverage)
+            if [[ "$file" == .github/workflows/* ]] || \
+               [[ "$file" == dockerfiles/* ]] || \
+               [[ "$file" == docker-compose*.yml ]] || \
+               [[ "$file" == scripts/*.sh ]] || \
+               [[ "$file" == *.md ]] || \
+               [[ "$file" == .gitignore ]] || \
+               [[ "$file" == pytest*.ini ]] || \
+               [[ "$file" == Makefile ]]; then
+              echo "Found infrastructure file: $file"
+            else
+              # If it's not infrastructure and not source, still treat as needing coverage
+              if [[ "$file" != src/*.py ]] && [[ "$file" != tests/*.py ]]; then
+                echo "Found other file (will run coverage): $file"
+                is_infra_only=false
+              fi
+            fi
+          done <<< "$changed_files"
+          
+          # Set output
+          if [[ "$is_infra_only" == "true" ]]; then
+            echo "This appears to be an infrastructure-only PR"
+            echo "is_infrastructure=true" >> $GITHUB_OUTPUT
+          else
+            echo "This PR contains code changes requiring coverage analysis"
+            echo "is_infrastructure=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ---------- Extract and Store Coverage Metrics ----------
+      - name: Extract Coverage Metrics
+        if: always()
+        shell: bash
+        run: |
+          # Skip coverage for infrastructure-only PRs (based on file changes, not branch name)
+          if [[ "${{ steps.detect-infra.outputs.is_infrastructure }}" == "true" ]]; then
+            echo "Skipping coverage check for infrastructure-only PR"
+            echo "COVERAGE_PCT=${{ env.COVERAGE_BASELINE }}" >> $GITHUB_ENV
+            # Set to baseline to avoid failure
+            echo "COVERAGE_FAILED=false" >> $GITHUB_ENV
+            echo "INFRASTRUCTURE_PR=true" >> $GITHUB_ENV
+          else
+            # Run coverage using unified test runner with parallel execution (consistent with local development)
+            echo "Running coverage analysis with parallel execution..."
+
+            # Run tests with better error handling
+            if ./scripts/run-tests.sh ci; then
+              echo "✓ Tests completed successfully using unified test runner"
+            else
+              echo "⚠️ Some tests failed, but coverage may still be available"
+            fi
+
+            # Debug: Check if coverage.json was created
+            if [ -f coverage.json ]; then
+              echo "✓ coverage.json created successfully"
+              ls -la coverage.json
+
+              # Extract coverage percentage
+              coverage_pct=$(python -c "import json; print(json.load(open('coverage.json'))['totals']['percent_covered'])")
+              echo "Coverage percentage: $coverage_pct%"
+              echo "COVERAGE_PCT=$coverage_pct" >> $GITHUB_ENV
+
+              # Check if coverage dropped below baseline
+              if (( $(echo "$coverage_pct < ${{ env.COVERAGE_BASELINE }}" | bc -l) )); then
+                echo "❌ Coverage below baseline: $coverage_pct% < ${{ env.COVERAGE_BASELINE }}%"
+                echo "COVERAGE_FAILED=true" >> $GITHUB_ENV
+              else
+                echo "✓ Coverage meets baseline: $coverage_pct% >= ${{ env.COVERAGE_BASELINE }}%"
+                echo "COVERAGE_FAILED=false" >> $GITHUB_ENV
+              fi
+            else
+              echo "❌ coverage.json not found, setting coverage to 0"
+              echo "COVERAGE_PCT=0" >> $GITHUB_ENV
+              echo "COVERAGE_FAILED=true" >> $GITHUB_ENV
+            fi
+            echo "INFRASTRUCTURE_PR=false" >> $GITHUB_ENV
+          fi
+
+      # ---------- Convert Review to Structured JSON ----------
+      - name: Convert Review to JSON
+        if: always()
+        shell: bash
+        run: |
+          cat > parse_review.py << 'EOF'
+          import sys
+          import json
+          import yaml
+          import re
+
+          # Determine if we have corrected YAML or need to parse raw response
+          format_corrected = "${{ env.FORMAT_CORRECTED }}" == "true"
+
+          if format_corrected:
+              # Parse from corrected YAML
+              try:
+                  with open('corrected_review.yaml', 'r') as f:
+                      data = yaml.safe_load(f)
+
+                  # Extract key fields for status check
+                  verdict = data.get('verdict', 'UNKNOWN')
+                  has_blockers = bool(data.get('issues', {}).get('blocking', []))
+                  coverage_pct = data.get('coverage', {}).get('current_pct', 0)
+
+                  review_json = {
+                      "verdict": verdict,
+                      "has_blockers": has_blockers,
+                      "coverage_pct": coverage_pct,
+                      "yaml_data": data
+                  }
+              except Exception as e:
+                  print(f"Error parsing YAML: {e}", file=sys.stderr)
+                  review_json = {
+                      "verdict": "UNKNOWN",
+                      "has_blockers": False,
+                      "coverage_pct": float(sys.argv[2]) if len(sys.argv) > 2 else 0
+                  }
+          else:
+              # Fallback: try to parse from raw response
+              review_text = sys.argv[1] if len(sys.argv) > 1 else ""
+
+              # Try to extract verdict from YAML format first
+              verdict_yaml_match = re.search(r'verdict:\s*["\'"]?(APPROVE|REQUEST[_ ]CHANGES)["\'"]?', review_text)
+              if verdict_yaml_match:
+                  verdict = verdict_yaml_match.group(1).replace('_', ' ')
+              else:
+                  # Fallback to markdown format
+                  verdict_match = re.search(r'\*\*PR Verdict:\*\* (APPROVE|REQUEST CHANGES)', review_text)
+                  verdict = verdict_match.group(1) if verdict_match else "UNKNOWN"
+
+              # Check for blocking issues
+              has_blockers = 'blocking:' in review_text and not re.search(r'blocking:\s*\[\]', review_text)
+
+              review_json = {
+                  "verdict": verdict,
+                  "has_blockers": has_blockers,
+                  "coverage_pct": float(sys.argv[2]) if len(sys.argv) > 2 else 0
+              }
+
+          print(json.dumps(review_json, indent=2))
+          EOF
+
+          # Run the parser
+          python parse_review.py "${{ steps.claude-review.outputs.response }}" "${COVERAGE_PCT:-0}" > review.json
+
+          # Store parsed review for downstream steps
+          echo "REVIEW_JSON<<EOF" >> $GITHUB_ENV
+          cat review.json >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      # ---------- Set GitHub Status Check ----------
+      - name: Set Commit Status
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const review = ${{ env.REVIEW_JSON }};
+            const coverage_pct = parseFloat("${{ env.COVERAGE_PCT }}") || 0;
+
+            // Determine overall status
+            let state = 'success';
+            let description = `ARC-Review: PASS | Coverage: ${coverage_pct.toFixed(1)}%`;
+            const isInfrastructurePR = "${{ env.INFRASTRUCTURE_PR }}" === "true";
+
+            if (review.verdict === 'REQUEST CHANGES' || review.has_blockers) {
+              state = 'failure';
+              description = `ARC-Review: BLOCKED | Coverage: ${coverage_pct.toFixed(1)}%`;
+            } else if (!isInfrastructurePR && coverage_pct < parseFloat("${{ env.COVERAGE_BASELINE }}")) {
+              state = 'failure';
+              description = `ARC-Review: Coverage regression (${coverage_pct.toFixed(1)}% < ${{ env.COVERAGE_BASELINE }}%)`;
+            } else if (isInfrastructurePR) {
+              description = `ARC-Review: PASS (Infrastructure PR) | Coverage: skipped`;
+            }
+
+            // Create status check
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.payload.pull_request.head.sha,
+              state: state,
+              description: description,
+              context: 'ARC-Reviewer'
+            });
+
+      # ---------- Correct Claude Comment Format ----------
+      - name: Correct Claude Comment Format
+        if: env.FORMAT_CORRECTED == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.issue.number;
+            const correctedReview = `${{ env.CORRECTED_REVIEW }}`;
+
+            console.log('🔧 Correcting Claude comment format...');
+
+            // Find Claude's sticky comment that needs correction
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              per_page: 100
+            });
+
+            // Find the most recent Claude comment (should be the one we want to update)
+            const claudeComment = comments
+              .filter(comment =>
+                (comment.user.login === 'github-actions[bot]' ||
+                 comment.user.type === 'Bot') &&
+                (comment.body.includes('Claude finished') ||
+                 comment.body.includes('ARC-Reviewer') ||
+                 comment.body.includes('schema_version'))
+              )
+              .pop(); // Get the most recent
+
+            if (claudeComment) {
+              console.log(`Found Claude comment to update: ${claudeComment.id}`);
+
+              // Create the corrected comment body with pure YAML format
+              const correctedBody = `# 🤖 ARC-Reviewer Report
+
+            **Format:** Pure YAML (Consistency Fixed)
+
+            \`\`\`yaml
+            ${correctedReview}
+            \`\`\`
+
+            ---
+            *✅ Comment format automatically corrected for consistency*`;
+
+              // Update the comment with corrected format
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: claudeComment.id,
+                body: correctedBody
+              });
+
+              console.log('✅ Claude comment format corrected successfully');
+
+              // Add a notification about the format correction
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: `🔧 **Format Correction Applied**
+
+                The Claude Code Review comment format has been automatically corrected to ensure consistency.
+
+                **Changes:**
+                - ✅ Converted to pure YAML format as specified in workflow
+                - ✅ Removed mixed markdown/YAML formatting
+                - ✅ Maintained all review data and structure
+
+                This ensures the comment follows the exact format specified in the workflow configuration.
+
+                ---
+                *🤖 Automated format correction by workflow*`
+              });
+
+            } else {
+              console.log('❌ Could not find Claude comment to update');
+            }
+
+      # ---------- Create Agent-First Automation Comment ----------
+      - name: Create Automation Comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Use corrected review if available, otherwise fallback to original
+            let reviewResponse = '';
+            const correctedReview = `${{ env.CORRECTED_REVIEW }}`;
+            const formatCorrected = `${{ env.FORMAT_CORRECTED }}` === 'true';
+
+            if (formatCorrected && correctedReview) {
+              reviewResponse = correctedReview;
+              console.log('✅ Using corrected review format for automation');
+            } else {
+              reviewResponse = `${{ steps.claude-review.outputs.response }}`;
+              console.log('⚠️ Using original action output (format correction unavailable)');
+            }
+
+            console.log(`Review response length: ${reviewResponse.length}`);
+            console.log(`Review response preview: ${reviewResponse.substring(0, 200)}...`);
+
+            // FALLBACK: If action output is empty, fetch from PR comments
+            if (!reviewResponse || reviewResponse.trim() === '') {
+              console.log('Action output empty, fetching from PR comments...');
+
+              const comments = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number
+              });
+
+              // Find Claude's review comment (most recent with automation JSON)
+              const claudeComment = comments.data
+                .filter(comment => comment.body.includes('automated_issues'))
+                .pop(); // Get the most recent
+
+              if (claudeComment) {
+                reviewResponse = claudeComment.body;
+                console.log(`Found Claude comment with automation data: ${reviewResponse.length} chars`);
+              }
+            }
+
+            // ROBUST: Extract automation data from both YAML and JSON formats
+            function extractAutomationData(text) {
+              try {
+                // Strategy 0: Try to parse YAML format (for corrected format)
+                if (formatCorrected) {
+                  console.log('🔍 Parsing YAML format using regex...');
+
+                  // Regex parsing for YAML automated_issues
+                  const automatedIssuesMatch = text.match(/automated_issues:\s*\n((?:\s*-[\s\S]*?(?=\n\w|\n$))*)/);
+                  if (automatedIssuesMatch) {
+                    const yamlList = automatedIssuesMatch[1];
+                    const issues = [];
+
+                    // Split by issue entries (lines starting with -)
+                    const issueMatches = yamlList.matchAll(/^\s*-\s*([\s\S]*?)(?=^\s*-|\s*$)/gm);
+
+                    for (const match of issueMatches) {
+                      const block = match[1];
+                      if (block.trim()) {
+                        const issue = {};
+
+                        // Extract fields with multiline support
+                        const titleMatch = block.match(/title:\s*["']?(.*?)["']?\s*(?=\n|$)/);
+                        const descMatch = block.match(/description:\s*["']?([\s\S]*?)["']?\s*(?=\n\s*\w+:|$)/);
+                        const labelsMatch = block.match(/labels:\s*\[(.*?)\]/);
+                        const phaseMatch = block.match(/phase:\s*["']?(.*?)["']?\s*(?=\n|$)/);
+                        const priorityMatch = block.match(/priority:\s*["']?(.*?)["']?\s*(?=\n|$)/);
+                        const categoryMatch = block.match(/category:\s*["']?(.*?)["']?\s*(?=\n|$)/);
+
+                        if (titleMatch) issue.title = titleMatch[1].trim();
+                        if (descMatch) issue.description = descMatch[1].trim();
+                        if (labelsMatch) {
+                          issue.labels = labelsMatch[1].split(',').map(l => l.trim().replace(/["']/g, ''));
+                        }
+                        if (phaseMatch) issue.phase = phaseMatch[1].trim();
+                        if (priorityMatch) issue.priority = priorityMatch[1].trim();
+                        if (categoryMatch) issue.category = categoryMatch[1].trim();
+
+                        if (issue.title) {
+                          issues.push(issue);
+                        }
+                      }
+                    }
+
+                    if (issues.length > 0) {
+                      console.log(`✅ Found ${issues.length} automated_issues via regex parsing`);
+                      return { automated_issues: issues };
+                    }
+                  }
+                }
+
+                // Strategy 1: Look for JSON blocks
+                let match = text.match(/```json\s*(\{[\s\S]*?"automated_issues"[\s\S]*?\})\s*```/);
+                if (match) {
+                  console.log('✅ Found JSON block with automated_issues');
+                  return JSON.parse(match[1]);
+                }
+
+                // Strategy 2: Handle escaped JSON
+                match = text.match(/```json\s*(\{[^`]*"automated_issues"[^`]*\})\s*```/);
+                if (match) {
+                  console.log('✅ Found escaped JSON with automated_issues');
+                  return JSON.parse(match[1]);
+                }
+
+                // Strategy 3: Find JSON object with automated_issues anywhere
+                match = text.match(/(\{[^{}]*"automated_issues"[^{}]*\})/);
+                if (match) {
+                  console.log('✅ Found JSON object with automated_issues');
+                  return JSON.parse(match[1]);
+                }
+
+                return null;
+              } catch (error) {
+                console.log(`❌ Error extracting automation data: ${error.message}`);
+                return null;
+              }
+            }
+
+            const issuesData = extractAutomationData(reviewResponse);
+            console.log(`Extracted automation data: ${issuesData ? 'Found' : 'Not found'}`);
+
+            if (issuesData && issuesData.automated_issues && Array.isArray(issuesData.automated_issues) && issuesData.automated_issues.length > 0) {
+
+                  // ROBUST: Build YAML with proper escaping
+                  let yamlContent = `# ARC-Automation\nschema_version: "1.0"\nsource_pr: ${context.issue.number}\n` +
+                    `generated_at: "${new Date().toISOString()}"\nautomated_issues:\n`;
+
+                  for (const issue of issuesData.automated_issues) {
+                    // Sanitize strings for YAML
+                    const sanitize = (str) => str.replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '');
+
+                    yamlContent += `  - title: "${sanitize(issue.title || 'Untitled')}"\n`;
+                    yamlContent += `    description: "${sanitize(issue.description || 'No description')}"\n`;
+                    yamlContent += `    labels: [${(issue.labels || []).map(l => `"${sanitize(l)}"`).join(', ')}]\n`;
+                    yamlContent += `    phase: "${sanitize(issue.phase || 'backlog')}"\n`;
+                  }
+
+                  // Create the automation comment
+                  await github.rest.issues.createComment({
+                    issue_number: context.issue.number,
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    body: `<!-- ARC-AUTOMATION -->\n\`\`\`yaml\n${yamlContent}\n\`\`\``
+                  });
+
+                  console.log(`✅ Created automation comment with ${issuesData.automated_issues.length} issues`);
+            } else {
+              console.log('No automation data found in review content');
+            }
+      # ---------- Upload Coverage Report ----------
+      - name: Upload Coverage Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            htmlcov/
+            coverage.json
+            review.json
+
+      # ---------- Add PR Comment with Coverage Badge ----------
+      - name: Add Coverage Badge Comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const coverage_pct = parseFloat("${{ env.COVERAGE_PCT }}") || 0;
+            const coverage_color = coverage_pct >= 85 ? 'brightgreen' :
+                                  coverage_pct >= 70 ? 'yellow' :
+                                  coverage_pct >= 60 ? 'orange' : 'red';
+
+            const badge_url = `https://img.shields.io/badge/coverage-${coverage_pct.toFixed(1)}%25-${coverage_color}`;
+
+            const comment = `## 🤖 ARC-Reviewer Report
+
+            ![Coverage](${badge_url})
+
+            ${context.payload.pull_request.body || ''}`;
+
+            // Only add badge if not already present
+            if (!context.payload.pull_request.body?.includes('img.shields.io/badge/coverage')) {
+              github.rest.pulls.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number,
+                body: comment
+              });
+            }
+
+      # ---------- Block pipeline on blocking issues or coverage regression ----------
+      - name: Check for Blocking Issues
+        if: |
+          fromJson(env.REVIEW_JSON).verdict == 'REQUEST CHANGES' ||
+          fromJson(env.REVIEW_JSON).verdict == 'REQUEST_CHANGES' ||
+          fromJson(env.REVIEW_JSON).has_blockers == true ||
+          env.COVERAGE_FAILED == 'true'
+        shell: bash
+        run: |
+          echo "🚫 PR has blocking issues — failing build."
+          echo "Review verdict: ${{ fromJson(env.REVIEW_JSON).verdict }}"
+          echo "Has blockers: ${{ fromJson(env.REVIEW_JSON).has_blockers }}"
+          echo "Coverage: ${{ env.COVERAGE_PCT }}% (minimum: ${{ env.COVERAGE_BASELINE }}%)"
+          exit 1
+
+      - name: Success Message
+        if: success()
+        shell: bash
+        run: |
+          echo "✅ PR cleared ARC-Reviewer!"
+          echo "- No blocking issues found"
+          echo "- Coverage: ${{ env.COVERAGE_PCT }}% ✓"
+          echo "- Ready to merge after human review"
+
+  # Agent-First Post-merge job to process automation data
+  create-follow-up-issues:
+    if: github.event.action == 'closed' && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Process Automation Data
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pr_num="${{ github.event.pull_request.number }}"
+
+          echo "Processing automation data for PR #$pr_num"
+
+          # Get automation comment
+          gh api "repos/${{ github.repository }}/issues/$pr_num/comments" \
+            --jq '.[] | select(.body | contains("ARC-AUTOMATION")) | .body' > automation.txt || echo ""
+
+          if [ -s automation.txt ]; then
+            # Extract and process YAML
+            python3 << 'PYEOF'
+          import re
+          import yaml
+
+          with open('automation.txt', 'r') as f:
+              content = f.read()
+
+          yaml_match = re.search(r'```yaml\s*\n(.*?)\n```', content, re.DOTALL)
+          if yaml_match:
+              try:
+                  data = yaml.safe_load(yaml_match.group(1))
+                  issues = data.get('automated_issues', [])
+
+                  if issues:
+                      print(f"Found {len(issues)} automation issues")
+
+                      # Create aggregated issue
+                      import subprocess
+                      import json
+
+                      # Validate and ensure labels exist
+                      import os
+                      import sys
+
+                      # Add scripts directory to path for validation utility
+                      script_dir = os.path.join(os.environ.get('GITHUB_WORKSPACE', '.'), 'scripts')
+                      if os.path.exists(script_dir):
+                          sys.path.insert(0, script_dir)
+                          try:
+                              from validate_labels import ensure_label_exists
+                              validated_labels = []
+                              for label in ['from-code-review', 'sprint-current', 'phase:4.1']:
+                                  validated_label = ensure_label_exists(label)
+                                  validated_labels.append(validated_label)
+                          except ImportError:
+                              # Fallback if validation script not available
+                              validated_labels = ['from-code-review', 'sprint-current', 'phase:4.1']
+                      else:
+                          # Fallback labels
+                          validated_labels = ['from-code-review', 'sprint-current', 'phase:4.1']
+
+                      # Build issue content
+                      checklist = []
+                      for issue in issues:
+                          title = issue['title']
+                          desc = issue['description']
+                          phase = issue['phase']
+                          checklist.append(f"- [ ] **{title}**: {desc} (phase: {phase})")
+
+                      pr_num = "${{ github.event.pull_request.number }}"
+                      pr_url = "${{ github.event.pull_request.html_url }}"
+                      pr_author = "${{ github.event.pull_request.user.login }}"
+
+                      # Build issue content safely
+                      issue_body = "## Automated Follow-ups from PR #" + pr_num + "\n\n"
+                      issue_body += "Source: " + pr_url + "\n"
+                      issue_body += "Author: @" + pr_author + "\n\n"
+                      issue_body += "## Issues to Triage\n\n"
+                      issue_body += "\n".join(checklist) + "\n\n"
+                      issue_body += "## Instructions\n\n"
+                      issue_body += "For agents/PMs: Review, prioritize, and move high-value items to sprint YAML files.\n\n"
+                      issue_body += "---\n"
+                      issue_body += "Auto-generated by ARC-Reviewer"
+
+                      with open('issue_body.md', 'w') as f:
+                          f.write(issue_body)
+
+                      # Create the issue
+                      result = subprocess.run([
+                          'gh', 'issue', 'create',
+                          '--title', f'[PR #{pr_num}] ARC-Reviewer Follow-ups',
+                          '--body-file', 'issue_body.md',
+                          '--label', ','.join(validated_labels)
+                      ], capture_output=True, text=True)
+
+                      if result.returncode == 0:
+                          print(f"✅ Created aggregated issue: {result.stdout.strip()}")
+                      else:
+                          print(f"❌ Failed to create issue: {result.stderr}")
+                  else:
+                      print("No automation issues found")
+              except Exception as e:
+                  print(f"Error processing automation data: {e}")
+          else:
+              print("No automation comment found")
+          PYEOF
+          else
+            echo "No automation data found for this PR"
+          fi
+
+      # ---------- Fallback Status for Timeout/Failure ----------
+      - name: Create Fallback ARC-Reviewer Status
+        if: failure() || cancelled()
+        run: |
+          echo "🚨 Claude review workflow failed or timed out - creating fallback status"
+
+          # Create a basic failing ARC-Reviewer status
+          gh api repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }} \
+            --field state=failure \
+            --field target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --field description="Claude review workflow timed out or failed" \
+            --field context="ARC-Reviewer"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

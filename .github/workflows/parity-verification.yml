@@ -1,0 +1,254 @@
+name: Parity Verification
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  verify-manifest:
+    name: Verify Manifest Parity
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install pyyaml requests qdrant-client
+        
+    - name: Start test services
+      run: |
+        docker compose -f docker-compose.test.yml up -d qdrant
+        sleep 10  # Wait for Qdrant to be ready
+    
+    - name: Bootstrap Qdrant collection
+      run: |
+        echo "Bootstrapping Qdrant collection..."
+        # Wait for Qdrant to be fully ready
+        for i in {1..10}; do
+          if curl -s http://localhost:6333/ > /dev/null; then
+            echo "Qdrant is ready"
+            break
+          fi
+          echo "Waiting for Qdrant... attempt $i"
+          sleep 2
+        done
+        # Check Qdrant health directly
+        curl -v http://localhost:6333/ || true
+        # Try bootstrap with explicit parameters
+        python ops/bootstrap/qdrant_bootstrap.py \
+          --collection context_embeddings \
+          --dimensions 384 \
+          --distance Cosine \
+          --qdrant-url http://localhost:6333 \
+          --ensure-collection \
+          --stats || echo "Bootstrap attempt completed"
+        
+        # Verify collection exists
+        echo "Checking if collection was created..."
+        curl -s http://localhost:6333/collections | python -m json.tool || true
+        
+        # Try to get specific collection info
+        echo "Getting collection info..."
+        curl -s http://localhost:6333/collections/context_embeddings | python -m json.tool || true
+        
+        # Test with Python requests (same as manifest verifier)
+        echo "Testing with Python requests..."
+        python -c "import requests; r = requests.get('http://localhost:6333/collections/context_embeddings'); print(f'Status: {r.status_code}'); print(r.text[:500] if r.ok else r.text)" || true
+        
+        # Test indexes endpoint
+        echo "Testing indexes endpoint..."
+        curl -s http://localhost:6333/collections/context_embeddings/indexes || echo "No indexes endpoint"
+        
+    - name: Run manifest verifier
+      id: verify
+      run: |
+        echo "Running manifest verification..."
+        # Debug: Check collection one more time before verifier
+        echo "Pre-check: Verifying collection exists..."
+        curl -s http://localhost:6333/collections/context_embeddings | head -c 100
+        echo ""
+        
+        python ops/verify/manifest_verifier.py \
+          --config config/production_locked_config.yaml \
+          --qdrant-url http://localhost:6333 \
+          --collection context_embeddings \
+          2>&1 | tee verification.log
+        
+        # Check for success
+        if grep -q "PASSED" verification.log; then
+          echo "✅ Manifest verification PASSED"
+          echo "status=passed" >> $GITHUB_OUTPUT
+        else
+          echo "❌ Manifest verification FAILED"
+          echo "status=failed" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        
+    - name: Upload verification log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: verification-log
+        path: verification.log
+        
+    - name: Comment on PR
+      if: github.event_name == 'pull_request'
+      continue-on-error: true  # Don't fail the job if GitHub API times out
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const log = fs.readFileSync('verification.log', 'utf8');
+          const status = '${{ steps.verify.outputs.status }}';
+          
+          const icon = status === 'passed' ? '✅' : '❌';
+          const message = `${icon} **Manifest Verification: ${status.toUpperCase()}**
+          
+          <details>
+          <summary>Verification Log</summary>
+          
+          \`\`\`
+          ${log}
+          \`\`\`
+          </details>`;
+          
+          try {
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: message
+            });
+            console.log('✅ Successfully posted PR comment');
+          } catch (error) {
+            console.log('⚠️ Failed to post PR comment (non-blocking):', error.message);
+            // Don't throw - this is optional functionality
+          }
+          
+  dimension-check:
+    name: Check Dimension Consistency
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check configurations
+      run: |
+        echo "Checking dimension consistency across configs..."
+        
+        # Extract dimensions from various configs
+        PROD_DIM=$(grep -E "dim.*:" config/production_locked_config.yaml | grep -oE "[0-9]+" || echo "not found")
+        CTXRC_DIM=$(grep -E "dimensions:" config/.ctxrc.yaml | grep -oE "[0-9]+" || echo "not found")
+        
+        echo "Production config: $PROD_DIM dimensions"
+        echo "Context RC: $CTXRC_DIM dimensions"
+        
+        # Check consistency
+        if [ "$PROD_DIM" != "$CTXRC_DIM" ]; then
+          echo "❌ Dimension mismatch detected!"
+          echo "Production: $PROD_DIM"
+          echo "Context RC: $CTXRC_DIM"
+          exit 1
+        fi
+        
+        echo "✅ Dimensions are consistent: $PROD_DIM"
+  
+  smoke-tests:
+    name: Run Smoke Tests
+    runs-on: ubuntu-latest
+    needs: [verify-manifest, dimension-check]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install requests colorama pyyaml qdrant-client
+        
+    - name: Start test services
+      run: |
+        docker compose -f docker-compose.test.yml up -d
+        echo "Waiting for services to be ready..."
+        sleep 20
+        
+    - name: Bootstrap Qdrant collection for smoke tests
+      run: |
+        echo "Bootstrapping Qdrant collection for smoke tests..."
+        # Wait for Qdrant to be fully ready
+        for i in {1..10}; do
+          if curl -s http://localhost:6333/ > /dev/null; then
+            echo "Qdrant is ready"
+            break
+          fi
+          echo "Waiting for Qdrant... attempt $i"
+          sleep 2
+        done
+        
+        # Bootstrap collection for smoke tests
+        python ops/bootstrap/qdrant_bootstrap.py \
+          --collection context_embeddings \
+          --dimensions 384 \
+          --distance Cosine \
+          --qdrant-url http://localhost:6333 \
+          --ensure-collection \
+          --stats || echo "Bootstrap completed"
+        
+    - name: Run smoke tests
+      id: smoke
+      run: |
+        echo "Running smoke tests..."
+        python ops/smoke/smoke_runner.py \
+          --verbose \
+          --export junit \
+          --output smoke-results.xml \
+          2>&1 | tee smoke.log
+        
+        # Check exit code
+        if [ ${PIPESTATUS[0]} -eq 0 ]; then
+          echo "✅ Smoke tests PASSED"
+          echo "status=passed" >> $GITHUB_OUTPUT
+        else
+          echo "❌ Smoke tests FAILED"
+          echo "status=failed" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+        
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: smoke-test-results
+        path: |
+          smoke-results.xml
+          smoke.log
+        
+    - name: Publish test results
+      if: always()
+      uses: EnricoMi/publish-unit-test-result-action@v2
+      with:
+        files: smoke-results.xml
+        check_name: Smoke Test Results
+        
+    - name: Stop test services
+      if: always()
+      run: |
+        docker compose -f docker-compose.test.yml down
