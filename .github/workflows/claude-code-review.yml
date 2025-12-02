@@ -29,7 +29,7 @@ jobs:
     if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/credentum/veris-memory-ci:latest
+      image: ghcr.io/credentum/veris-memory-core-ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
