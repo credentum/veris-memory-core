@@ -1,54 +1,43 @@
-# Veris Memory Docker Compose Configuration
+# Veris Memory - Docker Compose Configuration
 #
-# DEPLOYMENT STRATEGY:
-#   This file has BOTH "image:" (GHCR) and "build:" (local) directives for all services.
-#   Docker Compose behavior:
-#     - docker compose up         → Pulls from GHCR (fast, 30 sec)
-#     - docker compose up --build → Builds locally (slower, 7 min)
+# Quick Start:
+#   1. Copy .env.example to .env and set passwords
+#   2. Run: docker compose up --build
 #
-# AUTOMATIC FALLBACK:
-#   If GHCR pull fails (network issue, images not pushed yet), deployment automatically
-#   falls back to local build. See scripts/deploy-dev.sh for implementation.
-#
-# PRODUCTION: Pulls CVE-validated images from GHCR (deployed via GitHub Actions)
-# LOCAL DEV: Can build locally or pull from GHCR (developer's choice)
+# Services:
+#   - context-store: MCP server for AI agents (port 8000)
+#   - api: REST API for operations (port 8001)
+#   - qdrant: Vector database (port 6333)
+#   - neo4j: Graph database (port 7687)
+#   - redis: Cache/KV store (port 6379)
 
 services:
   # Context Store MCP Server (Primary AI Agent Interface)
   context-store:
-    image: ghcr.io/credentum/veris-memory-core/context-store:latest
     build:
       context: .
       dockerfile: dockerfiles/Dockerfile
-    pull_policy: always
     ports:
-      - "8000:8000"  # SECURITY: Accessible via Docker bridge network for MCP clients (external access blocked by firewall)
+      - "8000:8000"
     environment:
       - QDRANT_URL=http://qdrant:6333
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=${NEO4J_PASSWORD}
-      - NEO4J_RO_PASSWORD=${NEO4J_RO_PASSWORD}
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379  # SECURITY: Redis with password auth
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - MCP_SERVER_PORT=8000
-      - LOG_LEVEL=info
-      - API_KEY_MCP=${API_KEY_MCP}
-      - AUTH_REQUIRED=${AUTH_REQUIRED:-true}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - API_KEY_MCP=${API_KEY_MCP:-}
+      - AUTH_REQUIRED=${AUTH_REQUIRED:-false}
       - ENVIRONMENT=${ENVIRONMENT:-development}
-      # PR #170: Cache and embedding configuration
-      - VERIS_CACHE_TTL_SECONDS=${VERIS_CACHE_TTL_SECONDS:-300}
-      - STRICT_EMBEDDINGS=${STRICT_EMBEDDINGS:-false}
-      - EMBEDDING_DIM=${EMBEDDING_DIM:-384}  # v1.0 compliance: must be 384
-      - QDRANT_COLLECTION_NAME=${QDRANT_COLLECTION_NAME:-context_embeddings}  # Collection name for vector storage
-      # HyDE (Hypothetical Document Embeddings) Configuration
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      # Embedding configuration
+      - EMBEDDING_DIM=${EMBEDDING_DIM:-384}
+      - QDRANT_COLLECTION_NAME=${QDRANT_COLLECTION_NAME:-context_embeddings}
+      # Optional: HyDE (Hypothetical Document Embeddings)
       - HYDE_ENABLED=${HYDE_ENABLED:-false}
-      - HYDE_API_PROVIDER=${HYDE_API_PROVIDER:-openrouter}
-      - HYDE_MODEL=${HYDE_MODEL:-x-ai/grok-4.1-fast:free}
-      # Cross-Encoder Reranker Configuration (Phase 3.5)
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      # Optional: Cross-Encoder Reranker
       - CROSS_ENCODER_RERANKER_ENABLED=${CROSS_ENCODER_RERANKER_ENABLED:-false}
-      - CROSS_ENCODER_TOP_K=${CROSS_ENCODER_TOP_K:-50}
-      - CROSS_ENCODER_RETURN_K=${CROSS_ENCODER_RETURN_K:-10}
     command: ["python", "-m", "uvicorn", "src.mcp_server.main:app", "--host", "0.0.0.0", "--port", "8000"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -65,27 +54,24 @@ services:
         condition: service_healthy
     restart: unless-stopped
     networks:
-      - context-store-network
+      - veris-network
 
-  # REST API Server (Operational Interface & Monitoring)
+  # REST API Server
   api:
-    image: ghcr.io/credentum/veris-memory-core/api:latest
     build:
       context: .
       dockerfile: dockerfiles/Dockerfile.api
-    pull_policy: always
     ports:
-      - "127.0.0.1:8001:8001"  # SECURITY: Bind to localhost only
+      - "8001:8001"
     environment:
       - QDRANT_URL=http://qdrant:6333
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=${NEO4J_PASSWORD}
-      - NEO4J_RO_PASSWORD=${NEO4J_RO_PASSWORD}
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379  # SECURITY: Redis with password auth
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - API_SERVER_PORT=8001
-      - LOG_LEVEL=info
-      - API_KEY_MCP=${API_KEY_MCP}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - API_KEY_MCP=${API_KEY_MCP:-}
     command: ["python", "-m", "uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8001"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/api/v1/health/live"]
@@ -102,18 +88,16 @@ services:
         condition: service_healthy
     restart: unless-stopped
     networks:
-      - context-store-network
+      - veris-network
 
-  # Vector Database (Qdrant) - Using v1.15.1 with health check tools
+  # Vector Database (Qdrant)
   qdrant:
     build:
       context: .
       dockerfile: dockerfiles/Dockerfile.qdrant
-    image: veris-memory/qdrant:v1.15.1-healthcheck
-    platform: linux/amd64
     ports:
-      - "127.0.0.1:6333:6333"  # SECURITY: Bind to localhost only
-      - "127.0.0.1:6334:6334"  # SECURITY: gRPC port - localhost only
+      - "6333:6333"
+      - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     environment:
@@ -127,109 +111,60 @@ services:
       start_period: 30s
     restart: unless-stopped
     networks:
-      - context-store-network
+      - veris-network
 
   # Graph Database (Neo4j)
   neo4j:
-    image: neo4j:5.15-community@sha256:69c579facb7acab1e98f28952b91144c89e469a081804a5dafebd6c3030433b8
-    platform: linux/amd64
+    image: neo4j:5.15-community
     ports:
-      - "127.0.0.1:7474:7474"  # SECURITY: HTTP - localhost only
-      - "127.0.0.1:7687:7687"  # SECURITY: Bolt - localhost only
+      - "7474:7474"
+      - "7687:7687"
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
-      # Mount initialization scripts for schema setup
-      - ./deployments/neo4j-init:/docker-entrypoint-initdb.d:ro
     environment:
       - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD}
       - NEO4J_PLUGINS=["apoc"]
-      - NEO4J_dbms_default__listen__address=0.0.0.0
-      - NEO4J_dbms_default__advertised__address=localhost
-      - NEO4J_dbms_connector_https_advertised__address=localhost:7473
-      - NEO4J_dbms_connector_http_advertised__address=localhost:7474
-      - NEO4J_dbms_connector_bolt_advertised__address=localhost:7687
       - NEO4J_dbms_security_procedures_unrestricted=apoc.*
-      # Enable Neo4j Labs plugins for advanced features
-      - NEO4JLABS_PLUGINS=["apoc"]
     healthcheck:
-      test:
-        [
-          "CMD",
-          "wget",
-          "--no-verbose",
-          "--tries=1",
-          "--spider",
-          "http://localhost:7474",
-        ]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:7474"]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 60s
     restart: unless-stopped
     networks:
-      - context-store-network
+      - veris-network
 
   # Cache/KV Store (Redis)
   redis:
-    image: redis:7.2.5-alpine@sha256:6aaf3f5e6bc8a592fbfe2cccf19eb36d27c39d12dab4f4b01556b7449e7b1f44
-    platform: linux/amd64
+    image: redis:7-alpine
     ports:
-      - "127.0.0.1:6379:6379"  # SECURITY: Bind to localhost only
+      - "6379:6379"
     volumes:
       - redis_data:/data
-    environment:
-      # SECURITY: Use REDISCLI_AUTH to avoid exposing password in process list
-      - REDISCLI_AUTH=${REDIS_PASSWORD}
-    # SECURITY: Redis with password authentication
-    # Password is required via --requirepass flag. If REDIS_PASSWORD is not set,
-    # the container will fail to start with an error about missing environment variable.
     command: >
       redis-server
       --requirepass ${REDIS_PASSWORD}
       --appendonly yes
       --maxmemory 512mb
       --maxmemory-policy allkeys-lru
-      --protected-mode yes
-    # HEALTHCHECK BEHAVIOR:
-    # - If REDIS_PASSWORD is not set: Container fails to start (docker-compose error)
-    # - If REDIS_PASSWORD is wrong in healthcheck: Healthcheck fails, container marked unhealthy
-    # - If REDIS_PASSWORD is correct: Healthcheck succeeds, container marked healthy
-    #
-    # SECURITY NOTE: Using REDISCLI_AUTH environment variable instead of -a flag
-    # to prevent password exposure in process list (ps aux, docker inspect)
-    #
-    # Debug failing healthchecks:
-    #   docker exec <container> redis-cli ping
-    #   docker inspect --format='{{.State.Health.Status}}' <container>
     healthcheck:
-      test: ["CMD", "sh", "-c", "redis-cli ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
     restart: unless-stopped
     networks:
-      - context-store-network
+      - veris-network
 
 volumes:
-  # IMPORTANT: Using external volumes with explicit names to preserve data across deployments
-  # This ensures that data persists even when using different project names (-p flag)
-  # These volumes match the original veris-memory_* names to preserve existing data
   qdrant_data:
-    external: true
-    name: veris-memory-core_qdrant_data
   neo4j_data:
-    external: true
-    name: veris-memory-core_neo4j_data
   neo4j_logs:
-    external: true
-    name: veris-memory-core_neo4j_logs
   redis_data:
-    external: true
-    name: veris-memory-core_redis_data
 
 networks:
-  context-store-network:
+  veris-network:
     driver: bridge
-    name: veris-memory-core_context-store-network
