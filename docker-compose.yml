@@ -33,7 +33,6 @@ services:
       - MCP_SERVER_PORT=8000
       - LOG_LEVEL=info
       - API_KEY_MCP=${API_KEY_MCP}
-      - API_KEY_SENTINEL=${SENTINEL_API_KEY}
       - AUTH_REQUIRED=${AUTH_REQUIRED:-true}
       - ENVIRONMENT=${ENVIRONMENT:-development}
       # PR #170: Cache and embedding configuration
@@ -213,104 +212,6 @@ services:
     networks:
       - context-store-network
 
-  # Monitoring Dashboard Service
-  monitoring-dashboard:
-    image: ghcr.io/credentum/veris-memory-core/context-store:latest
-    build:
-      context: .
-      dockerfile: dockerfiles/Dockerfile
-    pull_policy: always
-    ports:
-      - "127.0.0.1:8080:8080"  # SECURITY: Bind to localhost only
-    environment:
-      - QDRANT_URL=http://qdrant:6333
-      - NEO4J_URI=bolt://neo4j:7687
-      - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379  # SECURITY: Redis with password auth
-      - DASHBOARD_PORT=8080
-      - MONITORING_ENABLED=true
-      - LOG_LEVEL=info
-      - API_KEY_MCP=${API_KEY_MCP}
-    command: ["python", "-m", "src.monitoring"]
-    depends_on:
-      qdrant:
-        condition: service_healthy
-      neo4j:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/api/dashboard/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 90s
-    restart: unless-stopped
-    networks:
-      - context-store-network
-
-  # Sentinel Monitoring Service - Monitors all S1-S10 checks and sends alerts
-  # Requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to be set in GitHub Secrets
-  # for Telegram alerting. Get bot token from @BotFather, chat ID from @userinfobot
-  sentinel:
-    image: ghcr.io/credentum/veris-memory-core/sentinel:latest
-    build:
-      context: .
-      dockerfile: dockerfiles/Dockerfile.sentinel
-    pull_policy: always
-    environment:
-      # Telegram Configuration (from GitHub Secrets)
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
-      # Sentinel Configuration
-      - SENTINEL_CHECK_INTERVAL=60
-      - TARGET_BASE_URL=http://context-store:8000  # Changed from SENTINEL_TARGET_URL to match code
-      - SENTINEL_API_URL=http://api:8001  # Deprecated, kept for backwards compatibility
-      # Service URLs - using consistent naming with other services
-      - NEO4J_URI=bolt://neo4j:7687
-      - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379  # SECURITY: Redis with password auth
-      - QDRANT_URL=http://qdrant:6333
-      - MONITORING_DASHBOARD_URL=http://monitoring-dashboard:8080
-      # API Authentication - Sentinel uses its own dedicated API key
-      - SENTINEL_API_KEY=${SENTINEL_API_KEY}
-      # General Configuration (required for S7 config parity check)
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - ENVIRONMENT=${ENVIRONMENT:-production}
-    volumes:
-      - sentinel_data:/var/lib/sentinel
-      # Mount host backup directories for S6 backup validation (read-only)
-      # Primary backup location: /backup (RAID1 array /dev/md2)
-      # Contains: backup-weekly, backup-monthly, backup-ultimate, daily, monthly,
-      #           weekly, restic-repo, health, cleanup, temp
-      - /backup:/backup:ro
-    ports:
-      - "127.0.0.1:9090:9090"  # SECURITY: Bind to localhost only
-    depends_on:
-      context-store:
-        condition: service_healthy
-      api:
-        condition: service_healthy
-      neo4j:
-        condition: service_healthy
-      qdrant:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      monitoring-dashboard:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
-      interval: 60s      # Less frequent to reduce load
-      timeout: 5s       # Faster timeout
-      retries: 5        # More retries for resilience
-      start_period: 120s # Longer startup grace period
-    restart: unless-stopped
-    networks:
-      - context-store-network
-
 volumes:
   # IMPORTANT: Using external volumes with explicit names to preserve data across deployments
   # This ensures that data persists even when using different project names (-p flag)
@@ -327,9 +228,6 @@ volumes:
   redis_data:
     external: true
     name: veris-memory-core_redis_data
-  sentinel_data:
-    external: true
-    name: veris-memory-core_sentinel_data
 
 networks:
   context-store-network:
