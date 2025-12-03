@@ -331,21 +331,11 @@ else:
     )
     logger.warning("System will fall back to legacy retrieval code path")
 
-# Import monitoring dashboard components
-try:
-    from ..monitoring.dashboard import UnifiedDashboard
-    from ..monitoring.request_metrics import RequestMetricsMiddleware, get_metrics_collector
-    from ..monitoring.streaming import MetricsStreamer
-
-    DASHBOARD_AVAILABLE = True
-    REQUEST_METRICS_AVAILABLE = True
-    logger.info("Dashboard monitoring components available")
-except ImportError as e:
-    logger.warning(f"Dashboard monitoring not available: {e}")
-    DASHBOARD_AVAILABLE = False
-    REQUEST_METRICS_AVAILABLE = False
-    UnifiedDashboard = None
-    MetricsStreamer = None
+# Monitoring dashboard removed from core - available in deployment repo
+DASHBOARD_AVAILABLE = False
+REQUEST_METRICS_AVAILABLE = False
+UnifiedDashboard = None
+MetricsStreamer = None
 
 # Global embedding model instance
 _embedding_model: Optional[SentenceTransformer] = None

@@ -49,8 +49,6 @@ try:
     from src.storage.graph_fact_store import GraphFactStore
     from src.storage.hybrid_scorer import HybridScorer, ScoringMode
     from src.core.graph_query_expander import GraphQueryExpander
-    # Metrics collection import
-    from src.monitoring.request_metrics import get_metrics_collector
     # Response validation import
     from src.core.response_validator import validate_mcp_response
     # Search enhancement imports
@@ -73,8 +71,6 @@ except ImportError:
     from core.rate_limiter import rate_limit_check
     from core.ssl_config import SSLConfigManager
     from security.cypher_validator import CypherValidator
-    # Metrics collection import for fallback path
-    from monitoring.request_metrics import get_metrics_collector
     from storage.kv_store import ContextKV
     from storage.neo4j_client import Neo4jInitializer
     from storage.qdrant_client import VectorDBInitializer
@@ -89,8 +85,6 @@ except ImportError:
     from storage.fact_ranker import FactAwareRanker
     from core.query_rewriter import FactQueryRewriter
     from middleware.scope_validator import ScopeValidator, ScopeMiddleware
-    # Metrics collection import
-    from monitoring.request_metrics import get_metrics_collector
     # Search enhancement imports
     from mcp_server.search_enhancements import (
         apply_search_enhancements,
@@ -153,15 +147,9 @@ async def initialize_storage_clients() -> Dict[str, Any]:
     global neo4j_client, qdrant_client, kv_store, embedding_generator, fact_store, scope_middleware, metrics_collector
 
     try:
-        # Initialize metrics collector
-        try:
-            metrics_collector = get_metrics_collector()
-            await metrics_collector.start_queue_processor()
-            logger.info("✅ Metrics collector initialized")
-        except Exception as metrics_error:
-            logger.warning(f"⚠️ Failed to initialize metrics collector: {metrics_error}")
-            metrics_collector = None  # Continue without metrics
-        
+        # Metrics collector removed from core - available in deployment repo
+        # metrics_collector remains None
+
         # Validate configuration
         config_result = validate_all_configs()
         base_config = config_result.get("config", {})

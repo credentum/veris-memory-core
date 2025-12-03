@@ -26,16 +26,10 @@ except ImportError:
         from graph_enhancer import EntityExtractor, EntityMention, EntityType
         from neo4j_client import Neo4jInitializer
 
-# Import monitoring for Neo4j fallback metrics
-try:
-    from ..monitoring.fact_monitoring import record_custom_metric
-except ImportError:
-    try:
-        from monitoring.fact_monitoring import record_custom_metric
-    except ImportError:
-        # Fallback if monitoring not available
-        def record_custom_metric(metric_name: str, value: float, **labels) -> None:
-            pass
+# Monitoring removed from core - use no-op for metrics
+def record_custom_metric(metric_name: str, value: float, **labels) -> None:
+    """No-op metric recording - monitoring available in deployment repo."""
+    pass
 
 logger = logging.getLogger(__name__)
 
