@@ -1,0 +1,79 @@
+# Base Dockerfile for Veris Memory Core
+# Contains all ML dependencies with CPU-only PyTorch
+# Both context-store and api images extend from this base
+#
+# Size: ~2GB (vs ~8GB with CUDA)
+
+FROM python:3.11-slim@sha256:2ec5a4a5c3e919570f57675471f081d6299668d909feabd8d4803c6c61af666c
+
+# Build arguments
+ARG ENVIRONMENT=production
+
+# Security: Upgrade vulnerable packages
+RUN apt-get update && \
+    apt-get upgrade -y \
+        libc-bin \
+        libc6 \
+        libsqlite3-0 \
+        perl-base && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        gcc \
+        g++ \
+        libc6-dev \
+        curl \
+        netcat-openbsd \
+        ca-certificates \
+        && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Create non-root user
+RUN useradd -m -u 1000 appuser
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements
+COPY requirements.txt .
+
+# Install Python packages with CPU-only PyTorch
+# This reduces image size from ~8GB to ~2GB
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+        --extra-index-url https://download.pytorch.org/whl/cpu \
+        torch --no-deps && \
+    pip install --no-cache-dir \
+        --extra-index-url https://download.pytorch.org/whl/cpu \
+        -r requirements.txt
+
+# Remove build dependencies to reduce image size
+RUN apt-get update && \
+    apt-get remove -y gcc g++ libc6-dev && \
+    apt-get autoremove -y && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache
+
+# Copy common application code
+COPY --chown=appuser:appuser src/ ./src/
+COPY --chown=appuser:appuser schemas/ ./schemas/
+COPY --chown=appuser:appuser contracts/ ./contracts/
+COPY --chown=appuser:appuser config/.ctxrc.docker.yaml ./.ctxrc.yaml
+
+# Create necessary directories
+RUN mkdir -p /app/logs /app/data && \
+    chown -R appuser:appuser /app
+
+# Common environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONHASHSEED=random
+ENV LOG_LEVEL=info
+ENV ENVIRONMENT=production
+
+# Default user
+USER appuser

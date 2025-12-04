@@ -25,8 +25,8 @@ class HyDEConfig:
     """Configuration for HyDE generator."""
 
     enabled: bool = True
-    # Default to free Grok model via OpenRouter
-    model: str = "x-ai/grok-4.1-fast:free"
+    # Default to Mistral Small via OpenRouter (excellent for RAG/document generation)
+    model: str = "mistralai/mistral-small-3.1-24b-instruct-2503"
     # API provider: "openrouter" (default, free) or "openai"
     api_provider: str = "openrouter"
     # Base URL for the API (OpenRouter by default)
@@ -85,7 +85,7 @@ Answer:"""
 
             # Set defaults based on provider
             if api_provider == "openrouter":
-                default_model = "x-ai/grok-4.1-fast:free"
+                default_model = "mistralai/mistral-small-3.1-24b-instruct-2503"
                 default_base_url = "https://openrouter.ai/api/v1"
             else:  # openai
                 default_model = "gpt-4o-mini"
