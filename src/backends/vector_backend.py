@@ -337,7 +337,9 @@ class VectorBackend(BackendSearchInterface):
                     },
                     namespace=payload.get("namespace"),
                     title=payload.get("title"),
-                    user_id=payload.get("user_id"),
+                    user_id=payload.get("user_id") or payload.get("author"),
+                    # Cross-team sharing (Issue #2)
+                    shared=payload.get("shared", False),
                 )
 
                 results.append(memory_result)
@@ -370,7 +372,12 @@ class VectorBackend(BackendSearchInterface):
                     filter_tags = filter_value if isinstance(filter_value, list) else [filter_value]
                     filtered = [r for r in filtered if any(tag in r.tags for tag in filter_tags)]
                 elif filter_key == "user_id":
-                    filtered = [r for r in filtered if r.user_id == filter_value]
+                    # Cross-team sharing (Issue #2): Include shared contexts
+                    include_shared = options.filters.get("include_shared", True)
+                    if include_shared:
+                        filtered = [r for r in filtered if r.user_id == filter_value or r.shared]
+                    else:
+                        filtered = [r for r in filtered if r.user_id == filter_value]
 
         # Apply score threshold
         if options.score_threshold > 0:

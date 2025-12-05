@@ -278,11 +278,17 @@ class GraphBackend(BackendSearchInterface):
             where_conditions.append("n.type = $type_filter")
             parameters["type_filter"] = options.filters["type"]
         
-        # Apply user_id filter
+        # Apply user_id filter with cross-team sharing support (Issue #2)
         if options.filters.get("user_id"):
-            where_conditions.append("n.user_id = $user_id_filter")
+            include_shared = options.filters.get("include_shared", True)
+            if include_shared:
+                # Include user's own contexts OR shared contexts from other teams
+                where_conditions.append("(n.user_id = $user_id_filter OR n.shared = true)")
+            else:
+                # Only user's own contexts
+                where_conditions.append("n.user_id = $user_id_filter")
             parameters["user_id_filter"] = options.filters["user_id"]
-        
+
         # Combine conditions
         where_clause = " AND ".join(where_conditions) if where_conditions else "true"
         
@@ -395,7 +401,9 @@ class GraphBackend(BackendSearchInterface):
                     },
                     namespace=node_data.get('namespace'),
                     title=node_data.get('title'),
-                    user_id=node_data.get('user_id')
+                    user_id=node_data.get('user_id') or node_data.get('author'),
+                    # Cross-team sharing (Issue #2)
+                    shared=node_data.get('shared', False),
                 )
                 
                 results.append(memory_result)
@@ -442,7 +450,9 @@ class GraphBackend(BackendSearchInterface):
                 # Filter fields
                 f"CREATE INDEX IF NOT EXISTS FOR (n:{self._node_label}) ON (n.timestamp)",
                 f"CREATE INDEX IF NOT EXISTS FOR (n:{self._node_label}) ON (n.namespace)",
-                f"CREATE INDEX IF NOT EXISTS FOR (n:{self._node_label}) ON (n.type)"
+                f"CREATE INDEX IF NOT EXISTS FOR (n:{self._node_label}) ON (n.type)",
+                # Cross-team sharing (Issue #2)
+                f"CREATE INDEX IF NOT EXISTS FOR (n:{self._node_label}) ON (n.shared)"
             ]
             
             for index_query in index_queries:

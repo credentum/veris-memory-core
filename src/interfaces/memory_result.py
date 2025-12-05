@@ -54,6 +54,8 @@ class MemoryResult(BaseModel):
     namespace: Optional[str] = Field(default=None, description="Namespace for multi-tenant scenarios")
     title: Optional[str] = Field(default=None, description="Optional title for the content")
     user_id: Optional[str] = Field(default=None, description="Associated user identifier")
+    # Cross-team sharing (Issue #2)
+    shared: bool = Field(default=False, description="Whether this context is shared across teams")
     
     @field_validator('text')
     @classmethod

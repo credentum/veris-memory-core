@@ -620,6 +620,11 @@ class StoreContextRequest(BaseModel):
         pattern="^(human|agent)$",
         description="Type of author: 'human' or 'agent'. Auto-populated from API key if not provided.",
     )
+    # Cross-team sharing (Issue #2)
+    shared: bool = Field(
+        default=False,
+        description="When true, context is visible to all teams regardless of API key namespace.",
+    )
 
 
 class RetrieveContextRequest(BaseModel):
@@ -656,6 +661,11 @@ class RetrieveContextRequest(BaseModel):
     use_cache: bool = Field(
         default=True,
         description="Whether to use cached results. Set to false to bypass cache and get fresh results.",
+    )
+    # Cross-team sharing (Issue #2)
+    include_shared: bool = Field(
+        default=True,
+        description="Whether to include shared contexts from other teams. Default true.",
     )
 
 
@@ -2325,6 +2335,9 @@ async def store_context(
                             "content": request.content,
                             "type": request.type,
                             "metadata": request.metadata,
+                            # Cross-team sharing (Issue #2)
+                            "shared": request.shared,
+                            "author": author or "unknown",
                         },
                     )
                     logger.info(f"Successfully stored vector with ID: {vector_id}")
@@ -2349,6 +2362,8 @@ async def store_context(
                     "author": author or "unknown",
                     "author_type": author_type or "unknown",
                     "created_at": datetime.now().isoformat(),
+                    # Cross-team sharing (Issue #2)
+                    "shared": request.shared,
                 }
 
                 # Handle request.content safely - convert nested objects to JSON strings
@@ -2637,12 +2652,16 @@ async def retrieve_context(request: RetrieveContextRequest) -> Dict[str, Any]:
                 )
 
                 # Execute search through unified retrieval core
+                # Cross-team sharing (Issue #2): Pass include_shared through metadata_filters
+                metadata_filters = getattr(request, "metadata_filters", None) or {}
+                metadata_filters["include_shared"] = getattr(request, "include_shared", True)
+
                 search_response = await retrieval_core.search(
                     query=request.query,
                     limit=request.limit,
                     search_mode=request.search_mode,
                     context_type=getattr(request, "context_type", None),
-                    metadata_filters=getattr(request, "metadata_filters", None),
+                    metadata_filters=metadata_filters,
                     score_threshold=0.0,  # Use default threshold
                 )
 
@@ -2674,6 +2693,8 @@ async def retrieve_context(request: RetrieveContextRequest) -> Dict[str, Any]:
                             "tags": memory_result.tags,
                             "namespace": memory_result.namespace,
                             "user_id": memory_result.user_id,
+                            # Cross-team sharing (Issue #2)
+                            "shared": memory_result.shared,
                         }
                     )
 
