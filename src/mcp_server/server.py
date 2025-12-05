@@ -568,6 +568,21 @@ async def list_tools() -> List[Tool]:
             },
         ),
         Tool(
+            name="get_scratchpad",
+            description="Retrieve agent scratchpad data (convenience wrapper for get_agent_state with scratchpad prefix)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string", "description": "Agent identifier"},
+                    "key": {
+                        "type": "string",
+                        "description": "Specific scratchpad key to retrieve (optional, returns all if not specified)",
+                    },
+                },
+                "required": ["agent_id"],
+            },
+        ),
+        Tool(
             name="get_agent_state",
             description="Retrieve agent state with namespace isolation",
             inputSchema={
@@ -1001,6 +1016,8 @@ async def call_tool(
             result = await query_graph_tool(arguments)
         elif name == "update_scratchpad":
             result = await update_scratchpad_tool(arguments)
+        elif name == "get_scratchpad":
+            result = await get_scratchpad_tool(arguments)
         elif name == "get_agent_state":
             result = await get_agent_state_tool(arguments)
         elif name == "detect_communities":
@@ -2315,6 +2332,42 @@ async def update_scratchpad_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "message": f"Failed to update scratchpad: {str(e)}",
             "error_type": "unexpected_error",
         }
+
+
+async def get_scratchpad_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Retrieve agent scratchpad data.
+
+    Convenience wrapper for get_agent_state_tool with scratchpad prefix.
+    This simplifies retrieval of scratchpad data without requiring users
+    to specify the prefix parameter.
+
+    Args:
+        arguments: Dictionary containing:
+            - agent_id (str): Agent identifier (required)
+            - key (str, optional): Specific scratchpad key to retrieve
+
+    Returns:
+        Dict containing:
+            - success (bool): Whether the operation succeeded
+            - data (dict): Retrieved scratchpad data
+            - keys (list, optional): Available keys if no specific key requested
+            - message (str): Success or error message
+
+    Example:
+        >>> arguments = {"agent_id": "agent-123", "key": "working_memory"}
+        >>> result = await get_scratchpad_tool(arguments)
+        >>> print(result["data"])  # Retrieved content
+    """
+    # Add scratchpad prefix and delegate to get_agent_state_tool
+    scratchpad_args = {
+        "agent_id": arguments.get("agent_id"),
+        "prefix": "scratchpad",
+    }
+    if "key" in arguments:
+        scratchpad_args["key"] = arguments["key"]
+
+    return await get_agent_state_tool(scratchpad_args)
 
 
 async def get_agent_state_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:

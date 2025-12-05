@@ -711,6 +711,20 @@ class GetAgentStateRequest(BaseModel):
     prefix: str = Field("state", description="State type prefix")
 
 
+class GetScratchpadRequest(BaseModel):
+    """Request model for get_scratchpad tool.
+
+    Convenience wrapper for get_agent_state with scratchpad prefix.
+
+    Attributes:
+        agent_id: Unique identifier for the agent
+        key: Optional specific scratchpad key to retrieve
+    """
+
+    agent_id: str = Field(..., description="Agent identifier", pattern=r"^[a-zA-Z0-9_-]{1,64}$")
+    key: Optional[str] = Field(None, description="Specific scratchpad key to retrieve")
+
+
 # Sprint 13 Phase 2.3 & 3.2: Delete/Forget operations
 class DeleteContextRequest(BaseModel):
     """Request model for delete_context tool (Sprint 13 Phase 2.3).
@@ -2983,6 +2997,81 @@ async def update_scratchpad_endpoint(request: UpdateScratchpadRequest) -> Dict[s
         raise
     except Exception as e:
         return handle_generic_error(e, "update scratchpad")
+
+
+@app.post("/tools/get_scratchpad")
+async def get_scratchpad_endpoint(request: GetScratchpadRequest) -> Dict[str, Any]:
+    """Retrieve agent scratchpad data.
+
+    Convenience wrapper for get_agent_state with scratchpad prefix.
+    Simplifies retrieval of scratchpad data without requiring users
+    to specify the prefix parameter.
+
+    Args:
+        request: GetScratchpadRequest containing agent_id and optional key
+
+    Returns:
+        Dict containing success status, retrieved data, and available keys
+    """
+    try:
+        # Use SimpleRedisClient for direct, reliable Redis access
+        if not simple_redis:
+            raise HTTPException(status_code=503, detail="Redis client not available")
+
+        if request.key:
+            # Get specific key
+            redis_key = f"scratchpad:{request.agent_id}:{request.key}"
+            value = simple_redis.get(redis_key)
+
+            if value is None:
+                return {
+                    "success": True,
+                    "data": {},
+                    "agent_id": request.agent_id,
+                    "message": f"No scratchpad data found for key: {request.key}",
+                }
+
+            return {
+                "success": True,
+                "data": {request.key: value},
+                "agent_id": request.agent_id,
+                "message": "Scratchpad data retrieved successfully",
+            }
+        else:
+            # Get all scratchpad keys for this agent
+            pattern = f"scratchpad:{request.agent_id}:*"
+            keys = simple_redis.keys(pattern)
+
+            if not keys:
+                return {
+                    "success": True,
+                    "data": {},
+                    "keys": [],
+                    "agent_id": request.agent_id,
+                    "message": "No scratchpad data found for agent",
+                }
+
+            # Get all values
+            data = {}
+            for key in keys:
+                # Extract the key name (remove prefix)
+                key_name = key.replace(f"scratchpad:{request.agent_id}:", "")
+                value = simple_redis.get(key)
+                if value is not None:
+                    data[key_name] = value
+
+            return {
+                "success": True,
+                "data": data,
+                "keys": list(data.keys()),
+                "agent_id": request.agent_id,
+                "message": f"Retrieved {len(data)} scratchpad entries",
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        return handle_generic_error(e, "get scratchpad")
 
 
 @app.post("/tools/get_agent_state")
