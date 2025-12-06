@@ -44,24 +44,33 @@ class APIKeyManager:
         """
         Load API keys from environment variables.
 
-        Format: API_KEY_{NAME}=key:user_id:role:is_agent
-        Example: API_KEY_ADMIN=admin_key_123:admin_user:admin:false
+        Format: VERIS_API_KEY_{NAME}=key:user_id:role:is_agent
+        Example: VERIS_API_KEY_HERALD=vmk_herald_xxx:herald:writer:true
+
+        Legacy format (still supported): API_KEY_{NAME}=key:user_id:role:is_agent
         """
         api_keys = {}
 
         # Load from environment
+        # Supports both VERIS_API_KEY_* (preferred) and API_KEY_* (legacy) prefixes
         for env_var, env_value in os.environ.items():
-            if env_var.startswith("API_KEY_"):
-                try:
-                    parts = env_value.split(":")
-                    if len(parts) >= 4:
-                        key, user_id, role, is_agent = parts[0], parts[1], parts[2], parts[3]
+            if env_var.startswith("VERIS_API_KEY_"):
+                prefix_len = 14  # len("VERIS_API_KEY_")
+            elif env_var.startswith("API_KEY_"):
+                prefix_len = 8  # len("API_KEY_")
+            else:
+                continue
 
-                        # Determine capabilities based on role
-                        capabilities = self._get_role_capabilities(role)
+            try:
+                parts = env_value.split(":")
+                if len(parts) >= 4:
+                    key, user_id, role, is_agent = parts[0], parts[1], parts[2], parts[3]
 
-                        api_keys[key] = APIKeyInfo(
-                            key_id=env_var[8:].lower(),  # Remove API_KEY_ prefix
+                    # Determine capabilities based on role
+                    capabilities = self._get_role_capabilities(role)
+
+                    api_keys[key] = APIKeyInfo(
+                        key_id=env_var[prefix_len:].lower(),  # Remove prefix
                             user_id=user_id,
                             role=role,
                             capabilities=capabilities,
