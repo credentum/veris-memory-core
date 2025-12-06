@@ -140,7 +140,7 @@ jobs:
           echo "${{ matrix.name }} image built and pushed:"
           echo "  Tags: ${{ steps.meta.outputs.tags }}"
 
-  # Summary job
+  # Summary and trigger downstream deployment
   summary:
     needs: [build-base, build-services]
     runs-on: ubuntu-latest
@@ -164,3 +164,15 @@ jobs:
           echo "  api:" >> $GITHUB_STEP_SUMMARY
           echo "    image: ghcr.io/${{ github.repository }}/api:latest" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      # Trigger veris-platform deployment when images are ready
+      - name: Trigger veris-platform deployment
+        if: needs.build-services.result == 'success' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        run: |
+          curl -X POST \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{ secrets.VERIS_PLATFORM_DEPLOY_TOKEN }}" \
+            https://api.github.com/repos/credentum/veris-platform/dispatches \
+            -d '{"event_type":"veris-core-updated","client_payload":{"sha":"${{ github.sha }}"}}'
+          echo "📤 Triggered veris-platform deployment"
