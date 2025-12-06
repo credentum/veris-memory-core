@@ -1,0 +1,163 @@
+---
+schema_version: "1.0"
+tool_name: "list_scratchpads"
+description: "List all active scratchpads across all agents for discovery"
+
+input_schema:
+  type: object
+  properties:
+    pattern:
+      type: string
+      description: "Glob pattern to filter agent_ids (e.g., 'claude*', '*research*')"
+      default: "*"
+      examples:
+        - "*"
+        - "claude*"
+        - "*research*"
+        - "herald-*"
+
+    include_values:
+      type: boolean
+      description: "Include scratchpad values in response (default: false, keys only)"
+      default: false
+
+  required: []
+
+output_schema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: "Whether the operation succeeded"
+
+    agents:
+      type: array
+      description: "List of agents with their scratchpad info"
+      items:
+        type: object
+        properties:
+          agent_id:
+            type: string
+            description: "The agent identifier"
+          keys:
+            type: array
+            items:
+              type: string
+            description: "List of scratchpad keys for this agent"
+          key_count:
+            type: integer
+            description: "Number of scratchpad keys"
+          data:
+            type: object
+            description: "Scratchpad values (only if include_values=true)"
+
+    total_agents:
+      type: integer
+      description: "Total number of agents with active scratchpads"
+
+    total_keys:
+      type: integer
+      description: "Total number of scratchpad keys across all agents"
+
+    message:
+      type: string
+      description: "Success or error message"
+
+    error_type:
+      type: string
+      description: "Classification of error type (only on failure)"
+      enum:
+        - "rate_limit"
+        - "storage_unavailable"
+        - "storage_exception"
+        - "unexpected_error"
+
+  required:
+    - success
+    - agents
+    - message
+
+use_cases:
+  discover_all:
+    description: "Find all active scratchpads when you don't remember agent_id"
+    example:
+      input: {}
+      expected_output:
+        success: true
+        agents:
+          - agent_id: "claude-research"
+            keys: ["current_task", "notes"]
+            key_count: 2
+          - agent_id: "herald-bot"
+            keys: ["draft"]
+            key_count: 1
+        total_agents: 2
+        total_keys: 3
+        message: "Found 2 agents with 3 scratchpad entries"
+
+  filter_by_pattern:
+    description: "Find scratchpads matching a pattern (partial recall)"
+    example:
+      input:
+        pattern: "claude*"
+      expected_output:
+        success: true
+        agents:
+          - agent_id: "claude-research"
+            keys: ["current_task", "notes"]
+            key_count: 2
+        total_agents: 1
+        total_keys: 2
+        message: "Found 1 agents with 2 scratchpad entries"
+
+  include_values:
+    description: "Get scratchpad keys with their values"
+    example:
+      input:
+        include_values: true
+      expected_output:
+        success: true
+        agents:
+          - agent_id: "claude-research"
+            keys: ["current_task"]
+            key_count: 1
+            data:
+              current_task: "Investigating API performance"
+        total_agents: 1
+        total_keys: 1
+        message: "Found 1 agents with 1 scratchpad entries"
+
+security_features:
+  - "Read-only operation - cannot modify scratchpads"
+  - "Rate limiting prevents excessive usage"
+  - "No cross-namespace data leakage (only lists keys, values optional)"
+
+examples:
+  basic_discovery:
+    description: "Discover all active scratchpads"
+    input: {}
+    curl: |
+      curl -X POST http://localhost:8000/tools/list_scratchpads \
+        -H "Content-Type: application/json" \
+        -H "X-API-Key: your-api-key" \
+        -d '{}'
+
+  pattern_filter:
+    description: "Find scratchpads for agents starting with 'claude'"
+    input:
+      pattern: "claude*"
+    curl: |
+      curl -X POST http://localhost:8000/tools/list_scratchpads \
+        -H "Content-Type: application/json" \
+        -H "X-API-Key: your-api-key" \
+        -d '{"pattern": "claude*"}'
+
+  with_values:
+    description: "Get all scratchpads with their values"
+    input:
+      include_values: true
+    curl: |
+      curl -X POST http://localhost:8000/tools/list_scratchpads \
+        -H "Content-Type: application/json" \
+        -H "X-API-Key: your-api-key" \
+        -d '{"include_values": true}'

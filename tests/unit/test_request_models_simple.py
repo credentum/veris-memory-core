@@ -25,6 +25,12 @@ class GetAgentStateRequest(BaseModel):
     prefix: str = Field("state", description="State type prefix")
 
 
+class ListScratchpadsRequest(BaseModel):
+    """Request model for list_scratchpads tool."""
+    pattern: str = Field("*", description="Glob pattern to filter agent_ids")
+    include_values: bool = Field(False, description="Include scratchpad values in response")
+
+
 def test_update_scratchpad_valid():
     """Test valid UpdateScratchpadRequest."""
     request = UpdateScratchpadRequest(
@@ -85,28 +91,59 @@ def test_get_agent_state_valid():
 def test_get_agent_state_defaults():
     """Test GetAgentStateRequest with defaults."""
     request = GetAgentStateRequest(agent_id="test-agent")
-    
+
     assert request.agent_id == "test-agent"
     assert request.key is None
     assert request.prefix == "state"
 
 
+def test_list_scratchpads_valid():
+    """Test valid ListScratchpadsRequest with all fields."""
+    request = ListScratchpadsRequest(
+        pattern="claude*",
+        include_values=True
+    )
+
+    assert request.pattern == "claude*"
+    assert request.include_values is True
+
+
+def test_list_scratchpads_defaults():
+    """Test ListScratchpadsRequest with defaults."""
+    request = ListScratchpadsRequest()
+
+    assert request.pattern == "*"
+    assert request.include_values is False
+
+
+def test_list_scratchpads_various_patterns():
+    """Test ListScratchpadsRequest with various pattern formats."""
+    patterns = ["*", "claude*", "*research*", "agent-123", "test_agent"]
+
+    for pattern in patterns:
+        request = ListScratchpadsRequest(pattern=pattern)
+        assert request.pattern == pattern
+
+
 if __name__ == "__main__":
     print("Running simple validation tests...")
-    
+
     test_functions = [
         test_update_scratchpad_valid,
         test_update_scratchpad_invalid_agent_id,
         test_update_scratchpad_invalid_mode,
         test_get_agent_state_valid,
         test_get_agent_state_defaults,
+        test_list_scratchpads_valid,
+        test_list_scratchpads_defaults,
+        test_list_scratchpads_various_patterns,
     ]
-    
+
     for func in test_functions:
         try:
             func()
             print(f"✅ {func.__name__}")
         except Exception as e:
             print(f"❌ {func.__name__}: {e}")
-    
+
     print("✅ Simple validation tests completed!")

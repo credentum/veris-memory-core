@@ -36,6 +36,7 @@ from src.mcp_server.main import (
     QueryGraphRequest,
     UpdateScratchpadRequest,
     GetAgentStateRequest,
+    ListScratchpadsRequest,
     startup_event,
     shutdown_event,
     _check_service_with_retries,
@@ -287,12 +288,38 @@ class TestRequestModels:
     def test_get_agent_state_request_defaults(self):
         """Test GetAgentStateRequest with defaults."""
         data = {"agent_id": "agent_123"}
-        
+
         request = GetAgentStateRequest(**data)
-        
+
         assert request.agent_id == "agent_123"
         assert request.include_scratchpad is True  # Default
         assert request.include_metrics is True  # Default
+
+    def test_list_scratchpads_request_valid(self):
+        """Test valid ListScratchpadsRequest with all fields."""
+        data = {
+            "pattern": "claude*",
+            "include_values": True
+        }
+
+        request = ListScratchpadsRequest(**data)
+
+        assert request.pattern == "claude*"
+        assert request.include_values is True
+
+    def test_list_scratchpads_request_defaults(self):
+        """Test ListScratchpadsRequest with defaults."""
+        request = ListScratchpadsRequest()
+
+        assert request.pattern == "*"
+        assert request.include_values is False
+
+    def test_list_scratchpads_request_empty_dict(self):
+        """Test ListScratchpadsRequest with empty dict uses defaults."""
+        request = ListScratchpadsRequest(**{})
+
+        assert request.pattern == "*"
+        assert request.include_values is False
 
 
 class TestExceptionHandler:
@@ -681,10 +708,75 @@ class TestMCPToolEndpoints:
                 data = response.json()
                 assert data["agent_id"] == "agent_123"
 
+    def test_list_scratchpads_endpoint_success(self):
+        """Test list_scratchpads endpoint success with results."""
+        client = TestClient(app)
+
+        request_data = {}  # Empty request uses defaults
+
+        with patch('src.mcp_server.main.simple_redis') as mock_redis:
+            mock_redis.keys.side_effect = [
+                ["scratchpad:test-agent:task1", "scratchpad:test-agent:task2"],
+                [],
+            ]
+
+            response = client.post("/tools/list_scratchpads", json=request_data)
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["success"] is True
+            assert data["total_agents"] == 1
+            assert data["total_keys"] == 2
+
+    def test_list_scratchpads_endpoint_empty(self):
+        """Test list_scratchpads endpoint with no results."""
+        client = TestClient(app)
+
+        with patch('src.mcp_server.main.simple_redis') as mock_redis:
+            mock_redis.keys.return_value = []
+
+            response = client.post("/tools/list_scratchpads", json={})
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["success"] is True
+            assert data["agents"] == []
+            assert data["total_agents"] == 0
+
+    def test_list_scratchpads_endpoint_with_pattern(self):
+        """Test list_scratchpads endpoint with pattern filter."""
+        client = TestClient(app)
+
+        request_data = {"pattern": "claude*"}
+
+        with patch('src.mcp_server.main.simple_redis') as mock_redis:
+            mock_redis.keys.side_effect = [
+                ["scratchpad:claude-dev:task", "scratchpad:herald-bot:draft"],
+                [],
+            ]
+
+            response = client.post("/tools/list_scratchpads", json=request_data)
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["success"] is True
+            # Only claude-* should be returned
+            assert data["total_agents"] == 1
+            assert data["agents"][0]["agent_id"] == "claude-dev"
+
+    def test_list_scratchpads_endpoint_redis_unavailable(self):
+        """Test list_scratchpads endpoint when Redis is unavailable."""
+        client = TestClient(app)
+
+        with patch('src.mcp_server.main.simple_redis', None):
+            response = client.post("/tools/list_scratchpads", json={})
+
+            assert response.status_code == 503
+
     def test_list_tools_endpoint(self):
         """Test list_tools endpoint."""
         client = TestClient(app)
-        
+
         response = client.get("/tools")
         
         assert response.status_code == 200

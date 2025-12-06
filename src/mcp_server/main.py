@@ -10,6 +10,7 @@ vector embeddings and graph relationships.
 """
 
 import asyncio
+import fnmatch
 import hashlib
 import json
 import logging
@@ -733,6 +734,21 @@ class GetScratchpadRequest(BaseModel):
 
     agent_id: str = Field(..., description="Agent identifier", pattern=r"^[a-zA-Z0-9_-]{1,64}$")
     key: Optional[str] = Field(None, description="Specific scratchpad key to retrieve")
+
+
+class ListScratchpadsRequest(BaseModel):
+    """Request model for list_scratchpads tool.
+
+    Discovery tool to find all active scratchpads when you don't
+    remember the exact agent_id used.
+
+    Attributes:
+        pattern: Glob pattern to filter agent_ids (e.g., 'claude*', '*research*')
+        include_values: Whether to include scratchpad values in response
+    """
+
+    pattern: str = Field("*", description="Glob pattern to filter agent_ids")
+    include_values: bool = Field(False, description="Include scratchpad values in response")
 
 
 # Sprint 13 Phase 2.3 & 3.2: Delete/Forget operations
@@ -3093,6 +3109,128 @@ async def get_scratchpad_endpoint(request: GetScratchpadRequest) -> Dict[str, An
         raise
     except Exception as e:
         return handle_generic_error(e, "get scratchpad")
+
+
+@app.post("/tools/list_scratchpads")
+async def list_scratchpads_endpoint(request: ListScratchpadsRequest) -> Dict[str, Any]:
+    """List all active scratchpads across all agents.
+
+    Discovery tool to help agents find scratchpad data when they don't
+    remember the exact agent_id used. Returns all active agent_ids with
+    their scratchpad keys.
+
+    Args:
+        request: ListScratchpadsRequest containing optional pattern and include_values
+
+    Returns:
+        Dict containing list of agents with their scratchpad info
+    """
+    try:
+        # Use SimpleRedisClient for direct, reliable Redis access
+        if not simple_redis:
+            raise HTTPException(status_code=503, detail="Redis client not available")
+
+        # Find all scratchpad keys (supporting both key patterns)
+        scratchpad_keys = []
+
+        # Pattern 1: scratchpad:{agent_id}:{key} (REST API)
+        keys1 = simple_redis.keys("scratchpad:*")
+        if keys1:
+            scratchpad_keys.extend(keys1)
+
+        # Pattern 2: agent:{agent_id}:scratchpad:{key} (MCP server)
+        keys2 = simple_redis.keys("agent:*:scratchpad:*")
+        if keys2:
+            scratchpad_keys.extend(keys2)
+
+        if not scratchpad_keys:
+            return {
+                "success": True,
+                "agents": [],
+                "total_agents": 0,
+                "total_keys": 0,
+                "message": "No active scratchpads found",
+            }
+
+        # Group keys by agent_id
+        agents_data: Dict[str, Dict[str, Any]] = {}
+
+        for key in scratchpad_keys:
+            try:
+                # Parse key to extract agent_id and key name
+                if key.startswith("scratchpad:"):
+                    # Pattern: scratchpad:{agent_id}:{key}
+                    parts = key.split(":", 2)
+                    if len(parts) >= 3:
+                        agent_id = parts[1]
+                        key_name = parts[2]
+                    else:
+                        continue
+                elif key.startswith("agent:"):
+                    # Pattern: agent:{agent_id}:scratchpad:{key}
+                    parts = key.split(":", 4)
+                    if len(parts) >= 4 and parts[2] == "scratchpad":
+                        agent_id = parts[1]
+                        key_name = parts[3] if len(parts) > 3 else ""
+                    else:
+                        continue
+                else:
+                    continue
+
+                # Apply agent_id pattern filter
+                if request.pattern != "*":
+                    if not fnmatch.fnmatch(agent_id, request.pattern):
+                        continue
+
+                # Initialize agent entry if needed
+                if agent_id not in agents_data:
+                    agents_data[agent_id] = {
+                        "agent_id": agent_id,
+                        "keys": [],
+                        "data": {} if request.include_values else None,
+                    }
+
+                agents_data[agent_id]["keys"].append(key_name)
+
+                # Optionally include values
+                if request.include_values:
+                    value = simple_redis.get(key)
+                    if value is not None:
+                        agents_data[agent_id]["data"][key_name] = value
+
+            except Exception as e:
+                logger.warning(f"Failed to parse scratchpad key {key}: {e}")
+                continue
+
+        # Convert to list and add counts
+        agents_list = []
+        total_keys = 0
+        for agent_id, data in agents_data.items():
+            agent_entry = {
+                "agent_id": agent_id,
+                "keys": data["keys"],
+                "key_count": len(data["keys"]),
+            }
+            if request.include_values:
+                agent_entry["data"] = data["data"]
+            agents_list.append(agent_entry)
+            total_keys += len(data["keys"])
+
+        # Sort by agent_id for consistent output
+        agents_list.sort(key=lambda x: x["agent_id"])
+
+        return {
+            "success": True,
+            "agents": agents_list,
+            "total_agents": len(agents_list),
+            "total_keys": total_keys,
+            "message": f"Found {len(agents_list)} {'agent' if len(agents_list) == 1 else 'agents'} with {total_keys} scratchpad {'entry' if total_keys == 1 else 'entries'}",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        return handle_generic_error(e, "list scratchpads")
 
 
 @app.post("/tools/get_agent_state")

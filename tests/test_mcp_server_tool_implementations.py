@@ -30,6 +30,7 @@ try:
         get_tools_info,
         initialize_storage_clients,
         list_resources,
+        list_scratchpads_tool,
         list_tools,
         query_graph_tool,
         read_resource,
@@ -2078,6 +2079,216 @@ class TestStorageClientManagement:
             # Verify cleanup methods were called
             mock_storage_clients["neo4j"].close.assert_called_once_with()
             mock_storage_clients["kv"].close.assert_called_once_with()
+
+
+class TestListScratchpadsTool:
+    """Comprehensive tests for list_scratchpads_tool implementation."""
+
+    @pytest.mark.asyncio
+    async def test_list_scratchpads_empty_results(self, mock_storage_clients):
+        """Test list_scratchpads returns empty when no scratchpads exist."""
+        with (
+            patch("src.mcp_server.server.rate_limit_check", return_value=(True, None)),
+            patch("src.mcp_server.server.kv_store", mock_storage_clients["kv"]),
+        ):
+            # No keys returned
+            mock_storage_clients["kv"].redis.keys.return_value = []
+
+            result = await list_scratchpads_tool({})
+
+            assert result["success"] is True
+            assert result["agents"] == []
+            assert result["total_agents"] == 0
+            assert result["total_keys"] == 0
+            assert "No active scratchpads found" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_list_scratchpads_single_agent(self, mock_storage_clients):
+        """Test list_scratchpads with single agent."""
+        with (
+            patch("src.mcp_server.server.rate_limit_check", return_value=(True, None)),
+            patch("src.mcp_server.server.kv_store", mock_storage_clients["kv"]),
+        ):
+            # Mock Redis keys response for pattern 1
+            mock_storage_clients["kv"].redis.keys.side_effect = [
+                ["scratchpad:test-agent:task1", "scratchpad:test-agent:task2"],
+                [],  # Pattern 2 returns empty
+            ]
+
+            result = await list_scratchpads_tool({})
+
+            assert result["success"] is True
+            assert result["total_agents"] == 1
+            assert result["total_keys"] == 2
+            assert len(result["agents"]) == 1
+            assert result["agents"][0]["agent_id"] == "test-agent"
+            assert "task1" in result["agents"][0]["keys"]
+            assert "task2" in result["agents"][0]["keys"]
+
+    @pytest.mark.asyncio
+    async def test_list_scratchpads_multiple_agents(self, mock_storage_clients):
+        """Test list_scratchpads with multiple agents."""
+        with (
+            patch("src.mcp_server.server.rate_limit_check", return_value=(True, None)),
+            patch("src.mcp_server.server.kv_store", mock_storage_clients["kv"]),
+        ):
+            mock_storage_clients["kv"].redis.keys.side_effect = [
+                ["scratchpad:agent-a:key1", "scratchpad:agent-b:key2"],
+                [],
+            ]
+
+            result = await list_scratchpads_tool({})
+
+            assert result["success"] is True
+            assert result["total_agents"] == 2
+            assert result["total_keys"] == 2
+            # Agents should be sorted alphabetically
+            assert result["agents"][0]["agent_id"] == "agent-a"
+            assert result["agents"][1]["agent_id"] == "agent-b"
+
+    @pytest.mark.asyncio
+    async def test_list_scratchpads_pattern_filter(self, mock_storage_clients):
+        """Test list_scratchpads with pattern filtering."""
+        with (
+            patch("src.mcp_server.server.rate_limit_check", return_value=(True, None)),
+            patch("src.mcp_server.server.kv_store", mock_storage_clients["kv"]),
+        ):
+            mock_storage_clients["kv"].redis.keys.side_effect = [
+                [
+                    "scratchpad:claude-research:task",
+                    "scratchpad:claude-dev:task",
+                    "scratchpad:herald-bot:draft",
+                ],
+                [],
+            ]
+
+            result = await list_scratchpads_tool({"pattern": "claude*"})
+
+            assert result["success"] is True
+            assert result["total_agents"] == 2
+            # Only claude-* agents should be included
+            agent_ids = [a["agent_id"] for a in result["agents"]]
+            assert "claude-research" in agent_ids
+            assert "claude-dev" in agent_ids
+            assert "herald-bot" not in agent_ids
+
+    @pytest.mark.asyncio
+    async def test_list_scratchpads_include_values(self, mock_storage_clients):
+        """Test list_scratchpads with include_values=True."""
+        with (
+            patch("src.mcp_server.server.rate_limit_check", return_value=(True, None)),
+            patch("src.mcp_server.server.kv_store", mock_storage_clients["kv"]),
+        ):
+            mock_storage_clients["kv"].redis.keys.side_effect = [
+                ["scratchpad:test-agent:task"],
+                [],
+            ]
+            mock_storage_clients["kv"].redis.get.return_value = "Working on tests"
+
+            result = await list_scratchpads_tool({"include_values": True})
+
+            assert result["success"] is True
+            assert result["agents"][0]["data"] is not None
+            assert result["agents"][0]["data"]["task"] == "Working on tests"
+
+    @pytest.mark.asyncio
+    async def test_list_scratchpads_redis_unavailable(self):
+        """Test list_scratchpads when Redis is unavailable."""
+        with (
+            patch("src.mcp_server.server.rate_limit_check", return_value=(True, None)),
+            patch("src.mcp_server.server.kv_store", None),
+        ):
+            result = await list_scratchpads_tool({})
+
+            assert result["success"] is False
+            assert result["error_type"] == "storage_unavailable"
+            assert "Redis storage not available" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_list_scratchpads_redis_exception(self, mock_storage_clients):
+        """Test list_scratchpads handles Redis exceptions gracefully."""
+        with (
+            patch("src.mcp_server.server.rate_limit_check", return_value=(True, None)),
+            patch("src.mcp_server.server.kv_store", mock_storage_clients["kv"]),
+        ):
+            mock_storage_clients["kv"].redis.keys.side_effect = Exception("Redis connection lost")
+
+            result = await list_scratchpads_tool({})
+
+            assert result["success"] is False
+            assert result["error_type"] == "storage_exception"
+            assert "Storage operation failed" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_list_scratchpads_rate_limited(self):
+        """Test list_scratchpads rate limiting."""
+        with patch(
+            "src.mcp_server.server.rate_limit_check",
+            return_value=(False, "Rate limit exceeded"),
+        ):
+            result = await list_scratchpads_tool({})
+
+            assert result["success"] is False
+            assert result["error_type"] == "rate_limit"
+            assert "Rate limit exceeded" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_list_scratchpads_both_key_patterns(self, mock_storage_clients):
+        """Test list_scratchpads handles both key patterns."""
+        with (
+            patch("src.mcp_server.server.rate_limit_check", return_value=(True, None)),
+            patch("src.mcp_server.server.kv_store", mock_storage_clients["kv"]),
+        ):
+            # Pattern 1: scratchpad:{agent_id}:{key}
+            # Pattern 2: agent:{agent_id}:scratchpad:{key}
+            mock_storage_clients["kv"].redis.keys.side_effect = [
+                ["scratchpad:rest-agent:task"],
+                ["agent:mcp-agent:scratchpad:working"],
+            ]
+
+            result = await list_scratchpads_tool({})
+
+            assert result["success"] is True
+            assert result["total_agents"] == 2
+            agent_ids = [a["agent_id"] for a in result["agents"]]
+            assert "rest-agent" in agent_ids
+            assert "mcp-agent" in agent_ids
+
+    @pytest.mark.asyncio
+    async def test_list_scratchpads_pluralization_single(self, mock_storage_clients):
+        """Test correct grammar with single agent and entry."""
+        with (
+            patch("src.mcp_server.server.rate_limit_check", return_value=(True, None)),
+            patch("src.mcp_server.server.kv_store", mock_storage_clients["kv"]),
+        ):
+            mock_storage_clients["kv"].redis.keys.side_effect = [
+                ["scratchpad:single-agent:only-key"],
+                [],
+            ]
+
+            result = await list_scratchpads_tool({})
+
+            assert result["success"] is True
+            # Should say "1 agent" not "1 agents"
+            assert "1 agent with 1 scratchpad entry" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_list_scratchpads_pluralization_multiple(self, mock_storage_clients):
+        """Test correct grammar with multiple agents and entries."""
+        with (
+            patch("src.mcp_server.server.rate_limit_check", return_value=(True, None)),
+            patch("src.mcp_server.server.kv_store", mock_storage_clients["kv"]),
+        ):
+            mock_storage_clients["kv"].redis.keys.side_effect = [
+                ["scratchpad:agent-a:key1", "scratchpad:agent-b:key2", "scratchpad:agent-b:key3"],
+                [],
+            ]
+
+            result = await list_scratchpads_tool({})
+
+            assert result["success"] is True
+            # Should say "agents" and "entries" (plural)
+            assert "2 agents with 3 scratchpad entries" in result["message"]
 
 
 if __name__ == "__main__":

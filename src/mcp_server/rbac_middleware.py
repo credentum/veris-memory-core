@@ -39,6 +39,7 @@ class MCPRBACMiddleware:
         "query_graph": ["query_graph"],
         "update_scratchpad": ["update_scratchpad"],
         "get_scratchpad": ["get_agent_state"],  # Uses same capability as get_agent_state
+        "list_scratchpads": ["get_agent_state"],  # Discovery tool uses same capability
         "get_agent_state": ["get_agent_state"],
         "detect_communities": ["query_graph", "retrieve_context"],
         "select_tools": ["retrieve_context"],
