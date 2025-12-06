@@ -8,6 +8,7 @@ using the official MCP Python SDK for proper protocol compliance.
 # flake8: noqa: E501
 
 import asyncio
+import fnmatch
 import json
 import logging
 import os
@@ -2494,7 +2495,6 @@ async def list_scratchpads_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
                     # Apply agent_id pattern filter
                     if pattern != "*":
-                        import fnmatch
                         if not fnmatch.fnmatch(agent_id, pattern):
                             continue
 
@@ -2541,7 +2541,7 @@ async def list_scratchpads_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
                 "agents": agents_list,
                 "total_agents": len(agents_list),
                 "total_keys": total_keys,
-                "message": f"Found {len(agents_list)} agents with {total_keys} scratchpad entries",
+                "message": f"Found {len(agents_list)} {'agent' if len(agents_list) == 1 else 'agents'} with {total_keys} scratchpad {'entry' if total_keys == 1 else 'entries'}",
             }
 
         except Exception as e:

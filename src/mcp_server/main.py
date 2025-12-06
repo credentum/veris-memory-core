@@ -10,6 +10,7 @@ vector embeddings and graph relationships.
 """
 
 import asyncio
+import fnmatch
 import hashlib
 import json
 import logging
@@ -3129,8 +3130,6 @@ async def list_scratchpads_endpoint(request: ListScratchpadsRequest) -> Dict[str
         if not simple_redis:
             raise HTTPException(status_code=503, detail="Redis client not available")
 
-        import fnmatch
-
         # Find all scratchpad keys (supporting both key patterns)
         scratchpad_keys = []
 
@@ -3225,7 +3224,7 @@ async def list_scratchpads_endpoint(request: ListScratchpadsRequest) -> Dict[str
             "agents": agents_list,
             "total_agents": len(agents_list),
             "total_keys": total_keys,
-            "message": f"Found {len(agents_list)} agents with {total_keys} scratchpad entries",
+            "message": f"Found {len(agents_list)} {'agent' if len(agents_list) == 1 else 'agents'} with {total_keys} scratchpad {'entry' if total_keys == 1 else 'entries'}",
         }
 
     except HTTPException:
