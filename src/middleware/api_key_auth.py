@@ -71,15 +71,15 @@ class APIKeyManager:
 
                     api_keys[key] = APIKeyInfo(
                         key_id=env_var[prefix_len:].lower(),  # Remove prefix
-                            user_id=user_id,
-                            role=role,
-                            capabilities=capabilities,
-                            is_agent=is_agent.lower() == "true",
-                            metadata={"source": "environment"}
-                        )
-                        logger.info(f"Loaded API key: {env_var[8:]} (role: {role}, agent: {is_agent})")
-                except Exception as e:
-                    logger.error(f"Failed to parse API key {env_var}: {e}")
+                        user_id=user_id,
+                        role=role,
+                        capabilities=capabilities,
+                        is_agent=is_agent.lower() == "true",
+                        metadata={"source": "environment"}
+                    )
+                    logger.info(f"Loaded API key: {env_var[prefix_len:]} (role: {role}, agent: {is_agent})")
+            except Exception as e:
+                logger.error(f"Failed to parse API key {env_var}: {e}")
 
         # ⚠️ SECURITY WARNING: Default test key for development only
         # This test key should NEVER be used in production environments.
