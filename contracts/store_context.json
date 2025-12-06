@@ -55,6 +55,11 @@
           }
         },
         "description": "Graph relationships to establish"
+      },
+      "shared": {
+        "type": "boolean",
+        "default": false,
+        "description": "When true, context is visible to all teams regardless of API key namespace (Issue #2)"
       }
     }
   },
@@ -88,6 +93,10 @@
           "type": "string"
         },
         "description": "Any validation errors encountered"
+      },
+      "shared": {
+        "type": "boolean",
+        "description": "Whether the context was stored as shared"
       }
     }
   },

@@ -67,6 +67,11 @@
         "enum": ["timestamp", "relevance"],
         "default": "timestamp",
         "description": "Sort order for results. 'timestamp' returns newest first, 'relevance' returns highest score first"
+      },
+      "include_shared": {
+        "type": "boolean",
+        "default": true,
+        "description": "Whether to include shared contexts from other teams (Issue #2)"
       }
     }
   },
@@ -109,6 +114,10 @@
             "relationships": {
               "type": "array",
               "description": "Graph relationships if requested"
+            },
+            "shared": {
+              "type": "boolean",
+              "description": "Whether this context is shared across teams (Issue #2)"
             }
           }
         }
