@@ -583,6 +583,26 @@ async def list_tools() -> List[Tool]:
             },
         ),
         Tool(
+            name="list_scratchpads",
+            description="List all active scratchpads across all agents. Use this to discover what agent_ids have scratchpad data when you don't remember the exact name.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Filter agent_ids by glob pattern (e.g., 'claude*', '*research*'). Default: '*' (all)",
+                        "default": "*",
+                    },
+                    "include_values": {
+                        "type": "boolean",
+                        "description": "Include scratchpad values in response (default: false, keys only)",
+                        "default": False,
+                    },
+                },
+                "required": [],
+            },
+        ),
+        Tool(
             name="get_agent_state",
             description="Retrieve agent state with namespace isolation",
             inputSchema={
@@ -1018,6 +1038,8 @@ async def call_tool(
             result = await update_scratchpad_tool(arguments)
         elif name == "get_scratchpad":
             result = await get_scratchpad_tool(arguments)
+        elif name == "list_scratchpads":
+            result = await list_scratchpads_tool(arguments)
         elif name == "get_agent_state":
             result = await get_agent_state_tool(arguments)
         elif name == "detect_communities":
@@ -2368,6 +2390,177 @@ async def get_scratchpad_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
         scratchpad_args["key"] = arguments["key"]
 
     return await get_agent_state_tool(scratchpad_args)
+
+
+async def list_scratchpads_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    List all active scratchpads across all agents.
+
+    This discovery tool helps agents find scratchpad data when they don't
+    remember the exact agent_id used. Returns all active agent_ids with
+    their scratchpad keys.
+
+    Args:
+        arguments: Dictionary containing:
+            - pattern (str, optional): Filter agent_ids by pattern (e.g., "claude*")
+            - include_values (bool, optional): Include scratchpad values (default: False)
+
+    Returns:
+        Dict containing:
+            - success (bool): Whether the operation succeeded
+            - agents (list): List of agents with their scratchpad info
+            - total_agents (int): Number of agents with scratchpads
+            - total_keys (int): Total number of scratchpad keys
+            - message (str): Success or error message
+
+    Example:
+        >>> result = await list_scratchpads_tool({})
+        >>> for agent in result["agents"]:
+        ...     print(f"{agent['agent_id']}: {agent['keys']}")
+    """
+    # Rate limiting check
+    allowed, rate_limit_msg = await rate_limit_check("list_scratchpads")
+    if not allowed:
+        return {
+            "success": False,
+            "agents": [],
+            "message": f"Rate limit exceeded: {rate_limit_msg}",
+            "error_type": "rate_limit",
+        }
+
+    try:
+        pattern = arguments.get("pattern", "*")
+        include_values = arguments.get("include_values", False)
+
+        # Check Redis availability
+        if not kv_store or not kv_store.redis:
+            return {
+                "success": False,
+                "agents": [],
+                "message": "Redis storage not available",
+                "error_type": "storage_unavailable",
+            }
+
+        try:
+            # Find all scratchpad keys
+            # Support both key patterns used in the codebase
+            scratchpad_keys = []
+
+            # Pattern 1: scratchpad:{agent_id}:{key} (REST API)
+            pattern1 = "scratchpad:*"
+            keys1 = kv_store.redis.keys(pattern1)
+            if keys1:
+                scratchpad_keys.extend(keys1)
+
+            # Pattern 2: agent:{agent_id}:scratchpad:{key} (MCP server)
+            pattern2 = "agent:*:scratchpad:*"
+            keys2 = kv_store.redis.keys(pattern2)
+            if keys2:
+                scratchpad_keys.extend(keys2)
+
+            if not scratchpad_keys:
+                return {
+                    "success": True,
+                    "agents": [],
+                    "total_agents": 0,
+                    "total_keys": 0,
+                    "message": "No active scratchpads found",
+                }
+
+            # Group keys by agent_id
+            agents_data = {}
+
+            for key in scratchpad_keys:
+                try:
+                    # Parse key to extract agent_id and key name
+                    if key.startswith("scratchpad:"):
+                        # Pattern: scratchpad:{agent_id}:{key}
+                        parts = key.split(":", 2)
+                        if len(parts) >= 3:
+                            agent_id = parts[1]
+                            key_name = parts[2]
+                        else:
+                            continue
+                    elif key.startswith("agent:"):
+                        # Pattern: agent:{agent_id}:scratchpad:{key}
+                        parts = key.split(":", 4)
+                        if len(parts) >= 4 and parts[2] == "scratchpad":
+                            agent_id = parts[1]
+                            key_name = parts[3] if len(parts) > 3 else ""
+                        else:
+                            continue
+                    else:
+                        continue
+
+                    # Apply agent_id pattern filter
+                    if pattern != "*":
+                        import fnmatch
+                        if not fnmatch.fnmatch(agent_id, pattern):
+                            continue
+
+                    # Initialize agent entry if needed
+                    if agent_id not in agents_data:
+                        agents_data[agent_id] = {
+                            "agent_id": agent_id,
+                            "keys": [],
+                            "data": {} if include_values else None,
+                        }
+
+                    agents_data[agent_id]["keys"].append(key_name)
+
+                    # Optionally include values
+                    if include_values:
+                        value = kv_store.redis.get(key)
+                        if value is not None:
+                            agents_data[agent_id]["data"][key_name] = value
+
+                except Exception as e:
+                    logger.warning(f"Failed to parse scratchpad key {key}: {e}")
+                    continue
+
+            # Convert to list and add counts
+            agents_list = []
+            total_keys = 0
+            for agent_id, data in agents_data.items():
+                agent_entry = {
+                    "agent_id": agent_id,
+                    "keys": data["keys"],
+                    "key_count": len(data["keys"]),
+                }
+                if include_values:
+                    agent_entry["data"] = data["data"]
+                agents_list.append(agent_entry)
+                total_keys += len(data["keys"])
+
+            # Sort by agent_id for consistent output
+            agents_list.sort(key=lambda x: x["agent_id"])
+
+            logger.info(f"Listed {len(agents_list)} agents with {total_keys} scratchpad keys")
+            return {
+                "success": True,
+                "agents": agents_list,
+                "total_agents": len(agents_list),
+                "total_keys": total_keys,
+                "message": f"Found {len(agents_list)} agents with {total_keys} scratchpad entries",
+            }
+
+        except Exception as e:
+            logger.error(f"Redis operation failed: {e}")
+            return {
+                "success": False,
+                "agents": [],
+                "message": f"Storage operation failed: {str(e)}",
+                "error_type": "storage_exception",
+            }
+
+    except Exception as e:
+        logger.error(f"Error listing scratchpads: {e}")
+        return {
+            "success": False,
+            "agents": [],
+            "message": f"Failed to list scratchpads: {str(e)}",
+            "error_type": "unexpected_error",
+        }
 
 
 async def get_agent_state_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
