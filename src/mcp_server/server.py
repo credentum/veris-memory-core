@@ -564,6 +564,11 @@ async def list_tools() -> List[Tool]:
                         "default": 3600,
                         "description": "Time to live in seconds (1 hour default)",
                     },
+                    "shared": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Cross-team sharing: when true, scratchpad is visible to all teams",
+                    },
                 },
                 "required": ["agent_id", "key", "content"],
             },
@@ -585,7 +590,7 @@ async def list_tools() -> List[Tool]:
         ),
         Tool(
             name="list_scratchpads",
-            description="List all active scratchpads across all agents. Use this to discover what agent_ids have scratchpad data when you don't remember the exact name.",
+            description="List active scratchpads. Via REST API with API key, filters by namespace (user_id). Use include_shared to also see shared scratchpads from other teams.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -598,6 +603,11 @@ async def list_tools() -> List[Tool]:
                         "type": "boolean",
                         "description": "Include scratchpad values in response (default: false, keys only)",
                         "default": False,
+                    },
+                    "include_shared": {
+                        "type": "boolean",
+                        "description": "Include shared scratchpads from other teams (default: true). Only applies via REST API with API key auth.",
+                        "default": True,
                     },
                 },
                 "required": [],
@@ -2210,6 +2220,7 @@ async def update_scratchpad_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
             - content (str): Content to store (required)
             - mode (str, optional): Update mode 'overwrite' or 'append' (default: 'overwrite')
             - ttl (int, optional): Time to live in seconds (default: 3600, max: 86400)
+            - shared (bool, optional): Cross-team sharing flag (default: False)
 
     Returns:
         Dict containing:
@@ -2217,6 +2228,7 @@ async def update_scratchpad_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
             - message (str): Success or error message
             - key (str): The namespaced key used for storage
             - ttl (int): TTL applied in seconds
+            - shared (bool): Whether the scratchpad is shared
 
     Example:
         >>> arguments = {
@@ -2224,7 +2236,8 @@ async def update_scratchpad_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
         ...     "key": "working_memory",
         ...     "content": "Current task: analyze data",
         ...     "mode": "append",
-        ...     "ttl": 7200
+        ...     "ttl": 7200,
+        ...     "shared": True
         ... }
         >>> result = await update_scratchpad_tool(arguments)
         >>> print(result["success"])  # True
@@ -2244,6 +2257,7 @@ async def update_scratchpad_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
         content = arguments["content"]
         mode = arguments.get("mode", "overwrite")
         ttl = arguments.get("ttl", 3600)  # 1 hour default
+        shared = arguments.get("shared", False)  # Cross-team sharing flag
 
         # Validate agent ID and key using namespace manager
         if not agent_namespace.validate_agent_id(agent_id):
@@ -2318,14 +2332,21 @@ async def update_scratchpad_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
             # Store content with TTL
             success = kv_store.redis.setex(namespaced_key, ttl, content)
 
+            # Store metadata for namespace filtering (user_id will be "mcp_user" for MCP)
+            # REST API endpoints use API key auth to get real user_id
+            meta_key = f"scratchpad_meta:{agent_id}:{key}"
+            meta_value = json.dumps({"user_id": "mcp_user", "shared": shared})
+            kv_store.redis.setex(meta_key, ttl, meta_value)
+
             if success:
-                logger.info(f"Updated scratchpad for agent {agent_id}, key: {key}, TTL: {ttl}s")
+                logger.info(f"Updated scratchpad for agent {agent_id}, key: {key}, TTL: {ttl}s, shared: {shared}")
                 return {
                     "success": True,
                     "message": f"Scratchpad updated successfully (mode: {mode})",
                     "key": namespaced_key,
                     "ttl": ttl,
                     "content_size": len(content),
+                    "shared": shared,
                 }
             else:
                 return {
