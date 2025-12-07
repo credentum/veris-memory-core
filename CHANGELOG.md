@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `retrieve_context`: New `include_shared: bool` parameter (default: true) - controls whether to include shared contexts
   - Research team can now publish findings for Herald team to see without sharing API keys
   - Teams maintain isolated private spaces while sharing selected contexts
+- **Scratchpad namespace isolation**: Scratchpads now filtered by API key user_id
+  - `update_scratchpad`: New `shared: bool` parameter (default: false) - when true, scratchpad is visible to all teams
+  - `list_scratchpads`: Now filters by API key user_id namespace. New `include_shared: bool` parameter (default: true)
+  - Metadata stored in parallel Redis key (`scratchpad_meta:{agent_id}:{key}`) for filtering
+  - Backwards compatible: legacy scratchpads without metadata are still visible
 - Initial project structure
 - Python project configuration with pyproject.toml
 - TypeScript project configuration

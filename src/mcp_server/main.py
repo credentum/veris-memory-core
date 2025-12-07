@@ -695,6 +695,7 @@ class UpdateScratchpadRequest(BaseModel):
         content: Content to store in the scratchpad
         mode: Update mode - "overwrite" or "append"
         ttl: Time to live in seconds (60-86400)
+        shared: When true, scratchpad is visible to all teams (cross-team sharing)
     """
 
     agent_id: str = Field(..., description="Agent identifier", pattern=r"^[a-zA-Z0-9_-]{1,64}$")
@@ -706,6 +707,11 @@ class UpdateScratchpadRequest(BaseModel):
         "overwrite", description="Update mode for the content", pattern=r"^(overwrite|append)$"
     )
     ttl: int = Field(3600, ge=60, le=86400, description="Time to live in seconds")
+    # Cross-team sharing
+    shared: bool = Field(
+        False,
+        description="When true, scratchpad is visible to all teams regardless of API key namespace.",
+    )
 
 
 class GetAgentStateRequest(BaseModel):
@@ -745,10 +751,16 @@ class ListScratchpadsRequest(BaseModel):
     Attributes:
         pattern: Glob pattern to filter agent_ids (e.g., 'claude*', '*research*')
         include_values: Whether to include scratchpad values in response
+        include_shared: Whether to include shared scratchpads from other teams (default: True)
     """
 
     pattern: str = Field("*", description="Glob pattern to filter agent_ids")
     include_values: bool = Field(False, description="Include scratchpad values in response")
+    # Cross-team sharing: By default only show scratchpads belonging to this API key's user_id
+    include_shared: bool = Field(
+        True,
+        description="Whether to include shared scratchpads from other teams. Default true.",
+    )
 
 
 # Sprint 13 Phase 2.3 & 3.2: Delete/Forget operations
@@ -2949,14 +2961,20 @@ async def query_graph(request: QueryGraphRequest) -> Dict[str, Any]:
 
 
 @app.post("/tools/update_scratchpad")
-async def update_scratchpad_endpoint(request: UpdateScratchpadRequest) -> Dict[str, Any]:
+async def update_scratchpad_endpoint(
+    request: UpdateScratchpadRequest,
+    api_key_info: Optional[APIKeyInfo] = (
+        Depends(verify_api_key) if API_KEY_AUTH_AVAILABLE else None
+    ),
+) -> Dict[str, Any]:
     """Update agent scratchpad with transient storage.
 
     Provides temporary storage for agent working memory with TTL support.
     Supports both overwrite and append modes with namespace isolation.
 
     Args:
-        request: UpdateScratchpadRequest containing agent_id, key, content, mode, and ttl
+        request: UpdateScratchpadRequest containing agent_id, key, content, mode, ttl, and shared
+        api_key_info: API key information for namespace isolation
 
     Returns:
         Dict containing success status, message, and operation details
@@ -2994,6 +3012,8 @@ async def update_scratchpad_endpoint(request: UpdateScratchpadRequest) -> Dict[s
 
         # Create namespaced key
         redis_key = f"scratchpad:{request.agent_id}:{request.key}"
+        # Metadata key for storing user_id and shared flag (for namespace filtering)
+        meta_key = f"scratchpad_meta:{request.agent_id}:{request.key}"
 
         # Store value with TTL based on mode
         if request.mode == "append" and simple_redis.exists(redis_key):
@@ -3004,11 +3024,20 @@ async def update_scratchpad_endpoint(request: UpdateScratchpadRequest) -> Dict[s
             # Overwrite mode or no existing content
             content_str = request.content
 
+        # Get user_id from API key (for namespace isolation)
+        user_id = api_key_info.user_id if api_key_info else "anonymous"
+
         try:
             # Use simple_redis for direct Redis access
             logger.info(f"Using SimpleRedisClient to store key: {redis_key}")
             success = simple_redis.set(redis_key, content_str, ex=request.ttl)
             logger.info(f"SimpleRedisClient.set() returned: {success}")
+
+            # Store metadata for namespace filtering (user_id, shared flag)
+            # Use JSON format: {"user_id": "...", "shared": true/false}
+            meta_value = json.dumps({"user_id": user_id, "shared": request.shared})
+            simple_redis.set(meta_key, meta_value, ex=request.ttl)
+            logger.debug(f"Stored scratchpad metadata: {meta_key} -> {meta_value}")
 
         except Exception as e:
             logger.error(f"SimpleRedisClient error: {type(e).__name__}: {e}")
@@ -3021,6 +3050,8 @@ async def update_scratchpad_endpoint(request: UpdateScratchpadRequest) -> Dict[s
                 "key": redis_key,
                 "ttl": request.ttl,
                 "content_size": len(content_str),
+                "shared": request.shared,
+                "user_id": user_id,
                 "message": f"Scratchpad updated successfully (mode: {request.mode})",
             }
         else:
@@ -3112,15 +3143,21 @@ async def get_scratchpad_endpoint(request: GetScratchpadRequest) -> Dict[str, An
 
 
 @app.post("/tools/list_scratchpads")
-async def list_scratchpads_endpoint(request: ListScratchpadsRequest) -> Dict[str, Any]:
-    """List all active scratchpads across all agents.
+async def list_scratchpads_endpoint(
+    request: ListScratchpadsRequest,
+    api_key_info: Optional[APIKeyInfo] = (
+        Depends(verify_api_key) if API_KEY_AUTH_AVAILABLE else None
+    ),
+) -> Dict[str, Any]:
+    """List active scratchpads filtered by API key namespace.
 
     Discovery tool to help agents find scratchpad data when they don't
-    remember the exact agent_id used. Returns all active agent_ids with
-    their scratchpad keys.
+    remember the exact agent_id used. By default, only shows scratchpads
+    belonging to the current API key's user_id, plus any shared scratchpads.
 
     Args:
-        request: ListScratchpadsRequest containing optional pattern and include_values
+        request: ListScratchpadsRequest containing pattern, include_values, and include_shared
+        api_key_info: API key information for namespace filtering
 
     Returns:
         Dict containing list of agents with their scratchpad info
@@ -3130,13 +3167,17 @@ async def list_scratchpads_endpoint(request: ListScratchpadsRequest) -> Dict[str
         if not simple_redis:
             raise HTTPException(status_code=503, detail="Redis client not available")
 
+        # Get user_id from API key for namespace filtering
+        current_user_id = api_key_info.user_id if api_key_info else None
+
         # Find all scratchpad keys (supporting both key patterns)
         scratchpad_keys = []
 
         # Pattern 1: scratchpad:{agent_id}:{key} (REST API)
         keys1 = simple_redis.keys("scratchpad:*")
         if keys1:
-            scratchpad_keys.extend(keys1)
+            # Filter out metadata keys
+            scratchpad_keys.extend([k for k in keys1 if not k.startswith("scratchpad_meta:")])
 
         # Pattern 2: agent:{agent_id}:scratchpad:{key} (MCP server)
         keys2 = simple_redis.keys("agent:*:scratchpad:*")
@@ -3182,6 +3223,27 @@ async def list_scratchpads_endpoint(request: ListScratchpadsRequest) -> Dict[str
                     if not fnmatch.fnmatch(agent_id, request.pattern):
                         continue
 
+                # Namespace filtering: Check metadata for user_id and shared flag
+                # Only filter if we have a current_user_id (authenticated request)
+                if current_user_id:
+                    meta_key = f"scratchpad_meta:{agent_id}:{key_name}"
+                    meta_value = simple_redis.get(meta_key)
+
+                    if meta_value:
+                        try:
+                            meta = json.loads(meta_value)
+                            scratchpad_user_id = meta.get("user_id")
+                            is_shared = meta.get("shared", False)
+
+                            # Skip if not owned by current user AND not shared (unless include_shared)
+                            if scratchpad_user_id != current_user_id:
+                                if not is_shared or not request.include_shared:
+                                    continue
+                        except json.JSONDecodeError:
+                            # If metadata is corrupt, include the scratchpad (backwards compat)
+                            pass
+                    # No metadata = legacy scratchpad, include it (backwards compat)
+
                 # Initialize agent entry if needed
                 if agent_id not in agents_data:
                     agents_data[agent_id] = {
@@ -3224,6 +3286,8 @@ async def list_scratchpads_endpoint(request: ListScratchpadsRequest) -> Dict[str
             "agents": agents_list,
             "total_agents": len(agents_list),
             "total_keys": total_keys,
+            "user_id": current_user_id,
+            "include_shared": request.include_shared,
             "message": f"Found {len(agents_list)} {'agent' if len(agents_list) == 1 else 'agents'} with {total_keys} scratchpad {'entry' if total_keys == 1 else 'entries'}",
         }
 

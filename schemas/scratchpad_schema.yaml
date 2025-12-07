@@ -55,6 +55,14 @@ input_schema:
         - 7200 # 2 hours
         - 86400 # 24 hours
 
+    shared:
+      type: boolean
+      description: "Cross-team sharing flag. When true, scratchpad is visible to all teams."
+      default: false
+      examples:
+        - false # Private to own team (default)
+        - true  # Visible to all teams
+
   required:
     - agent_id
     - key
@@ -82,6 +90,14 @@ output_schema:
     content_size:
       type: integer
       description: "Size of stored content in bytes"
+
+    shared:
+      type: boolean
+      description: "Whether the scratchpad is shared across teams"
+
+    user_id:
+      type: string
+      description: "User ID from API key (for namespace filtering)"
 
     error_type:
       type: string
@@ -149,6 +165,8 @@ security_features:
   - "Content size limits prevent resource abuse"
   - "TTL ensures automatic cleanup of temporary data"
   - "Rate limiting prevents excessive usage"
+  - "User ID filtering limits visibility to own team's scratchpads"
+  - "Cross-team sharing via explicit shared flag only"
 
 use_cases:
   working_memory:

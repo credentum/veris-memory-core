@@ -1,7 +1,7 @@
 ---
 schema_version: "1.0"
 tool_name: "list_scratchpads"
-description: "List all active scratchpads across all agents for discovery"
+description: "List active scratchpads filtered by API key namespace. By default shows only scratchpads belonging to the current user, plus any shared scratchpads."
 
 input_schema:
   type: object
@@ -20,6 +20,11 @@ input_schema:
       type: boolean
       description: "Include scratchpad values in response (default: false, keys only)"
       default: false
+
+    include_shared:
+      type: boolean
+      description: "Include shared scratchpads from other teams (default: true). When false, only shows scratchpads owned by the current API key's user_id."
+      default: true
 
   required: []
 
@@ -59,6 +64,14 @@ output_schema:
       type: integer
       description: "Total number of scratchpad keys across all agents"
 
+    user_id:
+      type: string
+      description: "Current user_id from API key (for namespace filtering)"
+
+    include_shared:
+      type: boolean
+      description: "Whether shared scratchpads were included"
+
     message:
       type: string
       description: "Success or error message"
@@ -79,7 +92,7 @@ output_schema:
 
 use_cases:
   discover_all:
-    description: "Find all active scratchpads when you don't remember agent_id"
+    description: "Find all active scratchpads for your team (plus shared)"
     example:
       input: {}
       expected_output:
@@ -93,6 +106,8 @@ use_cases:
             key_count: 1
         total_agents: 2
         total_keys: 3
+        user_id: "research_team"
+        include_shared: true
         message: "Found 2 agents with 3 scratchpad entries"
 
   filter_by_pattern:
@@ -108,7 +123,26 @@ use_cases:
             key_count: 2
         total_agents: 1
         total_keys: 2
+        user_id: "research_team"
+        include_shared: true
         message: "Found 1 agents with 2 scratchpad entries"
+
+  own_scratchpads_only:
+    description: "List only scratchpads owned by your team (exclude shared)"
+    example:
+      input:
+        include_shared: false
+      expected_output:
+        success: true
+        agents:
+          - agent_id: "claude-research"
+            keys: ["current_task"]
+            key_count: 1
+        total_agents: 1
+        total_keys: 1
+        user_id: "research_team"
+        include_shared: false
+        message: "Found 1 agents with 1 scratchpad entries"
 
   include_values:
     description: "Get scratchpad keys with their values"
@@ -125,16 +159,20 @@ use_cases:
               current_task: "Investigating API performance"
         total_agents: 1
         total_keys: 1
+        user_id: "research_team"
+        include_shared: true
         message: "Found 1 agents with 1 scratchpad entries"
 
 security_features:
   - "Read-only operation - cannot modify scratchpads"
   - "Rate limiting prevents excessive usage"
-  - "No cross-namespace data leakage (only lists keys, values optional)"
+  - "Namespace isolation by API key user_id"
+  - "Cross-team visibility via shared flag only"
+  - "Backwards compatible with legacy scratchpads (no metadata = visible)"
 
 examples:
   basic_discovery:
-    description: "Discover all active scratchpads"
+    description: "Discover scratchpads for your team (plus shared)"
     input: {}
     curl: |
       curl -X POST http://localhost:8000/tools/list_scratchpads \
@@ -151,6 +189,16 @@ examples:
         -H "Content-Type: application/json" \
         -H "X-API-Key: your-api-key" \
         -d '{"pattern": "claude*"}'
+
+  own_only:
+    description: "List only your team's scratchpads (exclude shared from other teams)"
+    input:
+      include_shared: false
+    curl: |
+      curl -X POST http://localhost:8000/tools/list_scratchpads \
+        -H "Content-Type: application/json" \
+        -H "X-API-Key: your-api-key" \
+        -d '{"include_shared": false}'
 
   with_values:
     description: "Get all scratchpads with their values"
