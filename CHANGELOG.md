@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Redis Bus module** (`src/redis_bus/`): Pub/sub messaging with namespace isolation
+  - Channels: `work_requests`, `work_packets` (with shared support), `tdd_events`, `task_completion`, `review_results`, `questions`, `context_requests`, `agent_status`
+  - Queues: `work_packet_queue`, `review_queue` (team-isolated FIFO)
+  - `RedisBus` class: Unified interface for publishing, subscribing, and queue operations
+  - `NamespacedProducer`: Automatic namespace prefixing and shared dual-publishing
+  - `NamespacedConsumer`: Namespace-filtered subscriptions with visibility checks
+  - FastAPI integration: `get_redis_bus` and `get_redis_bus_no_shared` dependencies
+  - Full Pydantic models for all message types: `WorkPacket`, `TDDEvent`, `TaskCompletion`, `ReviewResult`, `Question`, etc.
+  - Consistent permission model: `VISIBLE = owned_by_current_user OR (is_shared AND wants_shared)`
+  - 29 unit tests for namespace isolation, visibility formula, and message serialization
 - **Cross-team memory sharing** (Issue #2): Added `shared` flag to enable contexts to be visible across teams
   - `store_context`: New `shared: bool` parameter (default: false) - when true, context is visible to all teams
   - `retrieve_context`: New `include_shared: bool` parameter (default: true) - controls whether to include shared contexts
