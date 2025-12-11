@@ -10,6 +10,7 @@ generate similar hypothetical documents.
 Reference: https://arxiv.org/abs/2212.10496
 """
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -37,6 +38,8 @@ class HyDEConfig:
     cache_ttl_seconds: int = 3600
     fallback_to_mq: bool = True  # Fall back to template MQE on failure
     system_prompt: str = "You are a technical documentation assistant for Veris Memory, a context storage system."
+    # Timeout for LLM calls (seconds) - prevents hanging on slow/unresponsive APIs
+    llm_timeout_seconds: float = 30.0
 
 
 @dataclass
@@ -99,6 +102,7 @@ Answer:"""
                 max_tokens=int(os.getenv("HYDE_MAX_TOKENS", "150")),
                 temperature=float(os.getenv("HYDE_TEMPERATURE", "0.7")),
                 cache_enabled=os.getenv("HYDE_CACHE_ENABLED", "true").lower() == "true",
+                llm_timeout_seconds=float(os.getenv("HYDE_LLM_TIMEOUT", "30.0")),
             )
 
         self.config = config
@@ -116,6 +120,7 @@ Answer:"""
             "cache_misses": 0,
             "llm_calls": 0,
             "llm_errors": 0,
+            "llm_timeouts": 0,
             "average_generation_time_ms": 0.0,
         }
 
@@ -187,6 +192,10 @@ Answer:"""
 
         Returns:
             A hypothetical document that answers the query
+
+        Raises:
+            asyncio.TimeoutError: If LLM call exceeds timeout
+            Exception: If LLM call fails for other reasons
         """
         client = await self._get_openai_client()
         prompt = self.PROMPT_TEMPLATE.format(query=query)
@@ -194,20 +203,30 @@ Answer:"""
         self._metrics["llm_calls"] += 1
 
         try:
-            response = await client.chat.completions.create(
-                model=self.config.model,
-                messages=[
-                    {"role": "system", "content": self.config.system_prompt},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=self.config.max_tokens,
-                temperature=self.config.temperature,
+            # Wrap LLM call with timeout to prevent hanging
+            response = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=self.config.model,
+                    messages=[
+                        {"role": "system", "content": self.config.system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=self.config.max_tokens,
+                    temperature=self.config.temperature,
+                ),
+                timeout=self.config.llm_timeout_seconds
             )
 
             content = response.choices[0].message.content
             if content:
                 return content.strip()
             return ""
+
+        except asyncio.TimeoutError:
+            self._metrics["llm_errors"] += 1
+            self._metrics["llm_timeouts"] += 1
+            logger.error(f"LLM call timed out after {self.config.llm_timeout_seconds}s for query: {query[:50]}...")
+            raise
 
         except Exception as e:
             self._metrics["llm_errors"] += 1
