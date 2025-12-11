@@ -474,12 +474,15 @@ async def discover_skills(
             )
 
         # Search Qdrant using query_points (qdrant-client v1.7+)
+        # Note: score_threshold=0.5 is appropriate for all-MiniLM-L6-v2 embeddings.
+        # Higher thresholds (0.75+) filter out most semantic matches since cosine
+        # similarity with this model typically ranges 0.4-0.7 for related content.
         response = qdrant.query_points(
             collection_name=SKILLS_COLLECTION,
             query=vector,
             query_filter=search_filter,
             limit=request.limit,
-            score_threshold=0.75,  # Relevance threshold
+            score_threshold=0.5,
         )
         results = response.points
 
