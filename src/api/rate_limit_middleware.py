@@ -172,17 +172,20 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             "::1"          # IPv6 localhost
         }
 
-        # Also exempt any IP making requests with Sentinel or VoiceBot auth header
+        # Also exempt any IP making requests with trusted service auth headers
         auth_header = request.headers.get("X-API-Key", "")
         sentinel_key = os.getenv("SENTINEL_API_KEY", "")
         voicebot_key_full = os.getenv("API_KEY_VOICEBOT", "")
-        # Extract just the key prefix (before first colon) since API_KEY_VOICEBOT
-        # format is: key:user_id:role:is_agent but VoiceBot sends just the key
+        agent_key_full = os.getenv("VERIS_API_KEY_AGENT", "")
+        # Extract just the key prefix (before first colon) since API keys may use
+        # format: key:user_id:role:is_agent but clients send just the key
         voicebot_key = voicebot_key_full.split(":")[0] if voicebot_key_full else ""
+        agent_key = agent_key_full.split(":")[0] if agent_key_full else ""
 
         # Exempt authenticated internal services from rate limiting
         # - Sentinel: Monitoring service that makes 22+ queries per cycle
         # - VoiceBot: Voice interface that may burst requests during conversations
+        # - Agent: Agent orchestrator containers polling for work packets
         if client_ip in sentinel_ips:
             return await call_next(request)
 
@@ -190,6 +193,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         if auth_header and voicebot_key and auth_header == voicebot_key:
+            return await call_next(request)
+
+        if auth_header and agent_key and auth_header == agent_key:
             return await call_next(request)
 
         # Get current time window
