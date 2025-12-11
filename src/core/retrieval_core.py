@@ -406,20 +406,20 @@ class RetrievalCore:
 
     def _dict_to_memory_result(self, d: Dict[str, Any]) -> MemoryResult:
         """Convert dict back to MemoryResult after MQE processing."""
-        from ..interfaces.memory_result import ContextType
+        from ..interfaces.memory_result import ContentType
 
         # Handle type conversion
         type_value = d.get("type", "general")
         try:
-            context_type = ContextType(type_value) if isinstance(type_value, str) else type_value
+            content_type = ContentType(type_value) if isinstance(type_value, str) else type_value
         except (ValueError, KeyError):
-            context_type = ContextType.GENERAL
+            content_type = ContentType.GENERAL
 
         return MemoryResult(
             id=d.get("id", ""),
             score=d.get("score", 0.0),
             text=d.get("text", ""),
-            type=context_type,
+            type=content_type,
             metadata={
                 **d.get("metadata", {}),
                 "mqe_scores": d.get("mqe_scores", []),

@@ -478,16 +478,11 @@ class QueryDispatcher:
                     backends_used.add(backend_name)
                     # Issue #311: Log backend results for debugging hybrid search
                     search_logger.info(
-                        "Backend '%s' returned %d results in %.1fms",
-                        backend_name,
-                        len(results),
-                        timing,
-                        extra={
-                            "backend": backend_name,
-                            "result_count": len(results),
-                            "timing_ms": timing,
-                            "trace_id": trace_id
-                        }
+                        f"Backend '{backend_name}' returned {len(results)} results in {timing:.1f}ms",
+                        backend=backend_name,
+                        result_count=len(results),
+                        timing_ms=timing,
+                        trace_id=trace_id
                     )
                 except Exception as e:
                     search_logger.warning(f"Backend {backend_name} failed: {e}")
