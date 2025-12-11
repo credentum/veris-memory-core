@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from src.mcp_server.agent_tools import (
     router,
     register_routes,
+    ensure_collections,
     get_qdrant,
     get_embedding,
     log_trajectory,
@@ -36,6 +37,7 @@ from src.mcp_server.agent_tools import (
     SKILLS_COLLECTION,
     FAILURE_SIMILARITY_THRESHOLD,
     SUCCESS_SIMILARITY_THRESHOLD,
+    VECTOR_DIMENSION,
     _qdrant_client,
     _embedding_service,
 )
@@ -52,6 +54,12 @@ def mock_qdrant_client():
     client = MagicMock()
     client.upsert = MagicMock()
     client.search = MagicMock(return_value=[])
+
+    # Mock get_collection to return collection info with correct dimensions
+    mock_collection_info = MagicMock()
+    mock_collection_info.config.params.vectors.size = 384
+    client.get_collection = MagicMock(return_value=mock_collection_info)
+
     return client
 
 
@@ -606,3 +614,137 @@ class TestConstants:
         """Test success similarity threshold is set correctly."""
         assert SUCCESS_SIMILARITY_THRESHOLD == 0.90
         assert SUCCESS_SIMILARITY_THRESHOLD > FAILURE_SIMILARITY_THRESHOLD
+
+    def test_vector_dimension(self):
+        """Test vector dimension constant is set correctly."""
+        assert VECTOR_DIMENSION == 384
+
+
+# =============================================================================
+# Collection Management Tests
+# =============================================================================
+
+
+class TestEnsureCollections:
+    """Tests for ensure_collections function."""
+
+    def test_creates_missing_collections(self):
+        """Test that missing collections are created."""
+        mock_client = MagicMock()
+        # Simulate collections not existing
+        mock_client.get_collection.side_effect = Exception("Not found: collection doesn't exist")
+        mock_client.create_collection.return_value = None
+
+        with patch("src.mcp_server.agent_tools.QDRANT_AVAILABLE", True):
+            with patch("src.mcp_server.agent_tools.qdrant_models") as mock_models:
+                mock_models.VectorParams = MagicMock()
+                mock_models.Distance.COSINE = "Cosine"
+
+                ensure_collections(mock_client)
+
+        # Should have tried to create both collections
+        assert mock_client.create_collection.call_count == 2
+
+        # Verify correct collection names
+        call_args = [call[1]["collection_name"] for call in mock_client.create_collection.call_args_list]
+        assert TRAJECTORY_COLLECTION in call_args
+        assert SKILLS_COLLECTION in call_args
+
+    def test_skips_existing_collections_with_correct_dims(self):
+        """Test that existing collections with correct dimensions are skipped."""
+        mock_client = MagicMock()
+
+        # Simulate collections existing with correct dimensions
+        mock_collection_info = MagicMock()
+        mock_collection_info.config.params.vectors.size = 384
+        mock_client.get_collection.return_value = mock_collection_info
+
+        with patch("src.mcp_server.agent_tools.QDRANT_AVAILABLE", True):
+            with patch("src.mcp_server.agent_tools.qdrant_models") as mock_models:
+                ensure_collections(mock_client)
+
+        # Should not have tried to create any collections
+        mock_client.create_collection.assert_not_called()
+
+    def test_raises_on_wrong_dimensions(self):
+        """Test that wrong dimensions raise ValueError."""
+        mock_client = MagicMock()
+
+        # Simulate collection existing with wrong dimensions
+        mock_collection_info = MagicMock()
+        mock_collection_info.config.params.vectors.size = 1536  # Wrong!
+        mock_client.get_collection.return_value = mock_collection_info
+
+        with patch("src.mcp_server.agent_tools.QDRANT_AVAILABLE", True):
+            with patch("src.mcp_server.agent_tools.qdrant_models"):
+                with pytest.raises(ValueError) as exc_info:
+                    ensure_collections(mock_client)
+
+        assert "wrong dimensions" in str(exc_info.value)
+        assert "expected 384" in str(exc_info.value)
+        assert "got 1536" in str(exc_info.value)
+
+    def test_skips_when_qdrant_unavailable(self):
+        """Test that function skips gracefully when Qdrant is unavailable."""
+        mock_client = MagicMock()
+
+        with patch("src.mcp_server.agent_tools.QDRANT_AVAILABLE", False):
+            ensure_collections(mock_client)
+
+        # Should not have called any Qdrant methods
+        mock_client.get_collection.assert_not_called()
+        mock_client.create_collection.assert_not_called()
+
+    def test_raises_on_create_failure(self):
+        """Test that creation failure propagates."""
+        mock_client = MagicMock()
+        mock_client.get_collection.side_effect = Exception("Not found: collection doesn't exist")
+        mock_client.create_collection.side_effect = Exception("Connection refused")
+
+        with patch("src.mcp_server.agent_tools.QDRANT_AVAILABLE", True):
+            with patch("src.mcp_server.agent_tools.qdrant_models") as mock_models:
+                mock_models.VectorParams = MagicMock()
+                mock_models.Distance.COSINE = "Cosine"
+
+                with pytest.raises(Exception) as exc_info:
+                    ensure_collections(mock_client)
+
+        assert "Connection refused" in str(exc_info.value)
+
+
+class TestRegisterRoutesWithCollections:
+    """Tests for register_routes integration with ensure_collections."""
+
+    def test_register_routes_calls_ensure_collections(self):
+        """Test that register_routes calls ensure_collections."""
+        app = FastAPI()
+        mock_client = MagicMock()
+        mock_embedding = MagicMock()
+
+        # Mock collection info to exist with correct dimensions
+        mock_collection_info = MagicMock()
+        mock_collection_info.config.params.vectors.size = 384
+        mock_client.get_collection.return_value = mock_collection_info
+
+        with patch("src.mcp_server.agent_tools.QDRANT_AVAILABLE", True):
+            with patch("src.mcp_server.agent_tools.qdrant_models"):
+                register_routes(app, mock_client, mock_embedding)
+
+        # Should have checked both collections
+        assert mock_client.get_collection.call_count == 2
+
+    def test_register_routes_fails_on_ensure_error(self):
+        """Test that register_routes fails if ensure_collections fails."""
+        app = FastAPI()
+        mock_client = MagicMock()
+        mock_embedding = MagicMock()
+
+        # Mock collection with wrong dimensions
+        mock_collection_info = MagicMock()
+        mock_collection_info.config.params.vectors.size = 1536
+        mock_client.get_collection.return_value = mock_collection_info
+
+        with patch("src.mcp_server.agent_tools.QDRANT_AVAILABLE", True):
+            with patch("src.mcp_server.agent_tools.qdrant_models"):
+                with pytest.raises(ValueError):
+                    register_routes(app, mock_client, mock_embedding)
