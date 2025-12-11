@@ -536,6 +536,16 @@ try:
 except ImportError as e:
     logger.warning(f"REST API compatibility layer not registered: {e}")
 
+# Import queue operations module (routes registered after Redis init)
+try:
+    from .queue_operations import register_routes as register_queue_routes
+    QUEUE_OPERATIONS_AVAILABLE = True
+    logger.info("Queue operations module imported")
+except ImportError as e:
+    logger.warning(f"Queue operations module not available: {e}")
+    QUEUE_OPERATIONS_AVAILABLE = False
+    register_queue_routes = None
+
 
 # Global exception handler for production security with request tracking
 @app.exception_handler(Exception)
@@ -1027,6 +1037,16 @@ async def startup_event() -> None:
         simple_redis = SimpleRedisClient()
         if simple_redis.connect(redis_password=redis_password):
             print("✅ SimpleRedisClient connected successfully (scratchpad bypass)")
+
+            # Register queue operations API routes (requires Redis client)
+            if QUEUE_OPERATIONS_AVAILABLE and register_queue_routes:
+                try:
+                    register_queue_routes(app, simple_redis.client)
+                    print("✅ Queue operations API routes registered")
+                    logger.info("Queue operations API registered: /tools/submit_work_packet, /tools/pop_work_packet, etc.")
+                except Exception as e:
+                    print(f"⚠️ Queue operations registration failed: {e}")
+                    logger.error(f"Failed to register queue operations routes: {e}")
         else:
             print("⚠️ SimpleRedisClient connection failed, scratchpad operations may fail")
 
