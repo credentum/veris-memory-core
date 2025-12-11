@@ -23,12 +23,15 @@ from src.mcp_server.agent_tools import (
     log_trajectory,
     check_precedent,
     discover_skills,
+    store_skill,
     LogTrajectoryRequest,
     LogTrajectoryResponse,
     CheckPrecedentRequest,
     CheckPrecedentResponse,
     DiscoverSkillsRequest,
     DiscoverSkillsResponse,
+    StoreSkillRequest,
+    StoreSkillResponse,
     WorkPacketInput,
     ResultInput,
     Skill,
@@ -748,3 +751,257 @@ class TestRegisterRoutesWithCollections:
             with patch("src.mcp_server.agent_tools.qdrant_models"):
                 with pytest.raises(ValueError):
                     register_routes(app, mock_client, mock_embedding)
+
+
+# =============================================================================
+# Store Skill Model Tests
+# =============================================================================
+
+
+class TestStoreSkillModels:
+    """Tests for StoreSkillRequest and StoreSkillResponse models."""
+
+    def test_store_skill_request_valid(self):
+        """Test valid StoreSkillRequest creation."""
+        request = StoreSkillRequest(
+            title="Python FastAPI Endpoint",
+            domain="api",
+            trigger=["add endpoint", "create route"],
+            tech_stack=["python", "fastapi"],
+            content="# How to create a FastAPI endpoint...",
+        )
+        assert request.title == "Python FastAPI Endpoint"
+        assert request.domain == "api"
+        assert len(request.trigger) == 2
+        assert "python" in request.tech_stack
+        assert request.file_path == ""
+
+    def test_store_skill_request_minimal(self):
+        """Test StoreSkillRequest with only required fields."""
+        request = StoreSkillRequest(
+            title="Simple Skill",
+            domain="general",
+            content="Basic content",
+        )
+        assert request.title == "Simple Skill"
+        assert request.trigger == []
+        assert request.tech_stack == []
+        assert request.file_path == ""
+
+    def test_store_skill_request_with_file_path(self):
+        """Test StoreSkillRequest with optional file_path."""
+        request = StoreSkillRequest(
+            title="Test Skill",
+            domain="testing",
+            content="Content here",
+            file_path="/skills/testing/pytest.md",
+        )
+        assert request.file_path == "/skills/testing/pytest.md"
+
+    def test_store_skill_response(self):
+        """Test StoreSkillResponse creation."""
+        response = StoreSkillResponse(
+            success=True,
+            skill_id="abc123def456",
+            message="Skill stored successfully",
+        )
+        assert response.success is True
+        assert response.skill_id == "abc123def456"
+        assert "stored successfully" in response.message
+
+
+# =============================================================================
+# Store Skill Endpoint Tests
+# =============================================================================
+
+
+class TestStoreSkillEndpoint:
+    """Tests for the store_skill endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_store_skill_generates_correct_skill_id(self):
+        """Test that skill_id is MD5 of title."""
+        import hashlib
+
+        mock_qdrant = MagicMock()
+        mock_embedding = AsyncMock(return_value=[0.1] * 384)
+
+        request = StoreSkillRequest(
+            title="Test Skill Title",
+            domain="testing",
+            content="Test content",
+        )
+
+        expected_skill_id = hashlib.md5("Test Skill Title".encode()).hexdigest()
+
+        with patch("src.mcp_server.agent_tools._qdrant_client", mock_qdrant):
+            with patch("src.mcp_server.agent_tools._embedding_service") as mock_svc:
+                mock_svc.generate_embedding = mock_embedding
+                with patch("src.mcp_server.agent_tools.qdrant_models") as mock_models:
+                    mock_models.PointStruct = MagicMock()
+
+                    response = await store_skill(request, mock_qdrant, None)
+
+        assert response.skill_id == expected_skill_id
+        assert response.success is True
+
+    @pytest.mark.asyncio
+    async def test_store_skill_builds_correct_embedding_text(self):
+        """Test that embedding is generated from title + domain + triggers + content[:500]."""
+        mock_qdrant = MagicMock()
+        captured_text = None
+
+        async def capture_embedding(text):
+            nonlocal captured_text
+            captured_text = text
+            return [0.1] * 384
+
+        request = StoreSkillRequest(
+            title="FastAPI Endpoints",
+            domain="api",
+            trigger=["create endpoint", "add route"],
+            content="This is the skill content that explains how to do things.",
+        )
+
+        with patch("src.mcp_server.agent_tools._qdrant_client", mock_qdrant):
+            with patch("src.mcp_server.agent_tools._embedding_service") as mock_svc:
+                mock_svc.generate_embedding = capture_embedding
+                with patch("src.mcp_server.agent_tools.qdrant_models") as mock_models:
+                    mock_models.PointStruct = MagicMock()
+
+                    await store_skill(request, mock_qdrant, None)
+
+        # Verify embedding text contains all components
+        assert "FastAPI Endpoints" in captured_text
+        assert "api" in captured_text
+        assert "create endpoint" in captured_text
+        assert "add route" in captured_text
+        assert "skill content" in captured_text
+
+    @pytest.mark.asyncio
+    async def test_store_skill_truncates_long_content(self):
+        """Test that content is truncated to 500 chars for embedding."""
+        mock_qdrant = MagicMock()
+        captured_text = None
+
+        async def capture_embedding(text):
+            nonlocal captured_text
+            captured_text = text
+            return [0.1] * 384
+
+        long_content = "A" * 1000  # 1000 chars
+
+        request = StoreSkillRequest(
+            title="Long Content Skill",
+            domain="test",
+            content=long_content,
+        )
+
+        with patch("src.mcp_server.agent_tools._qdrant_client", mock_qdrant):
+            with patch("src.mcp_server.agent_tools._embedding_service") as mock_svc:
+                mock_svc.generate_embedding = capture_embedding
+                with patch("src.mcp_server.agent_tools.qdrant_models") as mock_models:
+                    mock_models.PointStruct = MagicMock()
+
+                    await store_skill(request, mock_qdrant, None)
+
+        # Content in embedding should be truncated
+        # Full text = title + domain + content[:500]
+        assert captured_text.count("A") == 500  # Only 500 A's, not 1000
+
+    @pytest.mark.asyncio
+    async def test_store_skill_upserts_to_correct_collection(self):
+        """Test that skill is upserted to veris_skills collection."""
+        mock_qdrant = MagicMock()
+
+        request = StoreSkillRequest(
+            title="Collection Test",
+            domain="test",
+            content="Content",
+        )
+
+        with patch("src.mcp_server.agent_tools._qdrant_client", mock_qdrant):
+            with patch("src.mcp_server.agent_tools._embedding_service") as mock_svc:
+                mock_svc.generate_embedding = AsyncMock(return_value=[0.1] * 384)
+                with patch("src.mcp_server.agent_tools.qdrant_models") as mock_models:
+                    mock_models.PointStruct = MagicMock()
+
+                    await store_skill(request, mock_qdrant, None)
+
+        # Verify upsert was called with correct collection
+        mock_qdrant.upsert.assert_called_once()
+        call_kwargs = mock_qdrant.upsert.call_args[1]
+        assert call_kwargs["collection_name"] == "veris_skills"
+
+    @pytest.mark.asyncio
+    async def test_store_skill_payload_contains_all_fields(self):
+        """Test that payload contains all required fields."""
+        mock_qdrant = MagicMock()
+        captured_payload = None
+
+        def capture_upsert(**kwargs):
+            nonlocal captured_payload
+            point = kwargs["points"][0]
+            captured_payload = point.payload
+
+        mock_qdrant.upsert = capture_upsert
+
+        request = StoreSkillRequest(
+            title="Payload Test",
+            domain="testing",
+            trigger=["test trigger"],
+            tech_stack=["python"],
+            content="Test content",
+            file_path="/test/path.md",
+        )
+
+        with patch("src.mcp_server.agent_tools._qdrant_client", mock_qdrant):
+            with patch("src.mcp_server.agent_tools._embedding_service") as mock_svc:
+                mock_svc.generate_embedding = AsyncMock(return_value=[0.1] * 384)
+                with patch("src.mcp_server.agent_tools.qdrant_models") as mock_models:
+                    mock_models.PointStruct = lambda id, vector, payload: MagicMock(
+                        id=id, vector=vector, payload=payload
+                    )
+
+                    await store_skill(request, mock_qdrant, None)
+
+        assert captured_payload["title"] == "Payload Test"
+        assert captured_payload["domain"] == "testing"
+        assert captured_payload["trigger"] == ["test trigger"]
+        assert captured_payload["tech_stack"] == ["python"]
+        assert captured_payload["content"] == "Test content"
+        assert captured_payload["file_path"] == "/test/path.md"
+        assert "timestamp" in captured_payload
+        assert "skill_id" in captured_payload
+
+    @pytest.mark.asyncio
+    async def test_store_skill_idempotent_updates(self):
+        """Test that same title produces same skill_id for updates."""
+        import hashlib
+
+        mock_qdrant = MagicMock()
+
+        request1 = StoreSkillRequest(
+            title="Same Title",
+            domain="test",
+            content="First version",
+        )
+        request2 = StoreSkillRequest(
+            title="Same Title",
+            domain="test",
+            content="Updated version",
+        )
+
+        with patch("src.mcp_server.agent_tools._qdrant_client", mock_qdrant):
+            with patch("src.mcp_server.agent_tools._embedding_service") as mock_svc:
+                mock_svc.generate_embedding = AsyncMock(return_value=[0.1] * 384)
+                with patch("src.mcp_server.agent_tools.qdrant_models") as mock_models:
+                    mock_models.PointStruct = MagicMock()
+
+                    response1 = await store_skill(request1, mock_qdrant, None)
+                    response2 = await store_skill(request2, mock_qdrant, None)
+
+        # Same title should produce same skill_id
+        assert response1.skill_id == response2.skill_id
+        expected_id = hashlib.md5("Same Title".encode()).hexdigest()
+        assert response1.skill_id == expected_id

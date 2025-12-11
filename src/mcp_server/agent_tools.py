@@ -9,8 +9,10 @@ Endpoints:
 - POST /tools/log_trajectory - Log (plan, execution, outcome) to Qdrant
 - POST /tools/check_precedent - Query for similar past failures
 - POST /tools/discover_skills - Semantic search over skills library
+- POST /tools/store_skill - Store a skill to the skills library
 """
 
+import hashlib
 import logging
 import uuid
 from datetime import datetime
@@ -154,6 +156,29 @@ class DiscoverSkillsResponse(BaseModel):
     skills: List[Skill] = Field(default_factory=list)
     total_found: int = 0
     query: str = ""
+
+
+class StoreSkillRequest(BaseModel):
+    """Request to store a skill to the skills library."""
+
+    title: str = Field(..., description="Skill title", min_length=1)
+    domain: str = Field(..., description="Skill domain (e.g., 'api', 'database', 'testing')")
+    trigger: List[str] = Field(
+        default_factory=list, description="Keywords that trigger this skill"
+    )
+    tech_stack: List[str] = Field(
+        default_factory=list, description="Technologies this skill applies to"
+    )
+    content: str = Field(..., description="Markdown procedural knowledge", min_length=1)
+    file_path: Optional[str] = Field(default="", description="Optional source file path")
+
+
+class StoreSkillResponse(BaseModel):
+    """Response after storing a skill."""
+
+    success: bool
+    skill_id: str = Field(..., description="Unique skill identifier (MD5 of title)")
+    message: str = Field(default="", description="Status message")
 
 
 # =============================================================================
@@ -488,6 +513,82 @@ async def discover_skills(
 
 
 # =============================================================================
+# Skill Storage Endpoint
+# =============================================================================
+
+
+@router.post("/tools/store_skill", response_model=StoreSkillResponse)
+async def store_skill(
+    request: StoreSkillRequest,
+    qdrant: QdrantClient = Depends(get_qdrant),
+    api_key_info: Optional[APIKeyInfo] = (
+        Depends(verify_api_key) if API_KEY_AUTH_AVAILABLE else None
+    ),
+) -> StoreSkillResponse:
+    """
+    Store a skill to the veris_skills Qdrant collection.
+
+    Skills are procedural knowledge documents (Markdown) that provide
+    domain-specific instructions for agents. Uses MD5(title) for
+    idempotent skill_id to allow updates.
+
+    Requires valid API key authentication.
+    """
+    try:
+        # Generate idempotent skill_id from title using MD5
+        skill_id = hashlib.md5(request.title.encode()).hexdigest()
+
+        # Build embedding text: title + domain + triggers + content[:500]
+        triggers_text = " ".join(request.trigger) if request.trigger else ""
+        content_preview = request.content[:500] if len(request.content) > 500 else request.content
+        embedding_text = f"{request.title} {request.domain} {triggers_text} {content_preview}"
+
+        # Generate embedding
+        vector = await get_embedding(embedding_text)
+
+        # Build payload
+        payload = {
+            "skill_id": skill_id,
+            "title": request.title,
+            "domain": request.domain,
+            "trigger": request.trigger,
+            "tech_stack": request.tech_stack,
+            "content": request.content,
+            "file_path": request.file_path or "",
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        # Upsert to Qdrant (uses skill_id as point ID for idempotent updates)
+        qdrant.upsert(
+            collection_name=SKILLS_COLLECTION,
+            points=[
+                qdrant_models.PointStruct(
+                    id=skill_id,
+                    vector=vector,
+                    payload=payload,
+                )
+            ],
+        )
+
+        logger.info(
+            f"Skill stored: title='{request.title}', domain={request.domain}, "
+            f"skill_id={skill_id}"
+        )
+
+        return StoreSkillResponse(
+            success=True,
+            skill_id=skill_id,
+            message=f"Skill '{request.title}' stored successfully",
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Failed to store skill: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to store skill: {e}")
+
+
+# =============================================================================
 # Collection Management
 # =============================================================================
 
@@ -586,4 +687,4 @@ def register_routes(app, qdrant_client: QdrantClient, embedding_service) -> None
 
     app.include_router(router)
 
-    logger.info("Agent tools API routes registered (log_trajectory, check_precedent, discover_skills)")
+    logger.info("Agent tools API routes registered (log_trajectory, check_precedent, discover_skills, store_skill)")
