@@ -547,6 +547,16 @@ except ImportError as e:
     QUEUE_OPERATIONS_AVAILABLE = False
     register_queue_routes = None
 
+# Import agent tools module (routes registered after Qdrant + embedding init)
+try:
+    from .agent_tools import register_routes as register_agent_tools
+    AGENT_TOOLS_AVAILABLE = True
+    logger.info("Agent tools module imported")
+except ImportError as e:
+    logger.warning(f"Agent tools module not available: {e}")
+    AGENT_TOOLS_AVAILABLE = False
+    register_agent_tools = None
+
 
 # Global exception handler for production security with request tracking
 @app.exception_handler(Exception)
@@ -1085,6 +1095,19 @@ async def startup_event() -> None:
                 except Exception as e:
                     print(f"⚠️ Queue operations registration failed: {e}")
                     logger.error(f"Failed to register queue operations routes: {e}")
+
+            # Register agent tools API routes (requires Qdrant + embedding service)
+            if AGENT_TOOLS_AVAILABLE and register_agent_tools and qdrant_client:
+                try:
+                    register_agent_tools(app, qdrant_client.client, embedding_service)
+                    print("✅ Agent tools API routes registered")
+                    logger.info("Agent tools API registered: /tools/log_trajectory, /tools/check_precedent, /tools/discover_skills")
+                except Exception as e:
+                    print(f"⚠️ Agent tools registration failed: {e}")
+                    logger.error(f"Failed to register agent tools routes: {e}")
+            elif AGENT_TOOLS_AVAILABLE and not qdrant_client:
+                print("⚠️ Agent tools not registered (Qdrant unavailable)")
+                logger.warning("Agent tools routes not registered - Qdrant client not available")
         else:
             print("⚠️ SimpleRedisClient connection failed, scratchpad operations may fail")
 
