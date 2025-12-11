@@ -488,6 +488,76 @@ async def discover_skills(
 
 
 # =============================================================================
+# Collection Management
+# =============================================================================
+
+# Required dimension for all agent tools collections (must match embedding service)
+VECTOR_DIMENSION = 384
+
+
+def ensure_collections(qdrant_client: QdrantClient) -> None:
+    """
+    Ensure agent tools collections exist with correct dimensions.
+
+    Creates trajectory_logs and veris_skills collections if they don't exist.
+    Validates existing collections have correct vector dimensions.
+
+    Args:
+        qdrant_client: Raw QdrantClient instance for Qdrant operations.
+
+    Raises:
+        ValueError: If existing collection has wrong vector dimensions.
+    """
+    if not QDRANT_AVAILABLE or qdrant_models is None:
+        logger.warning("Qdrant not available, skipping collection creation")
+        return
+
+    collections_to_create = [
+        (TRAJECTORY_COLLECTION, "trajectory logging"),
+        (SKILLS_COLLECTION, "skills discovery"),
+    ]
+
+    for collection_name, purpose in collections_to_create:
+        try:
+            # Check if collection exists
+            collection_info = qdrant_client.get_collection(collection_name)
+            existing_size = collection_info.config.params.vectors.size
+
+            # Validate dimensions match
+            if existing_size != VECTOR_DIMENSION:
+                raise ValueError(
+                    f"Collection '{collection_name}' has wrong dimensions: "
+                    f"expected {VECTOR_DIMENSION}, got {existing_size}. "
+                    f"Delete and recreate the collection with correct dimensions."
+                )
+
+            logger.info(f"✓ Collection '{collection_name}' exists ({existing_size}D)")
+
+        except Exception as e:
+            # Collection doesn't exist or other error - try to create it
+            if "Not found" in str(e) or "doesn't exist" in str(e).lower():
+                logger.info(f"Creating collection '{collection_name}' for {purpose}...")
+                try:
+                    qdrant_client.create_collection(
+                        collection_name=collection_name,
+                        vectors_config=qdrant_models.VectorParams(
+                            size=VECTOR_DIMENSION,
+                            distance=qdrant_models.Distance.COSINE,
+                        ),
+                        on_disk_payload=True,
+                    )
+                    logger.info(f"✓ Collection '{collection_name}' created ({VECTOR_DIMENSION}D)")
+                except Exception as create_error:
+                    logger.error(f"Failed to create collection '{collection_name}': {create_error}")
+                    raise
+            elif "wrong dimensions" in str(e):
+                # Re-raise dimension mismatch errors
+                raise
+            else:
+                logger.warning(f"Could not verify collection '{collection_name}': {e}")
+
+
+# =============================================================================
 # Registration Function
 # =============================================================================
 
@@ -495,6 +565,8 @@ async def discover_skills(
 def register_routes(app, qdrant_client: QdrantClient, embedding_service) -> None:
     """
     Register agent tools routes with the FastAPI app.
+
+    Ensures required Qdrant collections exist before registering routes.
 
     Args:
         app: FastAPI application instance
@@ -504,6 +576,13 @@ def register_routes(app, qdrant_client: QdrantClient, embedding_service) -> None
     global _qdrant_client, _embedding_service
     _qdrant_client = qdrant_client
     _embedding_service = embedding_service
+
+    # Ensure collections exist before registering routes
+    try:
+        ensure_collections(qdrant_client)
+    except Exception as e:
+        logger.error(f"Failed to ensure agent tools collections: {e}")
+        raise
 
     app.include_router(router)
 
