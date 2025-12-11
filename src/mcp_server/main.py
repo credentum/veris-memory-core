@@ -2759,7 +2759,7 @@ async def retrieve_context(request: RetrieveContextRequest) -> Dict[str, Any]:
                             "score": memory_result.score,
                             "source": memory_result.source.value,  # Convert enum to string
                             "text": memory_result.text,
-                            "type": memory_result.type.value if memory_result.type else "general",
+                            "type": memory_result.type.value if hasattr(memory_result.type, 'value') else str(memory_result.type or "general"),
                             "title": memory_result.title,
                             "tags": memory_result.tags,
                             "namespace": memory_result.namespace,
