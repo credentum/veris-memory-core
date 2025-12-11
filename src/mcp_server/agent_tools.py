@@ -304,10 +304,10 @@ async def check_precedent(
         # Generate embedding for plan summary
         vector = await get_embedding(request.plan_summary)
 
-        # Search for similar FAILURES
-        failure_results = qdrant.search(
+        # Search for similar FAILURES using query_points (qdrant-client v1.7+)
+        failure_response = qdrant.query_points(
             collection_name=TRAJECTORY_COLLECTION,
-            query_vector=vector,
+            query=vector,
             query_filter=qdrant_models.Filter(
                 must=[
                     qdrant_models.FieldCondition(
@@ -319,11 +319,12 @@ async def check_precedent(
             limit=request.lookback_limit,
             score_threshold=FAILURE_SIMILARITY_THRESHOLD,
         )
+        failure_results = failure_response.points
 
         # Search for similar SUCCESSES
-        success_results = qdrant.search(
+        success_response = qdrant.query_points(
             collection_name=TRAJECTORY_COLLECTION,
-            query_vector=vector,
+            query=vector,
             query_filter=qdrant_models.Filter(
                 must=[
                     qdrant_models.FieldCondition(
@@ -335,6 +336,7 @@ async def check_precedent(
             limit=3,
             score_threshold=SUCCESS_SIMILARITY_THRESHOLD,
         )
+        success_results = success_response.points
 
         # Convert to response models
         failures = [
@@ -446,14 +448,15 @@ async def discover_skills(
                 ]
             )
 
-        # Search Qdrant
-        results = qdrant.search(
+        # Search Qdrant using query_points (qdrant-client v1.7+)
+        response = qdrant.query_points(
             collection_name=SKILLS_COLLECTION,
-            query_vector=vector,
+            query=vector,
             query_filter=search_filter,
             limit=request.limit,
             score_threshold=0.75,  # Relevance threshold
         )
+        results = response.points
 
         # Convert to Skill models
         skills = [
