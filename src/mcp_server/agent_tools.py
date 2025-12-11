@@ -12,13 +12,31 @@ Endpoints:
 """
 
 import logging
-import time
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+
+# Import Qdrant models at module level
+try:
+    from qdrant_client import QdrantClient
+    from qdrant_client.http import models as qdrant_models
+    QDRANT_AVAILABLE = True
+except ImportError:
+    QDRANT_AVAILABLE = False
+    QdrantClient = None
+    qdrant_models = None
+
+# Import API key authentication
+try:
+    from ..middleware.api_key_auth import APIKeyInfo, verify_api_key
+    API_KEY_AUTH_AVAILABLE = True
+except ImportError:
+    API_KEY_AUTH_AVAILABLE = False
+    APIKeyInfo = None
+    verify_api_key = None
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +46,8 @@ router = APIRouter(tags=["agent-tools"])
 # Qdrant collections for agent tools
 TRAJECTORY_COLLECTION = "trajectory_logs"
 SKILLS_COLLECTION = "veris_skills"
-DISAGREEMENT_COLLECTION = "disagreement_logs"
+# TODO: DISAGREEMENT_COLLECTION will be used for learning loop endpoints in future sprint
+# DISAGREEMENT_COLLECTION = "disagreement_logs"
 
 # Similarity thresholds for precedent checking
 FAILURE_SIMILARITY_THRESHOLD = 0.85
@@ -142,12 +161,19 @@ class DiscoverSkillsResponse(BaseModel):
 # =============================================================================
 
 # Will be set by register_routes()
-_qdrant_client = None
+_qdrant_client: Optional[QdrantClient] = None
 _embedding_service = None
 
 
-def get_qdrant():
-    """Dependency to get Qdrant client."""
+def get_qdrant() -> QdrantClient:
+    """Dependency to get Qdrant client.
+
+    Returns:
+        QdrantClient: The initialized Qdrant client.
+
+    Raises:
+        HTTPException: 503 if Qdrant client not initialized.
+    """
     if _qdrant_client is None:
         raise HTTPException(
             status_code=503, detail="Qdrant client not initialized for agent tools"
@@ -156,7 +182,17 @@ def get_qdrant():
 
 
 async def get_embedding(text: str) -> List[float]:
-    """Generate embedding using the global embedding service."""
+    """Generate embedding using the global embedding service.
+
+    Args:
+        text: The text to generate an embedding for.
+
+    Returns:
+        List[float]: The embedding vector.
+
+    Raises:
+        HTTPException: 503 if embedding service not initialized.
+    """
     if _embedding_service is None:
         raise HTTPException(
             status_code=503, detail="Embedding service not initialized"
@@ -171,7 +207,11 @@ async def get_embedding(text: str) -> List[float]:
 
 @router.post("/tools/log_trajectory", response_model=LogTrajectoryResponse)
 async def log_trajectory(
-    request: LogTrajectoryRequest, qdrant=Depends(get_qdrant)
+    request: LogTrajectoryRequest,
+    qdrant: QdrantClient = Depends(get_qdrant),
+    api_key_info: Optional[APIKeyInfo] = (
+        Depends(verify_api_key) if API_KEY_AUTH_AVAILABLE else None
+    ),
 ) -> LogTrajectoryResponse:
     """
     Log a (plan, execution, outcome) tuple to Qdrant.
@@ -180,6 +220,8 @@ async def log_trajectory(
     - Precedent checking (Reviewer queries past failures)
     - Success pattern matching (confidence boost)
     - Offline RL data collection
+
+    Requires valid API key authentication.
     """
     try:
         # Generate embedding from work packet description
@@ -206,12 +248,10 @@ async def log_trajectory(
         point_id = uuid.uuid4().hex
 
         # Upsert to Qdrant
-        from qdrant_client.http import models
-
         qdrant.upsert(
             collection_name=TRAJECTORY_COLLECTION,
             points=[
-                models.PointStruct(
+                qdrant_models.PointStruct(
                     id=point_id,
                     vector=vector,
                     payload=payload,
@@ -230,8 +270,10 @@ async def log_trajectory(
             collection=TRAJECTORY_COLLECTION,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Failed to log trajectory: {e}")
+        logger.exception(f"Failed to log trajectory: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to log trajectory: {e}")
 
 
@@ -242,7 +284,11 @@ async def log_trajectory(
 
 @router.post("/tools/check_precedent", response_model=CheckPrecedentResponse)
 async def check_precedent(
-    request: CheckPrecedentRequest, qdrant=Depends(get_qdrant)
+    request: CheckPrecedentRequest,
+    qdrant: QdrantClient = Depends(get_qdrant),
+    api_key_info: Optional[APIKeyInfo] = (
+        Depends(verify_api_key) if API_KEY_AUTH_AVAILABLE else None
+    ),
 ) -> CheckPrecedentResponse:
     """
     Query Qdrant for semantically similar past failures.
@@ -251,10 +297,10 @@ async def check_precedent(
     If history shows failure (>85% similarity): REJECT unless mitigation provided.
     If history shows success (>90% similarity): Confidence boost.
     If history is clean: Proceed with standard review.
+
+    Requires valid API key authentication.
     """
     try:
-        from qdrant_client.http import models
-
         # Generate embedding for plan summary
         vector = await get_embedding(request.plan_summary)
 
@@ -262,11 +308,11 @@ async def check_precedent(
         failure_results = qdrant.search(
             collection_name=TRAJECTORY_COLLECTION,
             query_vector=vector,
-            query_filter=models.Filter(
+            query_filter=qdrant_models.Filter(
                 must=[
-                    models.FieldCondition(
+                    qdrant_models.FieldCondition(
                         key="outcome",
-                        match=models.MatchValue(value="FAILURE"),
+                        match=qdrant_models.MatchValue(value="FAILURE"),
                     )
                 ]
             ),
@@ -278,11 +324,11 @@ async def check_precedent(
         success_results = qdrant.search(
             collection_name=TRAJECTORY_COLLECTION,
             query_vector=vector,
-            query_filter=models.Filter(
+            query_filter=qdrant_models.Filter(
                 must=[
-                    models.FieldCondition(
+                    qdrant_models.FieldCondition(
                         key="outcome",
-                        match=models.MatchValue(value="SUCCESS"),
+                        match=qdrant_models.MatchValue(value="SUCCESS"),
                     )
                 ]
             ),
@@ -344,8 +390,10 @@ async def check_precedent(
             recommendation=recommendation,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Failed to check precedent: {e}")
+        logger.exception(f"Failed to check precedent: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to check precedent: {e}")
 
 
@@ -356,17 +404,21 @@ async def check_precedent(
 
 @router.post("/tools/discover_skills", response_model=DiscoverSkillsResponse)
 async def discover_skills(
-    request: DiscoverSkillsRequest, qdrant=Depends(get_qdrant)
+    request: DiscoverSkillsRequest,
+    qdrant: QdrantClient = Depends(get_qdrant),
+    api_key_info: Optional[APIKeyInfo] = (
+        Depends(verify_api_key) if API_KEY_AUTH_AVAILABLE else None
+    ),
 ) -> DiscoverSkillsResponse:
     """
     Semantic search over veris_skills Qdrant collection.
 
     Skills are procedural knowledge documents (Markdown) that provide
     domain-specific instructions for agents.
+
+    Requires valid API key authentication.
     """
     try:
-        from qdrant_client.http import models
-
         # Build search query
         if request.query:
             query = request.query
@@ -385,11 +437,11 @@ async def discover_skills(
         # Build filter if domain specified
         search_filter = None
         if request.domain:
-            search_filter = models.Filter(
+            search_filter = qdrant_models.Filter(
                 must=[
-                    models.FieldCondition(
+                    qdrant_models.FieldCondition(
                         key="domain",
-                        match=models.MatchValue(value=request.domain),
+                        match=qdrant_models.MatchValue(value=request.domain),
                     )
                 ]
             )
@@ -425,8 +477,10 @@ async def discover_skills(
             query=query,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Failed to discover skills: {e}")
+        logger.exception(f"Failed to discover skills: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to discover skills: {e}")
 
 
@@ -435,7 +489,7 @@ async def discover_skills(
 # =============================================================================
 
 
-def register_routes(app, qdrant_client, embedding_service) -> None:
+def register_routes(app, qdrant_client: QdrantClient, embedding_service) -> None:
     """
     Register agent tools routes with the FastAPI app.
 
