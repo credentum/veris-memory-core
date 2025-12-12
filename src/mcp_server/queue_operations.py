@@ -15,6 +15,7 @@ Endpoints:
 - POST /tools/unblock_packet - Move packet from blocked to main queue
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -252,8 +253,10 @@ async def pop_work_packet(
 
         queue_key = get_work_queue_key(request.user_id)
 
-        # BRPOP with timeout
-        result = redis.brpop(queue_key, timeout=timeout)
+        # BRPOP with timeout - run in thread pool to avoid blocking event loop
+        # This is critical: BRPOP blocks for up to `timeout` seconds, which would
+        # freeze the async event loop if called synchronously
+        result = await asyncio.to_thread(redis.brpop, queue_key, timeout)
 
         if result:
             # result is tuple: (queue_name, packet_json)
