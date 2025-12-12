@@ -291,9 +291,17 @@ class VectorBackend(BackendSearchInterface):
         for result in raw_results:
             try:
                 # Extract data from Qdrant result structure
-                result_id = str(result.id) if hasattr(result, "id") else str(id(result))
-                payload = result.payload if hasattr(result, "payload") else {}
-                score = float(result.score) if hasattr(result, "score") else 1.0
+                # Handle both dict results (from qdrant_client.search()) and object results (ScoredPoint)
+                if isinstance(result, dict):
+                    # Dict format from VectorDBInitializer.search()
+                    result_id = str(result.get("id", ""))
+                    payload = result.get("payload", {})
+                    score = float(result.get("score", 1.0))
+                else:
+                    # Object format (ScoredPoint) - fallback for direct Qdrant client usage
+                    result_id = str(result.id) if hasattr(result, "id") else str(id(result))
+                    payload = result.payload if hasattr(result, "payload") else {}
+                    score = float(result.score) if hasattr(result, "score") else 1.0
 
                 # Extract text content with robust fallback handling
                 text = self._extract_text_content(payload)
@@ -345,9 +353,14 @@ class VectorBackend(BackendSearchInterface):
                 results.append(memory_result)
 
             except Exception as e:
+                # Handle both dict and object formats for logging
+                if isinstance(result, dict):
+                    log_id = str(result.get("id", "unknown"))
+                else:
+                    log_id = str(getattr(result, "id", "unknown"))
                 backend_logger.warning(
                     f"Failed to convert vector result: {e}",
-                    result_id=str(getattr(result, "id", "unknown")),
+                    result_id=log_id,
                 )
                 continue
 
