@@ -2399,7 +2399,9 @@ async def store_context(
                 # Only store vector if embedding generation succeeded
                 if embedding is not None:
                     logger.info("Storing vector in Qdrant...")
-                    vector_id = qdrant_client.store_vector(
+                    # Run synchronous Qdrant call in thread pool to avoid blocking event loop
+                    vector_id = await asyncio.to_thread(
+                        qdrant_client.store_vector,
                         vector_id=context_id,
                         embedding=embedding,
                         metadata={
@@ -2470,7 +2472,9 @@ async def store_context(
                 flattened_properties['searchable_text'] = searchable_text
                 logger.debug(f"Generated searchable_text with {len(searchable_text)} characters")
 
-                graph_id = neo4j_client.create_node(
+                # Run synchronous Neo4j call in thread pool to avoid blocking event loop
+                graph_id = await asyncio.to_thread(
+                    neo4j_client.create_node,
                     labels=["Context"],
                     properties=flattened_properties,
                 )
@@ -2489,7 +2493,10 @@ async def store_context(
                                 RETURN ID(n) as node_id
                                 LIMIT 1
                             """
-                            target_result = neo4j_client.query(target_query, {"id": rel["target"]})
+                            # Run synchronous Neo4j call in thread pool
+                            target_result = await asyncio.to_thread(
+                                neo4j_client.query, target_query, {"id": rel["target"]}
+                            )
 
                             if not target_result or len(target_result) == 0:
                                 logger.warning(
@@ -2501,7 +2508,9 @@ async def store_context(
                             target_node_id = str(target_result[0].get("node_id"))
 
                             # Create relationship using internal node IDs
-                            result = neo4j_client.create_relationship(
+                            # Run synchronous Neo4j call in thread pool
+                            result = await asyncio.to_thread(
+                                neo4j_client.create_relationship,
                                 start_node=graph_id,
                                 end_node=target_node_id,
                                 relationship_type=rel.get("type", "RELATED_TO"),
@@ -2757,7 +2766,7 @@ async def retrieve_context(request: RetrieveContextRequest) -> Dict[str, Any]:
                             "content": content,  # Content fields
                             "metadata": metadata,  # Metadata fields separated
                             "score": memory_result.score,
-                            "source": memory_result.source.value,  # Convert enum to string
+                            "source": memory_result.source.value if hasattr(memory_result.source, 'value') else str(memory_result.source or "unknown"),  # Convert enum to string safely
                             "text": memory_result.text,
                             "type": memory_result.type.value if hasattr(memory_result.type, 'value') else str(memory_result.type or "general"),
                             "title": memory_result.title,
@@ -2833,7 +2842,9 @@ async def retrieve_context(request: RetrieveContextRequest) -> Dict[str, Any]:
                     f"Generated query embedding with {len(query_vector)} dimensions using robust service"
                 )
 
-                vector_results = qdrant_client.search(
+                # Run synchronous Qdrant search in thread pool to avoid blocking event loop
+                vector_results = await asyncio.to_thread(
+                    qdrant_client.search,
                     query_vector=query_vector,
                     limit=request.limit,
                 )
@@ -2873,8 +2884,11 @@ async def retrieve_context(request: RetrieveContextRequest) -> Dict[str, Any]:
                 RETURN n
                 LIMIT $limit
                 """
-                raw_graph_results = neo4j_client.query(
-                    cypher_query, parameters={"type": request.type, "limit": request.limit}
+                # Run synchronous Neo4j query in thread pool to avoid blocking event loop
+                raw_graph_results = await asyncio.to_thread(
+                    neo4j_client.query,
+                    cypher_query,
+                    parameters={"type": request.type, "limit": request.limit}
                 )
 
                 # Normalize graph results to consistent format (eliminate nested 'n' structure)
@@ -2990,7 +3004,10 @@ async def query_graph(request: QueryGraphRequest) -> Dict[str, Any]:
         if not neo4j_client:
             raise HTTPException(status_code=503, detail="Graph database not available")
 
-        results = neo4j_client.query(request.query, parameters=request.parameters)
+        # Run synchronous Neo4j query in thread pool to avoid blocking event loop
+        results = await asyncio.to_thread(
+            neo4j_client.query, request.query, parameters=request.parameters
+        )
 
         return {
             "success": True,
@@ -4077,7 +4094,10 @@ async def sentinel_cleanup_endpoint(
             DETACH DELETE n
             RETURN count(n) as deleted_count
             """
-            result = neo4j_client.query(query, {"context_id": request.context_id})
+            # Run synchronous Neo4j query in thread pool to avoid blocking event loop
+            result = await asyncio.to_thread(
+                neo4j_client.query, query, {"context_id": request.context_id}
+            )
             if result and result[0].get("deleted_count", 0) > 0:
                 deleted_from.append("neo4j")
         except Exception as e:
@@ -4087,7 +4107,8 @@ async def sentinel_cleanup_endpoint(
     # Delete from Qdrant
     if qdrant_client:
         try:
-            qdrant_client.delete_vector(request.context_id)
+            # Run synchronous Qdrant call in thread pool to avoid blocking event loop
+            await asyncio.to_thread(qdrant_client.delete_vector, request.context_id)
             deleted_from.append("qdrant")
         except Exception as e:
             # Qdrant may return error if vector doesn't exist, which is ok
@@ -4154,7 +4175,9 @@ async def upsert_fact_endpoint(
                 query_vector = await generate_embedding(fact_key, adjust_dimensions=True)
 
                 # Search for facts containing this key
-                vector_results = qdrant_client.search(
+                # Run synchronous Qdrant call in thread pool to avoid blocking event loop
+                vector_results = await asyncio.to_thread(
+                    qdrant_client.search,
                     query_vector=query_vector,
                     limit=20,
                 )
@@ -4245,7 +4268,9 @@ async def upsert_fact_endpoint(
 
                 if embedding and len(embedding) > 0:
                     # Store in Qdrant using wrapper method (matches store_context pattern)
-                    vector_id = qdrant_client.store_vector(
+                    # Run synchronous Qdrant call in thread pool to avoid blocking event loop
+                    vector_id = await asyncio.to_thread(
+                        qdrant_client.store_vector,
                         vector_id=new_fact_id,
                         embedding=embedding,
                         metadata={
@@ -4292,7 +4317,9 @@ async def upsert_fact_endpoint(
                     CREATE (f)-[:HAS_VALUE]->(v)
                     RETURN id(f) as graph_id
                     """
-                    result = neo4j_client.query(
+                    # Run synchronous Neo4j query in thread pool to avoid blocking event loop
+                    result = await asyncio.to_thread(
+                        neo4j_client.query,
                         query,
                         parameters={
                             "id": new_fact_id,
@@ -4326,7 +4353,9 @@ async def upsert_fact_endpoint(
                     })
                     RETURN id(c) as graph_id
                     """
-                    result = neo4j_client.query(
+                    # Run synchronous Neo4j query in thread pool to avoid blocking event loop
+                    result = await asyncio.to_thread(
+                        neo4j_client.query,
                         query,
                         parameters={
                             "id": new_fact_id,
@@ -4438,7 +4467,9 @@ async def get_user_facts_endpoint(
                     LIMIT $limit
                     """
 
-                results = neo4j_client.query(
+                # Run synchronous Neo4j query in thread pool to avoid blocking event loop
+                results = await asyncio.to_thread(
+                    neo4j_client.query,
                     query,
                     parameters={"user_id": user_id, "limit": request.limit}
                 )
@@ -4466,7 +4497,9 @@ async def get_user_facts_endpoint(
                 # Generate embedding for generic fact query
                 query_vector = await generate_embedding(f"facts about user {user_id}", adjust_dimensions=True)
 
-                vector_results = qdrant_client.search(
+                # Run synchronous Qdrant search in thread pool to avoid blocking event loop
+                vector_results = await asyncio.to_thread(
+                    qdrant_client.search,
                     query_vector=query_vector,
                     limit=request.limit * 2,  # Get more to filter
                 )
