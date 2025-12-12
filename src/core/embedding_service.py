@@ -4,6 +4,7 @@ Embedding service with proper fallback strategies.
 Provides consistent embedding generation across all components.
 """
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -140,8 +141,10 @@ class SentenceTransformerProvider(EmbeddingProvider):
             raise RuntimeError("SentenceTransformer model not loaded")
 
         try:
-            # SentenceTransformer is synchronous, so we run it directly
-            embedding = self.model.encode(text, convert_to_numpy=True)
+            # SentenceTransformer is synchronous - run in thread pool to avoid blocking event loop
+            embedding = await asyncio.to_thread(
+                self.model.encode, text, convert_to_numpy=True
+            )
             return embedding.tolist()
         except Exception as e:
             logger.error(f"SentenceTransformer embedding generation failed: {e}")
@@ -153,7 +156,10 @@ class SentenceTransformerProvider(EmbeddingProvider):
             raise RuntimeError("SentenceTransformer model not loaded")
 
         try:
-            embeddings = self.model.encode(texts, convert_to_numpy=True)
+            # SentenceTransformer is synchronous - run in thread pool to avoid blocking event loop
+            embeddings = await asyncio.to_thread(
+                self.model.encode, texts, convert_to_numpy=True
+            )
             return embeddings.tolist()
         except Exception as e:
             logger.error(f"SentenceTransformer batch embedding generation failed: {e}")
