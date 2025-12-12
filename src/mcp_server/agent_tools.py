@@ -12,10 +12,12 @@ Endpoints:
 - POST /tools/store_skill - Store a skill to the skills library
 """
 
+import asyncio
 import hashlib
 import logging
 import uuid
 from datetime import datetime
+from functools import partial
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -272,8 +274,9 @@ async def log_trajectory(
         # Generate point ID
         point_id = uuid.uuid4().hex
 
-        # Upsert to Qdrant
-        qdrant.upsert(
+        # Upsert to Qdrant (run in thread pool to avoid blocking event loop)
+        await asyncio.to_thread(
+            qdrant.upsert,
             collection_name=TRAJECTORY_COLLECTION,
             points=[
                 qdrant_models.PointStruct(
@@ -330,7 +333,9 @@ async def check_precedent(
         vector = await get_embedding(request.plan_summary)
 
         # Search for similar FAILURES using query_points (qdrant-client v1.7+)
-        failure_response = qdrant.query_points(
+        # Run in thread pool to avoid blocking event loop
+        failure_response = await asyncio.to_thread(
+            qdrant.query_points,
             collection_name=TRAJECTORY_COLLECTION,
             query=vector,
             query_filter=qdrant_models.Filter(
@@ -346,8 +351,9 @@ async def check_precedent(
         )
         failure_results = failure_response.points
 
-        # Search for similar SUCCESSES
-        success_response = qdrant.query_points(
+        # Search for similar SUCCESSES (run in thread pool)
+        success_response = await asyncio.to_thread(
+            qdrant.query_points,
             collection_name=TRAJECTORY_COLLECTION,
             query=vector,
             query_filter=qdrant_models.Filter(
@@ -477,7 +483,9 @@ async def discover_skills(
         # Note: score_threshold=0.5 is appropriate for all-MiniLM-L6-v2 embeddings.
         # Higher thresholds (0.75+) filter out most semantic matches since cosine
         # similarity with this model typically ranges 0.4-0.7 for related content.
-        response = qdrant.query_points(
+        # Run in thread pool to avoid blocking event loop
+        response = await asyncio.to_thread(
+            qdrant.query_points,
             collection_name=SKILLS_COLLECTION,
             query=vector,
             query_filter=search_filter,
@@ -562,7 +570,9 @@ async def store_skill(
         }
 
         # Upsert to Qdrant (uses skill_id as point ID for idempotent updates)
-        qdrant.upsert(
+        # Run in thread pool to avoid blocking event loop
+        await asyncio.to_thread(
+            qdrant.upsert,
             collection_name=SKILLS_COLLECTION,
             points=[
                 qdrant_models.PointStruct(
