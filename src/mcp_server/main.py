@@ -557,6 +557,16 @@ except ImportError as e:
     AGENT_TOOLS_AVAILABLE = False
     register_agent_tools = None
 
+# Import file operations module (routes registered after Redis init)
+try:
+    from .file_operations import register_routes as register_file_operations
+    FILE_OPERATIONS_AVAILABLE = True
+    logger.info("File operations module imported")
+except ImportError as e:
+    logger.warning(f"File operations module not available: {e}")
+    FILE_OPERATIONS_AVAILABLE = False
+    register_file_operations = None
+
 
 # Global exception handler for production security with request tracking
 @app.exception_handler(Exception)
@@ -1108,6 +1118,16 @@ async def startup_event() -> None:
             elif AGENT_TOOLS_AVAILABLE and not qdrant_client:
                 print("⚠️ Agent tools not registered (Qdrant unavailable)")
                 logger.warning("Agent tools routes not registered - Qdrant client not available")
+
+            # Register file operations API routes (requires Redis client)
+            if FILE_OPERATIONS_AVAILABLE and register_file_operations:
+                try:
+                    register_file_operations(app, simple_redis.client)
+                    print("✅ File operations API routes registered")
+                    logger.info("File operations API registered: /tools/file_write, /tools/file_read, /tools/file_list, /tools/file_delete, /tools/file_exists")
+                except Exception as e:
+                    print(f"⚠️ File operations registration failed: {e}")
+                    logger.error(f"Failed to register file operations routes: {e}")
         else:
             print("⚠️ SimpleRedisClient connection failed, scratchpad operations may fail")
 
