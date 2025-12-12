@@ -219,11 +219,24 @@ async def submit_work_packet(
         queue_key = get_work_queue_key(request.user_id)
         packet_json = json.dumps(request.packet.model_dump())
 
+        # Debug: Log Redis connection info
+        redis_info = f"type={type(redis).__name__}"
+        try:
+            redis_info += f", host={redis.connection_pool.connection_kwargs.get('host', 'unknown')}"
+            redis_info += f", db={redis.connection_pool.connection_kwargs.get('db', 'unknown')}"
+        except Exception:
+            redis_info += ", connection_info=unavailable"
+        logger.info(f"Queue submit: redis_client={redis_info}, queue_key={queue_key}")
+
         # LPUSH to queue
         queue_depth = redis.lpush(queue_key, packet_json)
 
+        # Debug: Immediately verify the write
+        verify_len = redis.llen(queue_key)
+        verify_type = redis.type(queue_key)
         logger.info(
-            f"Submitted packet {request.packet.packet_id} to {queue_key}, depth={queue_depth}"
+            f"Submitted packet {request.packet.packet_id} to {queue_key}, "
+            f"lpush_result={queue_depth}, verify_llen={verify_len}, verify_type={verify_type}"
         )
 
         return SubmitWorkPacketResponse(
@@ -290,8 +303,20 @@ async def get_queue_depth(
         work_queue_key = get_work_queue_key(user_id)
         blocked_queue_key = get_blocked_queue_key(user_id)
 
+        # Debug: Log Redis connection info
+        redis_info = f"type={type(redis).__name__}"
+        try:
+            redis_info += f", host={redis.connection_pool.connection_kwargs.get('host', 'unknown')}"
+            redis_info += f", db={redis.connection_pool.connection_kwargs.get('db', 'unknown')}"
+        except Exception:
+            redis_info += ", connection_info=unavailable"
+        logger.info(f"Queue depth: redis_client={redis_info}, queue_key={work_queue_key}")
+
         depth = redis.llen(work_queue_key)
         blocked_depth = redis.llen(blocked_queue_key)
+        key_type = redis.type(work_queue_key)
+
+        logger.info(f"Queue depth for {user_id}: depth={depth}, type={key_type}")
 
         return QueueDepthResponse(depth=depth, blocked_depth=blocked_depth)
 
