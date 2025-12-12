@@ -146,13 +146,20 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         # CRITICAL FIX: Exempt health and metrics endpoints from rate limiting
         # Docker health checks and monitoring tools must NEVER be rate limited
+        # Agent queue operations are also exempt - they poll every second and are
+        # already authenticated via API key (rate limiting by IP is redundant)
         exempt_paths = {
             "/health",
             "/health/live",
             "/health/ready",
             "/health/detailed",
             "/metrics",
-            "/prometheus"
+            "/prometheus",
+            # Agent queue operations - high-frequency polling endpoints
+            "/tools/pop_work_packet",
+            "/tools/queue_depth",
+            "/tools/submit_work_packet",
+            "/tools/complete_task",
         }
 
         if request.url.path in exempt_paths:
