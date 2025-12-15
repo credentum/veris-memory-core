@@ -362,11 +362,7 @@ class TestSearchTrajectoriesEndpoint:
 
     @pytest.mark.asyncio
     async def test_search_trajectories_time_filter(self, mock_request):
-        """Test time-based filtering with hours_ago parameter.
-
-        Note: hours_ago is accepted but not yet applied (requires schema change
-        to store timestamps as floats for Range queries).
-        """
+        """Test time-based filtering with hours_ago parameter."""
         from src.api.routes.trajectories import search_trajectories
         from src.api.models import TrajectorySearchRequest
 
@@ -384,8 +380,10 @@ class TestSearchTrajectoriesEndpoint:
             result = await search_trajectories(mock_request, request)
 
             assert result.success is True
-            # Verify scroll was called (time filter not yet implemented)
+            # Verify scroll was called with time filter
             mock_qdrant.client.scroll.assert_called_once()
+            call_kwargs = mock_qdrant.client.scroll.call_args.kwargs
+            assert call_kwargs.get('scroll_filter') is not None
 
     @pytest.mark.asyncio
     async def test_search_trajectories_no_qdrant_client(self, mock_request):

@@ -133,6 +133,7 @@ async def log_error(
             "error_message": request.error_message,
             "context": request.context or {},
             "timestamp": (request.timestamp or datetime.now(timezone.utc)).isoformat(),
+            "timestamp_unix": (request.timestamp or datetime.now(timezone.utc)).timestamp(),
             "type": "error"
         }
 
@@ -243,12 +244,12 @@ async def search_errors(
                 FieldCondition(key="trace_id", match=MatchValue(value=request.trace_id))
             )
 
-        # Time filter - TODO: requires storing timestamps as unix floats for Range filtering
-        # Currently timestamps are stored as ISO strings which don't support Range queries
-        # For now, hours_ago parameter is accepted but not applied
-        # if request.hours_ago:
-        #     cutoff_unix = (datetime.now(timezone.utc) - timedelta(hours=request.hours_ago)).timestamp()
-        #     filter_conditions.append(FieldCondition(key="timestamp_unix", range=Range(gte=cutoff_unix)))
+        # Time filter using timestamp_unix (new records only - old records may not have this field)
+        if request.hours_ago:
+            cutoff_unix = (datetime.now(timezone.utc) - timedelta(hours=request.hours_ago)).timestamp()
+            filter_conditions.append(
+                FieldCondition(key="timestamp_unix", range=Range(gte=cutoff_unix))
+            )
 
         query_filter = Filter(must=filter_conditions) if filter_conditions else None
 
