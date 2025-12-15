@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
@@ -1033,11 +1034,14 @@ async def list_tools() -> List[Tool]:
 async def call_tool(
     name: str, arguments: Dict[str, Any]
 ) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
-    """Handle tool calls with metrics tracking."""
+    """Handle tool calls with metrics tracking and trace_id correlation."""
     start_time = time.time()
     status_code = 200
     error_msg = None
-    
+
+    # Generate trace_id for request correlation across services
+    trace_id = f"mcp_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+
     try:
         if name == "store_context":
             result = await store_context_tool(arguments)
@@ -1096,23 +1100,31 @@ async def call_tool(
         if isinstance(result, dict) and not result.get("success", True):
             status_code = 400  # Client error for tool validation failures
             error_msg = result.get("error", "Tool execution failed")
-        
+
+        # Inject trace_id into result for correlation
+        if isinstance(result, dict):
+            result["trace_id"] = trace_id
+
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
-        
+
     except ValueError as e:
         # Client errors (bad input, unknown tool, validation failures)
         if status_code == 200:
             status_code = 400
         error_msg = str(e)
-        raise
+        # Return error with trace_id for correlation
+        error_result = {"success": False, "error": str(e), "trace_id": trace_id}
+        return [TextContent(type="text", text=json.dumps(error_result, indent=2))]
     except Exception as e:
         # Server errors (internal failures, database issues)
         if status_code == 200:
             status_code = 500
             error_msg = str(e)
-        raise
+        # Return error with trace_id for correlation
+        error_result = {"success": False, "error": str(e), "error_type": type(e).__name__, "trace_id": trace_id}
+        return [TextContent(type="text", text=json.dumps(error_result, indent=2))]
     finally:
-        # Record metrics for the MCP tool call
+        # Record metrics for the MCP tool call (trace_id included in response for correlation)
         duration_ms = (time.time() - start_time) * 1000
         if metrics_collector:
             await metrics_collector.record_request(

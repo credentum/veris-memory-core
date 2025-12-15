@@ -348,3 +348,108 @@ class SystemInfo(BaseModel):
     filter_capabilities: Dict[str, Any] = Field(..., description="Filtering capabilities")
     rate_limits: Dict[str, Any] = Field(..., description="Rate limiting configuration")
     features: List[str] = Field(..., description="Enabled features")
+
+
+# =============================================================================
+# Research Hardening Sprint - New Models (V-001, V-002, V-003, V-005)
+# =============================================================================
+
+class TrajectoryOutcome(str, Enum):
+    """Outcome of an agent execution trajectory."""
+    SUCCESS = "success"
+    FAILURE = "failure"
+    PARTIAL = "partial"
+
+
+class TrajectoryLogRequest(BaseModel):
+    """Request to log an agent execution trajectory."""
+    task_id: str = Field(..., description="ID of the task being executed")
+    agent: str = Field(..., description="Agent identifier (e.g., 'coder', 'reviewer')")
+    prompt_hash: str = Field(..., description="Hash of the prompt sent to the LLM")
+    response_hash: str = Field(..., description="Hash of the LLM response")
+    outcome: TrajectoryOutcome = Field(..., description="Outcome of the execution")
+    error: Optional[str] = Field(None, description="Error message if failed")
+    duration_ms: float = Field(..., ge=0, description="Execution duration in milliseconds")
+    cost_usd: float = Field(..., ge=0, description="Cost of the LLM call in USD")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Additional context")
+
+
+class TrajectoryLogResponse(BaseModel):
+    """Response from logging a trajectory."""
+    success: bool = Field(..., description="Whether the trajectory was logged")
+    trajectory_id: str = Field(..., description="Unique ID of the logged trajectory")
+    trace_id: str = Field(..., description="Request trace ID for correlation")
+    message: str = Field(..., description="Status message")
+
+
+class ErrorLogRequest(BaseModel):
+    """Request to log a structured error."""
+    trace_id: str = Field(..., description="Trace ID for correlation")
+    task_id: Optional[str] = Field(None, description="Task ID if applicable")
+    service: str = Field(..., description="Service that generated the error")
+    error_type: str = Field(..., description="Error type/class name")
+    error_message: str = Field(..., description="Error message")
+    context: Optional[Dict[str, Any]] = Field(None, description="Error context")
+    timestamp: Optional[datetime] = Field(None, description="When the error occurred")
+
+
+class ErrorLogResponse(BaseModel):
+    """Response from logging an error."""
+    success: bool = Field(..., description="Whether the error was logged")
+    error_id: str = Field(..., description="Unique ID of the logged error")
+    trace_id: str = Field(..., description="Request trace ID")
+    message: str = Field(..., description="Status message")
+
+
+class PacketReplayRequest(BaseModel):
+    """Request to replay a packet (optional overrides)."""
+    target_queue: Optional[str] = Field(None, description="Override target queue")
+    user_id: Optional[str] = Field(None, description="Override user_id (default: dev_team)")
+
+
+class PacketReplayResponse(BaseModel):
+    """Response from replaying a packet."""
+    success: bool = Field(..., description="Whether the packet was replayed")
+    packet_id: str = Field(..., description="ID of the replayed packet")
+    queue: str = Field(..., description="Queue the packet was published to")
+    trace_id: str = Field(..., description="Request trace ID")
+    message: str = Field(..., description="Status message")
+
+
+class QueueStats(BaseModel):
+    """Statistics for a single queue."""
+    depth: int = Field(..., ge=0, description="Number of items in queue")
+    oldest_age_sec: Optional[float] = Field(None, description="Age of oldest item in seconds")
+
+
+class ServiceHealth(BaseModel):
+    """Health status of a service."""
+    status: str = Field(..., description="healthy, degraded, or unhealthy")
+    last_seen: Optional[datetime] = Field(None, description="Last health check time")
+    message: Optional[str] = Field(None, description="Status message")
+
+
+class TaskStats(BaseModel):
+    """Statistics for active tasks."""
+    count: int = Field(..., ge=0, description="Number of active tasks")
+    oldest_age_sec: Optional[float] = Field(None, description="Age of oldest task in seconds")
+
+
+class ErrorSummary(BaseModel):
+    """Summary of a recent error."""
+    error_id: str = Field(..., description="Error ID")
+    trace_id: str = Field(..., description="Trace ID")
+    service: str = Field(..., description="Service that generated the error")
+    error_type: str = Field(..., description="Error type")
+    error_message: str = Field(..., description="Error message (truncated)")
+    timestamp: datetime = Field(..., description="When the error occurred")
+
+
+class TelemetrySnapshot(BaseModel):
+    """System telemetry snapshot for Observer Agent."""
+    timestamp: datetime = Field(default_factory=datetime.utcnow, description="Snapshot time")
+    trace_id: str = Field(..., description="Request trace ID")
+    queues: Dict[str, QueueStats] = Field(..., description="Queue statistics")
+    services: Dict[str, ServiceHealth] = Field(..., description="Service health status")
+    active_tasks: TaskStats = Field(..., description="Active task statistics")
+    recent_errors: List[ErrorSummary] = Field(..., description="Recent errors")

@@ -23,10 +23,15 @@ from slowapi.errors import RateLimitExceeded
 
 # API routes
 from .routes import search, health, metrics
+# Research Hardening Sprint routes (V-001, V-002, V-003, V-005)
+from .routes import trajectories, errors, packets, telemetry
 from .middleware import ErrorHandlerMiddleware, ValidationMiddleware, LoggingMiddleware
 from .rate_limit_middleware import RateLimitMiddleware
 from .models import ErrorResponse
-from .dependencies import set_query_dispatcher, get_query_dispatcher
+from .dependencies import (
+    set_query_dispatcher, get_query_dispatcher,
+    set_qdrant_client, set_kv_store_client, set_embedding_generator
+)
 
 # Core components  
 from ..core.query_dispatcher import QueryDispatcher
@@ -290,13 +295,25 @@ async def lifespan(app: FastAPI):
         
         # Set global dispatcher
         set_query_dispatcher(dispatcher)
-        
+
+        # Set raw storage clients for research hardening sprint endpoints
+        # These are used by trajectory logging, error logging, packet replay, telemetry
+        if 'qdrant_client' in locals():
+            set_qdrant_client(qdrant_client)
+            api_logger.info("✅ API: Qdrant client set for research endpoints")
+        if 'kv_store_client' in locals():
+            set_kv_store_client(kv_store_client)
+            api_logger.info("✅ API: KV store client set for research endpoints")
+        if 'embedding_generator' in locals() and embedding_generator is not None:
+            set_embedding_generator(embedding_generator)
+            api_logger.info("✅ API: Embedding generator set for research endpoints")
+
         api_logger.info(
             "Query dispatcher initialized",
             backends=dispatcher.list_backends(),
             ranking_policies=dispatcher.get_available_ranking_policies()
         )
-        
+
         yield
         
     except Exception as e:
@@ -426,6 +443,11 @@ def create_app() -> FastAPI:
     app.include_router(search.router, prefix="/api/v1", tags=["search"])
     app.include_router(health.router, prefix="/api/v1", tags=["health"])
     app.include_router(metrics.router, prefix="/api/v1", tags=["metrics"])
+    # Research Hardening Sprint routes (V-001, V-002, V-003, V-005)
+    app.include_router(trajectories.router, prefix="/api/v1/trajectories", tags=["trajectories"])
+    app.include_router(errors.router, prefix="/api/v1/errors", tags=["errors"])
+    app.include_router(packets.router, prefix="/api/v1/packets", tags=["packets"])
+    app.include_router(telemetry.router, prefix="/api/v1/telemetry", tags=["telemetry"])
     
     # Root endpoint
     @app.get("/", tags=["root"])
