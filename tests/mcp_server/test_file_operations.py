@@ -9,7 +9,7 @@ Tests cover:
 - File delete (file_delete)
 - File exists (file_exists)
 - Path validation and security (traversal prevention)
-- Workspace isolation by user_id
+- Workspace isolation by workspace_path
 """
 
 import json
@@ -23,6 +23,10 @@ import pytest
 from src.mcp_server import file_operations
 
 
+# Default workspace base for tests
+TEST_WORKSPACE_BASE = "/veris_storage/workspaces"
+
+
 class TestPathValidation:
     """Tests for path validation and security."""
 
@@ -30,7 +34,7 @@ class TestPathValidation:
         """Test that path traversal attempts are blocked."""
         with pytest.raises(ValueError, match="Path traversal not allowed"):
             file_operations.FileWriteRequest(
-                user_id="test_user",
+                workspace_path=f"{TEST_WORKSPACE_BASE}/test_task",
                 path="../etc/passwd",
                 content="malicious",
             )
@@ -39,7 +43,7 @@ class TestPathValidation:
         """Test nested path traversal is blocked."""
         with pytest.raises(ValueError, match="Path traversal not allowed"):
             file_operations.FileReadRequest(
-                user_id="test_user",
+                workspace_path=f"{TEST_WORKSPACE_BASE}/test_task",
                 path="data/../../secrets",
             )
 
@@ -47,7 +51,7 @@ class TestPathValidation:
         """Test absolute paths are blocked."""
         with pytest.raises(ValueError, match="Absolute paths not allowed"):
             file_operations.FileWriteRequest(
-                user_id="test_user",
+                workspace_path=f"{TEST_WORKSPACE_BASE}/test_task",
                 path="/etc/passwd",
                 content="content",
             )
@@ -56,7 +60,7 @@ class TestPathValidation:
         """Test null bytes in path are blocked."""
         with pytest.raises(ValueError, match="Null bytes not allowed"):
             file_operations.FileReadRequest(
-                user_id="test_user",
+                workspace_path=f"{TEST_WORKSPACE_BASE}/test_task",
                 path="file.txt\x00.exe",
             )
 
@@ -64,7 +68,7 @@ class TestPathValidation:
         """Test empty path is blocked for write/read/delete."""
         with pytest.raises(ValueError, match="Path cannot be empty"):
             file_operations.FileWriteRequest(
-                user_id="test_user",
+                workspace_path=f"{TEST_WORKSPACE_BASE}/test_task",
                 path="",
                 content="content",
             )
@@ -74,14 +78,14 @@ class TestPathValidation:
         long_path = "a" * 501
         with pytest.raises(ValueError, match="Path too long"):
             file_operations.FileReadRequest(
-                user_id="test_user",
+                workspace_path=f"{TEST_WORKSPACE_BASE}/test_task",
                 path=long_path,
             )
 
     def test_valid_path_accepted(self):
         """Test valid paths are accepted."""
         request = file_operations.FileWriteRequest(
-            user_id="test_user",
+            workspace_path=f"{TEST_WORKSPACE_BASE}/test_task",
             path="data/output.json",
             content='{"key": "value"}',
         )
@@ -90,7 +94,7 @@ class TestPathValidation:
     def test_whitespace_trimmed(self):
         """Test whitespace is trimmed from path."""
         request = file_operations.FileReadRequest(
-            user_id="test_user",
+            workspace_path=f"{TEST_WORKSPACE_BASE}/test_task",
             path="  data/file.txt  ",
         )
         assert request.path == "data/file.txt"
@@ -106,7 +110,7 @@ class TestContentValidation:
         with patch.object(file_operations, "MAX_FILE_SIZE_BYTES", 10 * 1024 * 1024):
             with pytest.raises(ValueError, match="Content too large"):
                 file_operations.FileWriteRequest(
-                    user_id="test_user",
+                    workspace_path=f"{TEST_WORKSPACE_BASE}/test_task",
                     path="large_file.txt",
                     content=large_content,
                 )
@@ -116,27 +120,30 @@ class TestWorkspacePath:
     """Tests for workspace path resolution."""
 
     def test_get_workspace_path_valid(self):
-        """Test valid user_id generates correct workspace path."""
+        """Test valid workspace_path returns Path object."""
         with patch.object(file_operations, "WORKSPACE_BASE_DIR", "/veris_storage/workspaces"):
-            path = file_operations.get_workspace_path("dev_team")
-            assert path == Path("/veris_storage/workspaces/dev_team")
+            path = file_operations.get_workspace_path("/veris_storage/workspaces/task-123")
+            assert path == Path("/veris_storage/workspaces/task-123")
 
-    def test_get_workspace_path_sanitizes_user_id(self):
-        """Test user_id with special chars is sanitized."""
+    def test_get_workspace_path_outside_base_blocked(self):
+        """Test workspace_path outside base directory is blocked."""
         with patch.object(file_operations, "WORKSPACE_BASE_DIR", "/veris_storage/workspaces"):
-            path = file_operations.get_workspace_path("user@email.com")
-            # @ and . should be stripped, leaving "useremailcom"
-            assert "useremailcom" in str(path)
+            with pytest.raises(ValueError, match="workspace_path must be under"):
+                file_operations.get_workspace_path("/tmp/malicious")
 
-    def test_get_workspace_path_empty_user_id(self):
-        """Test empty user_id raises error."""
-        with pytest.raises(ValueError, match="user_id cannot be empty"):
+    def test_get_workspace_path_empty_blocked(self):
+        """Test empty workspace_path raises error."""
+        with pytest.raises(ValueError, match="workspace_path cannot be empty"):
             file_operations.get_workspace_path("")
 
-    def test_get_workspace_path_invalid_chars_only(self):
-        """Test user_id with only invalid chars raises error."""
-        with pytest.raises(ValueError, match="user_id contains no valid characters"):
-            file_operations.get_workspace_path("@#$%")
+    def test_workspace_path_validation_in_request(self):
+        """Test workspace_path must be under base directory."""
+        with pytest.raises(ValueError, match="workspace_path must be under"):
+            file_operations.FileWriteRequest(
+                workspace_path="/tmp/outside",
+                path="file.txt",
+                content="content",
+            )
 
 
 class TestResolveSafePath:
@@ -168,10 +175,14 @@ class TestFileWriteEndpoint:
         mock_redis = Mock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            # Create task workspace
+            task_workspace = Path(tmpdir) / "task-123"
+            task_workspace.mkdir(parents=True)
+
             with patch.object(file_operations, "WORKSPACE_BASE_DIR", tmpdir):
                 with patch.object(file_operations, "_redis_client", mock_redis):
                     request = file_operations.FileWriteRequest(
-                        user_id="test_team",
+                        workspace_path=str(task_workspace),
                         path="output.txt",
                         content="Hello, World!",
                     )
@@ -182,7 +193,7 @@ class TestFileWriteEndpoint:
                     assert result.path == "output.txt"
 
                     # Verify file was created
-                    written_path = Path(tmpdir) / "test_team" / "output.txt"
+                    written_path = task_workspace / "output.txt"
                     assert written_path.exists()
                     assert written_path.read_text() == "Hello, World!"
 
@@ -192,10 +203,13 @@ class TestFileWriteEndpoint:
         mock_redis = Mock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            task_workspace = Path(tmpdir) / "task-456"
+            task_workspace.mkdir(parents=True)
+
             with patch.object(file_operations, "WORKSPACE_BASE_DIR", tmpdir):
                 with patch.object(file_operations, "_redis_client", mock_redis):
                     request = file_operations.FileWriteRequest(
-                        user_id="test_team",
+                        workspace_path=str(task_workspace),
                         path="deep/nested/dir/file.txt",
                         content="content",
                         create_dirs=True,
@@ -203,7 +217,7 @@ class TestFileWriteEndpoint:
                     result = await file_operations.file_write(request)
 
                     assert result.success is True
-                    written_path = Path(tmpdir) / "test_team" / "deep/nested/dir/file.txt"
+                    written_path = task_workspace / "deep/nested/dir/file.txt"
                     assert written_path.exists()
 
     @pytest.mark.asyncio
@@ -212,15 +226,14 @@ class TestFileWriteEndpoint:
         mock_redis = Mock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            task_workspace = Path(tmpdir) / "task-789"
+            task_workspace.mkdir(parents=True)
+            (task_workspace / "existing.txt").write_text("original")
+
             with patch.object(file_operations, "WORKSPACE_BASE_DIR", tmpdir):
                 with patch.object(file_operations, "_redis_client", mock_redis):
-                    # Create workspace and initial file
-                    workspace = Path(tmpdir) / "test_team"
-                    workspace.mkdir(parents=True)
-                    (workspace / "existing.txt").write_text("original")
-
                     request = file_operations.FileWriteRequest(
-                        user_id="test_team",
+                        workspace_path=str(task_workspace),
                         path="existing.txt",
                         content="new content",
                         overwrite=False,
@@ -231,7 +244,7 @@ class TestFileWriteEndpoint:
                     assert "already exists" in result.message
 
                     # Verify original content unchanged
-                    assert (workspace / "existing.txt").read_text() == "original"
+                    assert (task_workspace / "existing.txt").read_text() == "original"
 
     @pytest.mark.asyncio
     async def test_file_write_logs_operation(self):
@@ -239,10 +252,13 @@ class TestFileWriteEndpoint:
         mock_redis = Mock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            task_workspace = Path(tmpdir) / "task-log"
+            task_workspace.mkdir(parents=True)
+
             with patch.object(file_operations, "WORKSPACE_BASE_DIR", tmpdir):
                 with patch.object(file_operations, "_redis_client", mock_redis):
                     request = file_operations.FileWriteRequest(
-                        user_id="test_team",
+                        workspace_path=str(task_workspace),
                         path="tracked.txt",
                         content="content",
                     )
@@ -263,15 +279,15 @@ class TestFileReadEndpoint:
         mock_redis = Mock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create workspace and file
-            workspace = Path(tmpdir) / "test_team"
-            workspace.mkdir(parents=True)
-            (workspace / "data.txt").write_text("Test content")
+            # Create task workspace and file
+            task_workspace = Path(tmpdir) / "task-read-1"
+            task_workspace.mkdir(parents=True)
+            (task_workspace / "data.txt").write_text("Test content")
 
             with patch.object(file_operations, "WORKSPACE_BASE_DIR", tmpdir):
                 with patch.object(file_operations, "_redis_client", mock_redis):
                     request = file_operations.FileReadRequest(
-                        user_id="test_team",
+                        workspace_path=str(task_workspace),
                         path="data.txt",
                     )
                     result = await file_operations.file_read(request)
@@ -286,14 +302,14 @@ class TestFileReadEndpoint:
         mock_redis = Mock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create empty workspace
-            workspace = Path(tmpdir) / "test_team"
-            workspace.mkdir(parents=True)
+            # Create empty task workspace
+            task_workspace = Path(tmpdir) / "task-read-2"
+            task_workspace.mkdir(parents=True)
 
             with patch.object(file_operations, "WORKSPACE_BASE_DIR", tmpdir):
                 with patch.object(file_operations, "_redis_client", mock_redis):
                     request = file_operations.FileReadRequest(
-                        user_id="test_team",
+                        workspace_path=str(task_workspace),
                         path="nonexistent.txt",
                     )
                     result = await file_operations.file_read(request)
@@ -307,14 +323,14 @@ class TestFileReadEndpoint:
         mock_redis = Mock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create workspace and directory
-            workspace = Path(tmpdir) / "test_team"
-            (workspace / "subdir").mkdir(parents=True)
+            # Create task workspace and directory
+            task_workspace = Path(tmpdir) / "task-read-3"
+            (task_workspace / "subdir").mkdir(parents=True)
 
             with patch.object(file_operations, "WORKSPACE_BASE_DIR", tmpdir):
                 with patch.object(file_operations, "_redis_client", mock_redis):
                     request = file_operations.FileReadRequest(
-                        user_id="test_team",
+                        workspace_path=str(task_workspace),
                         path="subdir",
                     )
                     result = await file_operations.file_read(request)
@@ -332,17 +348,17 @@ class TestFileListEndpoint:
         mock_redis = Mock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create workspace with files
-            workspace = Path(tmpdir) / "test_team"
-            workspace.mkdir(parents=True)
-            (workspace / "file1.txt").write_text("content1")
-            (workspace / "file2.txt").write_text("content2")
-            (workspace / "subdir").mkdir()
+            # Create task workspace with files
+            task_workspace = Path(tmpdir) / "task-list-1"
+            task_workspace.mkdir(parents=True)
+            (task_workspace / "file1.txt").write_text("content1")
+            (task_workspace / "file2.txt").write_text("content2")
+            (task_workspace / "subdir").mkdir()
 
             with patch.object(file_operations, "WORKSPACE_BASE_DIR", tmpdir):
                 with patch.object(file_operations, "_redis_client", mock_redis):
                     request = file_operations.FileListRequest(
-                        user_id="test_team",
+                        workspace_path=str(task_workspace),
                         path="",
                     )
                     result = await file_operations.file_list(request)
@@ -360,17 +376,17 @@ class TestFileListEndpoint:
         mock_redis = Mock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create workspace with nested structure
-            workspace = Path(tmpdir) / "test_team"
-            workspace.mkdir(parents=True)
-            (workspace / "file1.txt").write_text("content")
-            (workspace / "subdir").mkdir()
-            (workspace / "subdir" / "nested.txt").write_text("nested")
+            # Create task workspace with nested structure
+            task_workspace = Path(tmpdir) / "task-list-2"
+            task_workspace.mkdir(parents=True)
+            (task_workspace / "file1.txt").write_text("content")
+            (task_workspace / "subdir").mkdir()
+            (task_workspace / "subdir" / "nested.txt").write_text("nested")
 
             with patch.object(file_operations, "WORKSPACE_BASE_DIR", tmpdir):
                 with patch.object(file_operations, "_redis_client", mock_redis):
                     request = file_operations.FileListRequest(
-                        user_id="test_team",
+                        workspace_path=str(task_workspace),
                         path="",
                         recursive=True,
                     )
@@ -386,16 +402,16 @@ class TestFileListEndpoint:
         mock_redis = Mock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create workspace with hidden file
-            workspace = Path(tmpdir) / "test_team"
-            workspace.mkdir(parents=True)
-            (workspace / "visible.txt").write_text("visible")
-            (workspace / ".hidden").write_text("hidden")
+            # Create task workspace with hidden file
+            task_workspace = Path(tmpdir) / "task-list-3"
+            task_workspace.mkdir(parents=True)
+            (task_workspace / "visible.txt").write_text("visible")
+            (task_workspace / ".hidden").write_text("hidden")
 
             with patch.object(file_operations, "WORKSPACE_BASE_DIR", tmpdir):
                 with patch.object(file_operations, "_redis_client", mock_redis):
                     request = file_operations.FileListRequest(
-                        user_id="test_team",
+                        workspace_path=str(task_workspace),
                         path="",
                         include_hidden=False,
                     )
@@ -411,16 +427,16 @@ class TestFileListEndpoint:
         mock_redis = Mock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create workspace with hidden file
-            workspace = Path(tmpdir) / "test_team"
-            workspace.mkdir(parents=True)
-            (workspace / "visible.txt").write_text("visible")
-            (workspace / ".hidden").write_text("hidden")
+            # Create task workspace with hidden file
+            task_workspace = Path(tmpdir) / "task-list-4"
+            task_workspace.mkdir(parents=True)
+            (task_workspace / "visible.txt").write_text("visible")
+            (task_workspace / ".hidden").write_text("hidden")
 
             with patch.object(file_operations, "WORKSPACE_BASE_DIR", tmpdir):
                 with patch.object(file_operations, "_redis_client", mock_redis):
                     request = file_operations.FileListRequest(
-                        user_id="test_team",
+                        workspace_path=str(task_workspace),
                         path="",
                         include_hidden=True,
                     )
@@ -436,17 +452,19 @@ class TestFileListEndpoint:
         mock_redis = Mock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            task_workspace = Path(tmpdir) / "task-list-new"
+
             with patch.object(file_operations, "WORKSPACE_BASE_DIR", tmpdir):
                 with patch.object(file_operations, "_redis_client", mock_redis):
                     request = file_operations.FileListRequest(
-                        user_id="new_user",
+                        workspace_path=str(task_workspace),
                         path="",
                     )
                     result = await file_operations.file_list(request)
 
                     assert result.success is True
                     assert result.total_count == 0
-                    assert (Path(tmpdir) / "new_user").exists()
+                    assert task_workspace.exists()
 
 
 class TestFileDeleteEndpoint:
@@ -458,16 +476,16 @@ class TestFileDeleteEndpoint:
         mock_redis = Mock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create workspace with file
-            workspace = Path(tmpdir) / "test_team"
-            workspace.mkdir(parents=True)
-            target = workspace / "to_delete.txt"
+            # Create task workspace with file
+            task_workspace = Path(tmpdir) / "task-del-1"
+            task_workspace.mkdir(parents=True)
+            target = task_workspace / "to_delete.txt"
             target.write_text("delete me")
 
             with patch.object(file_operations, "WORKSPACE_BASE_DIR", tmpdir):
                 with patch.object(file_operations, "_redis_client", mock_redis):
                     request = file_operations.FileDeleteRequest(
-                        user_id="test_team",
+                        workspace_path=str(task_workspace),
                         path="to_delete.txt",
                     )
                     result = await file_operations.file_delete(request)
@@ -481,13 +499,13 @@ class TestFileDeleteEndpoint:
         mock_redis = Mock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            workspace = Path(tmpdir) / "test_team"
-            workspace.mkdir(parents=True)
+            task_workspace = Path(tmpdir) / "task-del-2"
+            task_workspace.mkdir(parents=True)
 
             with patch.object(file_operations, "WORKSPACE_BASE_DIR", tmpdir):
                 with patch.object(file_operations, "_redis_client", mock_redis):
                     request = file_operations.FileDeleteRequest(
-                        user_id="test_team",
+                        workspace_path=str(task_workspace),
                         path="nonexistent.txt",
                     )
                     result = await file_operations.file_delete(request)
@@ -501,14 +519,14 @@ class TestFileDeleteEndpoint:
         mock_redis = Mock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create workspace with directory
-            workspace = Path(tmpdir) / "test_team"
-            (workspace / "subdir").mkdir(parents=True)
+            # Create task workspace with directory
+            task_workspace = Path(tmpdir) / "task-del-3"
+            (task_workspace / "subdir").mkdir(parents=True)
 
             with patch.object(file_operations, "WORKSPACE_BASE_DIR", tmpdir):
                 with patch.object(file_operations, "_redis_client", mock_redis):
                     request = file_operations.FileDeleteRequest(
-                        user_id="test_team",
+                        workspace_path=str(task_workspace),
                         path="subdir",
                     )
                     result = await file_operations.file_delete(request)
@@ -524,14 +542,14 @@ class TestFileExistsEndpoint:
     async def test_file_exists_true(self):
         """Test file_exists returns True for existing file."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create workspace with file
-            workspace = Path(tmpdir) / "test_team"
-            workspace.mkdir(parents=True)
-            (workspace / "exists.txt").write_text("content")
+            # Create task workspace with file
+            task_workspace = Path(tmpdir) / "task-exists-1"
+            task_workspace.mkdir(parents=True)
+            (task_workspace / "exists.txt").write_text("content")
 
             with patch.object(file_operations, "WORKSPACE_BASE_DIR", tmpdir):
                 request = file_operations.FileExistsRequest(
-                    user_id="test_team",
+                    workspace_path=str(task_workspace),
                     path="exists.txt",
                 )
                 result = await file_operations.file_exists(request)
@@ -545,12 +563,12 @@ class TestFileExistsEndpoint:
     async def test_file_exists_false(self):
         """Test file_exists returns False for missing file."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            workspace = Path(tmpdir) / "test_team"
-            workspace.mkdir(parents=True)
+            task_workspace = Path(tmpdir) / "task-exists-2"
+            task_workspace.mkdir(parents=True)
 
             with patch.object(file_operations, "WORKSPACE_BASE_DIR", tmpdir):
                 request = file_operations.FileExistsRequest(
-                    user_id="test_team",
+                    workspace_path=str(task_workspace),
                     path="nonexistent.txt",
                 )
                 result = await file_operations.file_exists(request)
@@ -563,13 +581,13 @@ class TestFileExistsEndpoint:
     async def test_file_exists_directory(self):
         """Test file_exists correctly identifies directories."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create workspace with directory
-            workspace = Path(tmpdir) / "test_team"
-            (workspace / "subdir").mkdir(parents=True)
+            # Create task workspace with directory
+            task_workspace = Path(tmpdir) / "task-exists-3"
+            (task_workspace / "subdir").mkdir(parents=True)
 
             with patch.object(file_operations, "WORKSPACE_BASE_DIR", tmpdir):
                 request = file_operations.FileExistsRequest(
-                    user_id="test_team",
+                    workspace_path=str(task_workspace),
                     path="subdir",
                 )
                 result = await file_operations.file_exists(request)
@@ -580,27 +598,27 @@ class TestFileExistsEndpoint:
 
 
 class TestWorkspaceIsolation:
-    """Tests for workspace isolation between users."""
+    """Tests for workspace isolation between tasks."""
 
     @pytest.mark.asyncio
-    async def test_users_have_separate_workspaces(self):
-        """Test different users can't access each other's files."""
+    async def test_tasks_have_separate_workspaces(self):
+        """Test different tasks have isolated workspaces."""
         mock_redis = Mock()
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create workspaces for two users
-            user1_workspace = Path(tmpdir) / "user1"
-            user1_workspace.mkdir(parents=True)
-            (user1_workspace / "secret.txt").write_text("user1 secret")
+            # Create workspaces for two tasks
+            task1_workspace = Path(tmpdir) / "task-1"
+            task1_workspace.mkdir(parents=True)
+            (task1_workspace / "secret.txt").write_text("task1 secret")
 
-            user2_workspace = Path(tmpdir) / "user2"
-            user2_workspace.mkdir(parents=True)
+            task2_workspace = Path(tmpdir) / "task-2"
+            task2_workspace.mkdir(parents=True)
 
             with patch.object(file_operations, "WORKSPACE_BASE_DIR", tmpdir):
                 with patch.object(file_operations, "_redis_client", mock_redis):
-                    # user2 should not see user1's file
+                    # task2 workspace should not see task1's file
                     request = file_operations.FileReadRequest(
-                        user_id="user2",
+                        workspace_path=str(task2_workspace),
                         path="secret.txt",
                     )
                     result = await file_operations.file_read(request)

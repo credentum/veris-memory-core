@@ -2,12 +2,14 @@
 File Operations API for Agent Workspace Management.
 
 This module provides REST API endpoints for file operations within
-isolated user workspaces. Each user_id gets a separate workspace
-directory to prevent cross-tenant access.
+task workspaces. Each request specifies the workspace_path directly,
+allowing agents to write to task-specific workspaces created by
+the Repo Manager.
 
 Security:
-- Path traversal prevention (no ../, absolute paths blocked)
-- Workspace isolation by user_id
+- Path traversal prevention (no ../, relative paths in workspace)
+- Workspace isolation by explicit workspace_path
+- workspace_path must be under VERIS_WORKSPACE_DIR
 - Size limits to prevent DoS
 - No execution of uploaded content
 
@@ -53,11 +55,23 @@ _redis_client = None
 class FileWriteRequest(BaseModel):
     """Request to write content to a file."""
 
-    user_id: str = Field(..., description="Team/user ID for workspace isolation")
+    workspace_path: str = Field(..., description="Absolute workspace path (e.g., '/veris_storage/workspaces/task-123')")
     path: str = Field(..., description="Relative path within workspace (e.g., 'data/output.json')")
     content: str = Field(..., description="File content to write")
     create_dirs: bool = Field(default=True, description="Create parent directories if they don't exist")
     overwrite: bool = Field(default=True, description="Overwrite existing file")
+
+    @field_validator("workspace_path")
+    @classmethod
+    def validate_workspace_path(cls, v: str) -> str:
+        """Validate workspace path is under allowed base directory."""
+        if not v or not v.strip():
+            raise ValueError("workspace_path cannot be empty")
+        if not v.startswith(WORKSPACE_BASE_DIR):
+            raise ValueError(f"workspace_path must be under {WORKSPACE_BASE_DIR}")
+        if ".." in v:
+            raise ValueError("Path traversal not allowed (..)")
+        return v.strip()
 
     @field_validator("path")
     @classmethod
@@ -96,9 +110,21 @@ class FileWriteResponse(BaseModel):
 class FileReadRequest(BaseModel):
     """Request to read a file."""
 
-    user_id: str = Field(..., description="Team/user ID for workspace isolation")
+    workspace_path: str = Field(..., description="Absolute workspace path (e.g., '/veris_storage/workspaces/task-123')")
     path: str = Field(..., description="Relative path within workspace")
     encoding: str = Field(default="utf-8", description="File encoding")
+
+    @field_validator("workspace_path")
+    @classmethod
+    def validate_workspace_path(cls, v: str) -> str:
+        """Validate workspace path is under allowed base directory."""
+        if not v or not v.strip():
+            raise ValueError("workspace_path cannot be empty")
+        if not v.startswith(WORKSPACE_BASE_DIR):
+            raise ValueError(f"workspace_path must be under {WORKSPACE_BASE_DIR}")
+        if ".." in v:
+            raise ValueError("Path traversal not allowed (..)")
+        return v.strip()
 
     @field_validator("path")
     @classmethod
@@ -130,10 +156,22 @@ class FileReadResponse(BaseModel):
 class FileListRequest(BaseModel):
     """Request to list directory contents."""
 
-    user_id: str = Field(..., description="Team/user ID for workspace isolation")
+    workspace_path: str = Field(..., description="Absolute workspace path (e.g., '/veris_storage/workspaces/task-123')")
     path: str = Field(default="", description="Relative directory path (empty = workspace root)")
     recursive: bool = Field(default=False, description="List recursively")
     include_hidden: bool = Field(default=False, description="Include hidden files (starting with .)")
+
+    @field_validator("workspace_path")
+    @classmethod
+    def validate_workspace_path(cls, v: str) -> str:
+        """Validate workspace path is under allowed base directory."""
+        if not v or not v.strip():
+            raise ValueError("workspace_path cannot be empty")
+        if not v.startswith(WORKSPACE_BASE_DIR):
+            raise ValueError(f"workspace_path must be under {WORKSPACE_BASE_DIR}")
+        if ".." in v:
+            raise ValueError("Path traversal not allowed (..)")
+        return v.strip()
 
     @field_validator("path")
     @classmethod
@@ -173,8 +211,20 @@ class FileListResponse(BaseModel):
 class FileDeleteRequest(BaseModel):
     """Request to delete a file."""
 
-    user_id: str = Field(..., description="Team/user ID for workspace isolation")
+    workspace_path: str = Field(..., description="Absolute workspace path (e.g., '/veris_storage/workspaces/task-123')")
     path: str = Field(..., description="Relative path within workspace")
+
+    @field_validator("workspace_path")
+    @classmethod
+    def validate_workspace_path(cls, v: str) -> str:
+        """Validate workspace path is under allowed base directory."""
+        if not v or not v.strip():
+            raise ValueError("workspace_path cannot be empty")
+        if not v.startswith(WORKSPACE_BASE_DIR):
+            raise ValueError(f"workspace_path must be under {WORKSPACE_BASE_DIR}")
+        if ".." in v:
+            raise ValueError("Path traversal not allowed (..)")
+        return v.strip()
 
     @field_validator("path")
     @classmethod
@@ -204,8 +254,20 @@ class FileDeleteResponse(BaseModel):
 class FileExistsRequest(BaseModel):
     """Request to check if file exists."""
 
-    user_id: str = Field(..., description="Team/user ID for workspace isolation")
+    workspace_path: str = Field(..., description="Absolute workspace path (e.g., '/veris_storage/workspaces/task-123')")
     path: str = Field(..., description="Relative path within workspace")
+
+    @field_validator("workspace_path")
+    @classmethod
+    def validate_workspace_path(cls, v: str) -> str:
+        """Validate workspace path is under allowed base directory."""
+        if not v or not v.strip():
+            raise ValueError("workspace_path cannot be empty")
+        if not v.startswith(WORKSPACE_BASE_DIR):
+            raise ValueError(f"workspace_path must be under {WORKSPACE_BASE_DIR}")
+        if ".." in v:
+            raise ValueError("Path traversal not allowed (..)")
+        return v.strip()
 
     @field_validator("path")
     @classmethod
@@ -239,31 +301,34 @@ class FileExistsResponse(BaseModel):
 # =============================================================================
 
 
-def get_workspace_path(user_id: str) -> Path:
-    """Get the workspace directory for a user.
+def get_workspace_path(workspace_path: str) -> Path:
+    """Get the workspace directory from provided path.
 
     Args:
-        user_id: User/team identifier
+        workspace_path: Absolute workspace path
 
     Returns:
-        Path to user's workspace directory
+        Path object for the workspace directory
 
     Raises:
-        ValueError: If user_id is invalid
+        ValueError: If workspace_path is invalid or outside allowed base
     """
-    # Validate user_id
-    if not user_id or not user_id.strip():
-        raise ValueError("user_id cannot be empty")
+    if not workspace_path or not workspace_path.strip():
+        raise ValueError("workspace_path cannot be empty")
 
-    # Sanitize user_id to prevent path traversal
-    safe_user_id = "".join(c for c in user_id if c.isalnum() or c in "_-")
-    if not safe_user_id:
-        raise ValueError("user_id contains no valid characters")
+    # Ensure path is under allowed base directory
+    workspace = Path(workspace_path)
+    base = Path(WORKSPACE_BASE_DIR)
 
-    if safe_user_id != user_id:
-        logger.warning(f"Sanitized user_id '{user_id}' to '{safe_user_id}'")
+    # Resolve both paths to handle any symlinks
+    try:
+        workspace_resolved = workspace.resolve()
+        base_resolved = base.resolve()
+        workspace_resolved.relative_to(base_resolved)
+    except ValueError:
+        raise ValueError(f"workspace_path must be under {WORKSPACE_BASE_DIR}")
 
-    return Path(WORKSPACE_BASE_DIR) / safe_user_id
+    return workspace
 
 
 def resolve_safe_path(workspace: Path, relative_path: str) -> Path:
@@ -296,7 +361,7 @@ def resolve_safe_path(workspace: Path, relative_path: str) -> Path:
 
 def log_file_operation(
     operation: str,
-    user_id: str,
+    workspace_path: str,
     path: str,
     success: bool,
     details: Optional[Dict[str, Any]] = None,
@@ -305,7 +370,7 @@ def log_file_operation(
 
     Args:
         operation: Type of operation (write, read, delete, list)
-        user_id: User performing the operation
+        workspace_path: Workspace path for the operation
         path: File path involved
         success: Whether operation succeeded
         details: Additional details to log
@@ -315,9 +380,12 @@ def log_file_operation(
         return
 
     try:
+        # Extract workspace name from path for logging key
+        workspace_name = Path(workspace_path).name
+
         log_entry = {
             "operation": operation,
-            "user_id": user_id,
+            "workspace_path": workspace_path,
             "path": path,
             "success": success,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -325,7 +393,7 @@ def log_file_operation(
         }
 
         # Store in a list with automatic expiry (30 days)
-        key = f"veris:file_ops:{user_id}"
+        key = f"veris:file_ops:{workspace_name}"
         _redis_client.lpush(key, json.dumps(log_entry))
         _redis_client.ltrim(key, 0, 999)  # Keep last 1000 operations
         _redis_client.expire(key, 30 * 24 * 60 * 60)  # 30 days TTL
@@ -341,14 +409,14 @@ def log_file_operation(
 
 @router.post("/tools/file_write", response_model=FileWriteResponse)
 async def file_write(request: FileWriteRequest) -> FileWriteResponse:
-    """Write content to a file in user's workspace.
+    """Write content to a file in the specified workspace.
 
     Creates parent directories if create_dirs=True.
     Overwrites existing file if overwrite=True.
     """
     try:
         # Get workspace path
-        workspace = get_workspace_path(request.user_id)
+        workspace = get_workspace_path(request.workspace_path)
 
         # Resolve and validate full path
         full_path = resolve_safe_path(workspace, request.path)
@@ -378,13 +446,13 @@ async def file_write(request: FileWriteRequest) -> FileWriteResponse:
         # Log operation
         log_file_operation(
             "write",
-            request.user_id,
+            request.workspace_path,
             request.path,
             True,
             {"bytes_written": len(content_bytes)},
         )
 
-        logger.info(f"File written: {request.path} ({len(content_bytes)} bytes) for user {request.user_id}")
+        logger.info(f"File written: {request.path} ({len(content_bytes)} bytes) in {request.workspace_path}")
 
         return FileWriteResponse(
             success=True,
@@ -416,10 +484,10 @@ async def file_write(request: FileWriteRequest) -> FileWriteResponse:
 
 @router.post("/tools/file_read", response_model=FileReadResponse)
 async def file_read(request: FileReadRequest) -> FileReadResponse:
-    """Read content from a file in user's workspace."""
+    """Read content from a file in the specified workspace."""
     try:
         # Get workspace path
-        workspace = get_workspace_path(request.user_id)
+        workspace = get_workspace_path(request.workspace_path)
 
         # Resolve and validate full path
         full_path = resolve_safe_path(workspace, request.path)
@@ -456,13 +524,13 @@ async def file_read(request: FileReadRequest) -> FileReadResponse:
         # Log operation
         log_file_operation(
             "read",
-            request.user_id,
+            request.workspace_path,
             request.path,
             True,
             {"size_bytes": file_size},
         )
 
-        logger.debug(f"File read: {request.path} ({file_size} bytes) for user {request.user_id}")
+        logger.debug(f"File read: {request.path} ({file_size} bytes) from {request.workspace_path}")
 
         return FileReadResponse(
             success=True,
@@ -502,10 +570,10 @@ async def file_read(request: FileReadRequest) -> FileReadResponse:
 
 @router.post("/tools/file_list", response_model=FileListResponse)
 async def file_list(request: FileListRequest) -> FileListResponse:
-    """List files and directories in user's workspace."""
+    """List files and directories in the specified workspace."""
     try:
         # Get workspace path
-        workspace = get_workspace_path(request.user_id)
+        workspace = get_workspace_path(request.workspace_path)
 
         # Resolve and validate full path
         if request.path:
@@ -594,7 +662,7 @@ async def file_list(request: FileListRequest) -> FileListResponse:
         # Log operation
         log_file_operation(
             "list",
-            request.user_id,
+            request.workspace_path,
             request.path,
             True,
             {"count": len(files), "recursive": request.recursive},
@@ -630,13 +698,13 @@ async def file_list(request: FileListRequest) -> FileListResponse:
 
 @router.post("/tools/file_delete", response_model=FileDeleteResponse)
 async def file_delete(request: FileDeleteRequest) -> FileDeleteResponse:
-    """Delete a file from user's workspace.
+    """Delete a file from the specified workspace.
 
     Only files can be deleted, not directories.
     """
     try:
         # Get workspace path
-        workspace = get_workspace_path(request.user_id)
+        workspace = get_workspace_path(request.workspace_path)
 
         # Resolve and validate full path
         full_path = resolve_safe_path(workspace, request.path)
@@ -661,9 +729,9 @@ async def file_delete(request: FileDeleteRequest) -> FileDeleteResponse:
         full_path.unlink()
 
         # Log operation
-        log_file_operation("delete", request.user_id, request.path, True)
+        log_file_operation("delete", request.workspace_path, request.path, True)
 
-        logger.info(f"File deleted: {request.path} for user {request.user_id}")
+        logger.info(f"File deleted: {request.path} from {request.workspace_path}")
 
         return FileDeleteResponse(
             success=True,
@@ -693,10 +761,10 @@ async def file_delete(request: FileDeleteRequest) -> FileDeleteResponse:
 
 @router.post("/tools/file_exists", response_model=FileExistsResponse)
 async def file_exists(request: FileExistsRequest) -> FileExistsResponse:
-    """Check if a file or directory exists in user's workspace."""
+    """Check if a file or directory exists in the specified workspace."""
     try:
         # Get workspace path
-        workspace = get_workspace_path(request.user_id)
+        workspace = get_workspace_path(request.workspace_path)
 
         # Resolve and validate full path
         full_path = resolve_safe_path(workspace, request.path)
