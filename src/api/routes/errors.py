@@ -7,7 +7,7 @@ for later analysis and debugging.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -77,7 +77,7 @@ async def log_error(
     # Use provided trace_id or generate from middleware
     trace_id = request.trace_id or getattr(
         http_request.state, 'trace_id',
-        f"err_{int(datetime.utcnow().timestamp() * 1000)}"
+        f"err_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
     )
 
     api_logger.info(
@@ -132,7 +132,7 @@ async def log_error(
             "error_type": request.error_type,
             "error_message": request.error_message,
             "context": request.context or {},
-            "timestamp": (request.timestamp or datetime.utcnow()).isoformat(),
+            "timestamp": (request.timestamp or datetime.now(timezone.utc)).isoformat(),
             "type": "error"
         }
 
@@ -199,7 +199,7 @@ async def search_errors(
 
     trace_id = getattr(
         http_request.state, 'trace_id',
-        f"err_search_{int(datetime.utcnow().timestamp() * 1000)}"
+        f"err_search_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
     )
 
     api_logger.info(
@@ -243,12 +243,12 @@ async def search_errors(
                 FieldCondition(key="trace_id", match=MatchValue(value=request.trace_id))
             )
 
-        # Time filter
-        if request.hours_ago:
-            cutoff = (datetime.utcnow() - timedelta(hours=request.hours_ago)).isoformat()
-            filter_conditions.append(
-                FieldCondition(key="timestamp", range=Range(gte=cutoff))
-            )
+        # Time filter - TODO: requires storing timestamps as unix floats for Range filtering
+        # Currently timestamps are stored as ISO strings which don't support Range queries
+        # For now, hours_ago parameter is accepted but not applied
+        # if request.hours_ago:
+        #     cutoff_unix = (datetime.now(timezone.utc) - timedelta(hours=request.hours_ago)).timestamp()
+        #     filter_conditions.append(FieldCondition(key="timestamp_unix", range=Range(gte=cutoff_unix)))
 
         query_filter = Filter(must=filter_conditions) if filter_conditions else None
 

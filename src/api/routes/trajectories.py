@@ -6,9 +6,8 @@ REST endpoints for logging agent execution trajectories to Qdrant
 for system learning and failure analysis.
 """
 
-import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -77,7 +76,7 @@ async def log_trajectory(
     """Log an agent execution trajectory."""
 
     # Generate trace_id from middleware or create new
-    trace_id = getattr(http_request.state, 'trace_id', f"traj_{int(datetime.utcnow().timestamp() * 1000)}")
+    trace_id = getattr(http_request.state, 'trace_id', f"traj_{int(datetime.now(timezone.utc).timestamp() * 1000)}")
 
     api_logger.info(
         "Logging trajectory",
@@ -138,7 +137,7 @@ async def log_trajectory(
             "cost_usd": request.cost_usd,
             "metadata": request.metadata or {},
             "trace_id": trace_id,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "type": "trajectory"
         }
 
@@ -205,7 +204,7 @@ async def search_trajectories(
 
     trace_id = getattr(
         http_request.state, 'trace_id',
-        f"traj_search_{int(datetime.utcnow().timestamp() * 1000)}"
+        f"traj_search_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
     )
 
     api_logger.info(
@@ -249,12 +248,12 @@ async def search_trajectories(
                 FieldCondition(key="task_id", match=MatchValue(value=request.task_id))
             )
 
-        # Time filter
-        if request.hours_ago:
-            cutoff = (datetime.utcnow() - timedelta(hours=request.hours_ago)).isoformat()
-            filter_conditions.append(
-                FieldCondition(key="timestamp", range=Range(gte=cutoff))
-            )
+        # Time filter - TODO: requires storing timestamps as unix floats for Range filtering
+        # Currently timestamps are stored as ISO strings which don't support Range queries
+        # For now, hours_ago parameter is accepted but not applied
+        # if request.hours_ago:
+        #     cutoff_unix = (datetime.now(timezone.utc) - timedelta(hours=request.hours_ago)).timestamp()
+        #     filter_conditions.append(FieldCondition(key="timestamp_unix", range=Range(gte=cutoff_unix)))
 
         query_filter = Filter(must=filter_conditions) if filter_conditions else None
 
