@@ -453,3 +453,73 @@ class TelemetrySnapshot(BaseModel):
     services: Dict[str, ServiceHealth] = Field(..., description="Service health status")
     active_tasks: TaskStats = Field(..., description="Active task statistics")
     recent_errors: List[ErrorSummary] = Field(..., description="Recent errors")
+
+
+# =============================================================================
+# V-006: Query Endpoints for Trajectories and Errors
+# =============================================================================
+
+class TrajectorySearchRequest(BaseModel):
+    """Request to search trajectories."""
+    query: Optional[str] = Field(None, description="Semantic search query")
+    agent: Optional[str] = Field(None, description="Filter by agent name")
+    outcome: Optional[TrajectoryOutcome] = Field(None, description="Filter by outcome")
+    task_id: Optional[str] = Field(None, description="Filter by task ID")
+    hours_ago: Optional[int] = Field(None, ge=1, le=720, description="Filter to last N hours")
+    limit: int = Field(20, ge=1, le=100, description="Max results to return")
+
+
+class TrajectoryRecord(BaseModel):
+    """A trajectory record from storage."""
+    trajectory_id: str = Field(..., description="Trajectory ID")
+    task_id: str = Field(..., description="Task ID")
+    agent: str = Field(..., description="Agent name")
+    outcome: str = Field(..., description="Outcome (success/failure/partial)")
+    error: Optional[str] = Field(None, description="Error message if failed")
+    duration_ms: float = Field(..., description="Duration in milliseconds")
+    cost_usd: float = Field(..., description="Cost in USD")
+    trace_id: str = Field(..., description="Trace ID")
+    timestamp: str = Field(..., description="When the trajectory was logged")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata")
+    score: Optional[float] = Field(None, description="Similarity score if from semantic search")
+
+
+class TrajectorySearchResponse(BaseModel):
+    """Response from searching trajectories."""
+    success: bool = Field(..., description="Whether the search succeeded")
+    trajectories: List[TrajectoryRecord] = Field(..., description="Matching trajectories")
+    count: int = Field(..., description="Number of results returned")
+    total_available: Optional[int] = Field(None, description="Total matching (if known)")
+    trace_id: str = Field(..., description="Request trace ID")
+
+
+class ErrorSearchRequest(BaseModel):
+    """Request to search errors."""
+    query: Optional[str] = Field(None, description="Semantic search query for similar errors")
+    service: Optional[str] = Field(None, description="Filter by service name")
+    error_type: Optional[str] = Field(None, description="Filter by error type")
+    trace_id: Optional[str] = Field(None, description="Filter by trace ID")
+    hours_ago: Optional[int] = Field(None, ge=1, le=720, description="Filter to last N hours")
+    limit: int = Field(20, ge=1, le=100, description="Max results to return")
+
+
+class ErrorRecord(BaseModel):
+    """An error record from storage."""
+    error_id: str = Field(..., description="Error ID")
+    trace_id: str = Field(..., description="Trace ID")
+    task_id: Optional[str] = Field(None, description="Task ID if applicable")
+    service: str = Field(..., description="Service name")
+    error_type: str = Field(..., description="Error type/class")
+    error_message: str = Field(..., description="Error message")
+    context: Optional[Dict[str, Any]] = Field(None, description="Error context")
+    timestamp: str = Field(..., description="When the error occurred")
+    score: Optional[float] = Field(None, description="Similarity score if from semantic search")
+
+
+class ErrorSearchResponse(BaseModel):
+    """Response from searching errors."""
+    success: bool = Field(..., description="Whether the search succeeded")
+    errors: List[ErrorRecord] = Field(..., description="Matching errors")
+    count: int = Field(..., description="Number of results returned")
+    total_available: Optional[int] = Field(None, description="Total matching (if known)")
+    trace_id: str = Field(..., description="Request trace ID")
