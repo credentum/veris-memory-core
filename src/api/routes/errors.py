@@ -7,13 +7,16 @@ for later analysis and debugging.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi import status as http_status
 
-from ..models import ErrorLogRequest, ErrorLogResponse
+from ..models import (
+    ErrorLogRequest, ErrorLogResponse,
+    ErrorSearchRequest, ErrorSearchResponse, ErrorRecord
+)
 from ..dependencies import get_qdrant_client, get_embedding_generator
 from ...utils.logging_middleware import api_logger
 
@@ -74,7 +77,7 @@ async def log_error(
     # Use provided trace_id or generate from middleware
     trace_id = request.trace_id or getattr(
         http_request.state, 'trace_id',
-        f"err_{int(datetime.utcnow().timestamp() * 1000)}"
+        f"err_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
     )
 
     api_logger.info(
@@ -129,7 +132,8 @@ async def log_error(
             "error_type": request.error_type,
             "error_message": request.error_message,
             "context": request.context or {},
-            "timestamp": (request.timestamp or datetime.utcnow()).isoformat(),
+            "timestamp": (request.timestamp or datetime.now(timezone.utc)).isoformat(),
+            "timestamp_unix": (request.timestamp or datetime.now(timezone.utc)).timestamp(),
             "type": "error"
         }
 
@@ -167,4 +171,171 @@ async def log_error(
         raise HTTPException(
             status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to log error: {str(e)}"
+        )
+
+
+@router.post(
+    "/search",
+    response_model=ErrorSearchResponse,
+    summary="Search errors (V-006)",
+    description="""
+    Search logged errors by semantic similarity or filters.
+
+    Search modes:
+    - **Semantic search**: Provide `query` to find similar errors
+    - **Filter search**: Use `service`, `error_type`, `trace_id` filters
+    - **Combined**: Use both for refined results
+
+    Useful for:
+    - Finding similar past errors
+    - Tracing errors across services
+    - Debugging recurring issues
+    """
+)
+async def search_errors(
+    http_request: Request,
+    request: ErrorSearchRequest
+) -> ErrorSearchResponse:
+    """Search errors by semantic similarity or filters."""
+
+    trace_id = getattr(
+        http_request.state, 'trace_id',
+        f"err_search_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
+    )
+
+    api_logger.info(
+        "Searching errors",
+        query=request.query,
+        service=request.service,
+        error_type=request.error_type,
+        trace_id=trace_id
+    )
+
+    qdrant_client = get_qdrant_client()
+    embedding_generator = get_embedding_generator()
+
+    if not qdrant_client:
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Qdrant client not available"
+        )
+
+    try:
+        from qdrant_client.models import Filter, FieldCondition, MatchValue, Range
+        from datetime import timedelta
+
+        errors = []
+
+        # Build filter conditions
+        filter_conditions = []
+
+        if request.service:
+            filter_conditions.append(
+                FieldCondition(key="service", match=MatchValue(value=request.service))
+            )
+
+        if request.error_type:
+            filter_conditions.append(
+                FieldCondition(key="error_type", match=MatchValue(value=request.error_type))
+            )
+
+        if request.trace_id:
+            filter_conditions.append(
+                FieldCondition(key="trace_id", match=MatchValue(value=request.trace_id))
+            )
+
+        # Time filter using timestamp_unix (new records only - old records may not have this field)
+        if request.hours_ago:
+            cutoff_unix = (datetime.now(timezone.utc) - timedelta(hours=request.hours_ago)).timestamp()
+            filter_conditions.append(
+                FieldCondition(key="timestamp_unix", range=Range(gte=cutoff_unix))
+            )
+
+        query_filter = Filter(must=filter_conditions) if filter_conditions else None
+
+        # Semantic search if query provided
+        if request.query:
+            # Generate embedding for query
+            if embedding_generator:
+                try:
+                    query_embedding = await embedding_generator.generate_embedding(request.query)
+                except Exception as e:
+                    api_logger.warning(f"Query embedding failed: {e}")
+                    import hashlib
+                    hash_bytes = hashlib.sha256(request.query.encode()).digest()
+                    query_embedding = [float(b) / 255.0 for b in hash_bytes[:384]] + [0.0] * (384 - 32)
+            else:
+                import hashlib
+                hash_bytes = hashlib.sha256(request.query.encode()).digest()
+                query_embedding = [float(b) / 255.0 for b in hash_bytes[:384]] + [0.0] * (384 - 32)
+
+            # Search with embedding
+            results = qdrant_client.client.search(
+                collection_name=ERROR_COLLECTION,
+                query_vector=query_embedding,
+                query_filter=query_filter,
+                limit=request.limit,
+                with_payload=True
+            )
+
+            for hit in results:
+                payload = hit.payload
+                errors.append(ErrorRecord(
+                    error_id=payload.get("error_id", "unknown"),
+                    trace_id=payload.get("trace_id", "unknown"),
+                    task_id=payload.get("task_id"),
+                    service=payload.get("service", "unknown"),
+                    error_type=payload.get("error_type", "unknown"),
+                    error_message=payload.get("error_message", ""),
+                    context=payload.get("context"),
+                    timestamp=payload.get("timestamp", ""),
+                    score=hit.score
+                ))
+        else:
+            # Scroll without semantic search
+            results, _ = qdrant_client.client.scroll(
+                collection_name=ERROR_COLLECTION,
+                scroll_filter=query_filter,
+                limit=request.limit,
+                with_payload=True,
+                with_vectors=False
+            )
+
+            for point in results:
+                payload = point.payload
+                errors.append(ErrorRecord(
+                    error_id=payload.get("error_id", "unknown"),
+                    trace_id=payload.get("trace_id", "unknown"),
+                    task_id=payload.get("task_id"),
+                    service=payload.get("service", "unknown"),
+                    error_type=payload.get("error_type", "unknown"),
+                    error_message=payload.get("error_message", ""),
+                    context=payload.get("context"),
+                    timestamp=payload.get("timestamp", ""),
+                    score=None
+                ))
+
+        api_logger.info(
+            "Error search completed",
+            count=len(errors),
+            trace_id=trace_id
+        )
+
+        return ErrorSearchResponse(
+            success=True,
+            errors=errors,
+            count=len(errors),
+            total_available=None,
+            trace_id=trace_id
+        )
+
+    except Exception as e:
+        api_logger.error(
+            "Failed to search errors",
+            error=str(e),
+            trace_id=trace_id
+        )
+        raise HTTPException(
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to search errors: {str(e)}"
         )

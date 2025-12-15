@@ -215,3 +215,213 @@ class TestTrajectoryLogRequestValidation:
                 cost_usd=0.01
             )
             assert request.outcome.value == outcome
+
+
+class TestSearchTrajectoriesEndpoint:
+    """Tests for POST /search endpoint (V-006)."""
+
+    @pytest.fixture
+    def mock_request(self):
+        """Create a mock FastAPI request."""
+        request = Mock()
+        request.state = Mock()
+        request.state.trace_id = "test_search_trace_123"
+        return request
+
+    @pytest.mark.asyncio
+    async def test_search_trajectories_semantic_search(self, mock_request):
+        """Test semantic search with query parameter."""
+        from src.api.routes.trajectories import search_trajectories
+        from src.api.models import TrajectorySearchRequest
+
+        mock_qdrant = Mock()
+        mock_collections = Mock()
+        mock_collections.collections = [Mock(name=TRAJECTORY_COLLECTION)]
+        mock_qdrant.client.get_collections.return_value = mock_collections
+
+        # Mock search results
+        mock_hit = Mock()
+        mock_hit.score = 0.95
+        mock_hit.payload = {
+            "trajectory_id": "traj_abc123",
+            "task_id": "task-001",
+            "agent": "coder",
+            "outcome": "success",
+            "error": None,
+            "duration_ms": 1500.0,
+            "cost_usd": 0.05,
+            "trace_id": "mcp_123",
+            "timestamp": "2025-12-15T10:00:00",
+            "metadata": {}
+        }
+        mock_qdrant.client.search.return_value = [mock_hit]
+
+        mock_embedding_gen = Mock()
+        mock_embedding_gen.generate_embedding = Mock(return_value=[0.1] * 384)
+
+        with patch('src.api.routes.trajectories.get_qdrant_client', return_value=mock_qdrant), \
+             patch('src.api.routes.trajectories.get_embedding_generator', return_value=mock_embedding_gen), \
+             patch('src.api.routes.trajectories.api_logger'):
+
+            request = TrajectorySearchRequest(query="test query", limit=10)
+            result = await search_trajectories(mock_request, request)
+
+            assert result.success is True
+            assert result.count == 1
+            assert len(result.trajectories) == 1
+            assert result.trajectories[0].trajectory_id == "traj_abc123"
+            assert result.trajectories[0].score == 0.95
+            mock_qdrant.client.search.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_search_trajectories_filter_search(self, mock_request):
+        """Test filter-based search without query parameter."""
+        from src.api.routes.trajectories import search_trajectories
+        from src.api.models import TrajectorySearchRequest
+
+        mock_qdrant = Mock()
+        mock_collections = Mock()
+        mock_collections.collections = [Mock(name=TRAJECTORY_COLLECTION)]
+        mock_qdrant.client.get_collections.return_value = mock_collections
+
+        # Mock scroll results
+        mock_point = Mock()
+        mock_point.payload = {
+            "trajectory_id": "traj_def456",
+            "task_id": "task-002",
+            "agent": "reviewer",
+            "outcome": "failure",
+            "error": "Validation failed",
+            "duration_ms": 500.0,
+            "cost_usd": 0.02,
+            "trace_id": "mcp_456",
+            "timestamp": "2025-12-15T11:00:00",
+            "metadata": {}
+        }
+        mock_qdrant.client.scroll.return_value = ([mock_point], None)
+
+        with patch('src.api.routes.trajectories.get_qdrant_client', return_value=mock_qdrant), \
+             patch('src.api.routes.trajectories.get_embedding_generator', return_value=None), \
+             patch('src.api.routes.trajectories.api_logger'):
+
+            request = TrajectorySearchRequest(agent="reviewer", outcome="failure", limit=20)
+            result = await search_trajectories(mock_request, request)
+
+            assert result.success is True
+            assert result.count == 1
+            assert result.trajectories[0].agent == "reviewer"
+            assert result.trajectories[0].outcome == "failure"
+            mock_qdrant.client.scroll.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_search_trajectories_combined_search(self, mock_request):
+        """Test combined semantic + filter search."""
+        from src.api.routes.trajectories import search_trajectories
+        from src.api.models import TrajectorySearchRequest
+
+        mock_qdrant = Mock()
+        mock_collections = Mock()
+        mock_collections.collections = [Mock(name=TRAJECTORY_COLLECTION)]
+        mock_qdrant.client.get_collections.return_value = mock_collections
+
+        mock_hit = Mock()
+        mock_hit.score = 0.88
+        mock_hit.payload = {
+            "trajectory_id": "traj_ghi789",
+            "task_id": "task-003",
+            "agent": "architect",
+            "outcome": "success",
+            "error": None,
+            "duration_ms": 2000.0,
+            "cost_usd": 0.10,
+            "trace_id": "mcp_789",
+            "timestamp": "2025-12-15T12:00:00",
+            "metadata": {}
+        }
+        mock_qdrant.client.search.return_value = [mock_hit]
+
+        mock_embedding_gen = Mock()
+        mock_embedding_gen.generate_embedding = Mock(return_value=[0.1] * 384)
+
+        with patch('src.api.routes.trajectories.get_qdrant_client', return_value=mock_qdrant), \
+             patch('src.api.routes.trajectories.get_embedding_generator', return_value=mock_embedding_gen), \
+             patch('src.api.routes.trajectories.api_logger'):
+
+            request = TrajectorySearchRequest(
+                query="architecture design",
+                agent="architect",
+                outcome="success",
+                limit=10
+            )
+            result = await search_trajectories(mock_request, request)
+
+            assert result.success is True
+            assert len(result.trajectories) == 1
+            # Search should be called (not scroll) because query is provided
+            mock_qdrant.client.search.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_search_trajectories_time_filter(self, mock_request):
+        """Test time-based filtering with hours_ago parameter."""
+        from src.api.routes.trajectories import search_trajectories
+        from src.api.models import TrajectorySearchRequest
+
+        mock_qdrant = Mock()
+        mock_collections = Mock()
+        mock_collections.collections = [Mock(name=TRAJECTORY_COLLECTION)]
+        mock_qdrant.client.get_collections.return_value = mock_collections
+        mock_qdrant.client.scroll.return_value = ([], None)
+
+        with patch('src.api.routes.trajectories.get_qdrant_client', return_value=mock_qdrant), \
+             patch('src.api.routes.trajectories.get_embedding_generator', return_value=None), \
+             patch('src.api.routes.trajectories.api_logger'):
+
+            request = TrajectorySearchRequest(hours_ago=24, limit=20)
+            result = await search_trajectories(mock_request, request)
+
+            assert result.success is True
+            # Verify scroll was called with time filter
+            mock_qdrant.client.scroll.assert_called_once()
+            call_kwargs = mock_qdrant.client.scroll.call_args.kwargs
+            assert call_kwargs.get('scroll_filter') is not None
+
+    @pytest.mark.asyncio
+    async def test_search_trajectories_no_qdrant_client(self, mock_request):
+        """Test error when Qdrant client not available."""
+        from src.api.routes.trajectories import search_trajectories
+        from src.api.models import TrajectorySearchRequest
+
+        with patch('src.api.routes.trajectories.get_qdrant_client', return_value=None), \
+             patch('src.api.routes.trajectories.get_embedding_generator', return_value=None), \
+             patch('src.api.routes.trajectories.api_logger'):
+
+            request = TrajectorySearchRequest(limit=10)
+
+            with pytest.raises(HTTPException) as exc_info:
+                await search_trajectories(mock_request, request)
+
+            assert exc_info.value.status_code == 503
+            assert "Qdrant client not available" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_search_trajectories_empty_results(self, mock_request):
+        """Test search returns empty list when no matches."""
+        from src.api.routes.trajectories import search_trajectories
+        from src.api.models import TrajectorySearchRequest
+
+        mock_qdrant = Mock()
+        mock_collections = Mock()
+        mock_collections.collections = [Mock(name=TRAJECTORY_COLLECTION)]
+        mock_qdrant.client.get_collections.return_value = mock_collections
+        mock_qdrant.client.scroll.return_value = ([], None)
+
+        with patch('src.api.routes.trajectories.get_qdrant_client', return_value=mock_qdrant), \
+             patch('src.api.routes.trajectories.get_embedding_generator', return_value=None), \
+             patch('src.api.routes.trajectories.api_logger'):
+
+            request = TrajectorySearchRequest(agent="nonexistent", limit=10)
+            result = await search_trajectories(mock_request, request)
+
+            assert result.success is True
+            assert result.count == 0
+            assert len(result.trajectories) == 0

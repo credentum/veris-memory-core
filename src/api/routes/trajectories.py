@@ -6,15 +6,17 @@ REST endpoints for logging agent execution trajectories to Qdrant
 for system learning and failure analysis.
 """
 
-import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi import status as http_status
 
-from ..models import TrajectoryLogRequest, TrajectoryLogResponse
+from ..models import (
+    TrajectoryLogRequest, TrajectoryLogResponse,
+    TrajectorySearchRequest, TrajectorySearchResponse, TrajectoryRecord
+)
 from ..dependencies import get_qdrant_client, get_embedding_generator
 from ...utils.logging_middleware import api_logger
 
@@ -74,7 +76,7 @@ async def log_trajectory(
     """Log an agent execution trajectory."""
 
     # Generate trace_id from middleware or create new
-    trace_id = getattr(http_request.state, 'trace_id', f"traj_{int(datetime.utcnow().timestamp() * 1000)}")
+    trace_id = getattr(http_request.state, 'trace_id', f"traj_{int(datetime.now(timezone.utc).timestamp() * 1000)}")
 
     api_logger.info(
         "Logging trajectory",
@@ -135,7 +137,8 @@ async def log_trajectory(
             "cost_usd": request.cost_usd,
             "metadata": request.metadata or {},
             "trace_id": trace_id,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp_unix": datetime.now(timezone.utc).timestamp(),
             "type": "trajectory"
         }
 
@@ -173,4 +176,175 @@ async def log_trajectory(
         raise HTTPException(
             status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to log trajectory: {str(e)}"
+        )
+
+
+@router.post(
+    "/search",
+    response_model=TrajectorySearchResponse,
+    summary="Search trajectories (V-006)",
+    description="""
+    Search logged trajectories by semantic similarity or filters.
+
+    Search modes:
+    - **Semantic search**: Provide `query` to find similar trajectories
+    - **Filter search**: Use `agent`, `outcome`, `task_id` filters
+    - **Combined**: Use both for refined results
+
+    Useful for:
+    - Finding similar past failures
+    - Analyzing agent performance patterns
+    - Debugging recurring issues
+    """
+)
+async def search_trajectories(
+    http_request: Request,
+    request: TrajectorySearchRequest
+) -> TrajectorySearchResponse:
+    """Search trajectories by semantic similarity or filters."""
+
+    trace_id = getattr(
+        http_request.state, 'trace_id',
+        f"traj_search_{int(datetime.now(timezone.utc).timestamp() * 1000)}"
+    )
+
+    api_logger.info(
+        "Searching trajectories",
+        query=request.query,
+        agent=request.agent,
+        outcome=request.outcome,
+        trace_id=trace_id
+    )
+
+    qdrant_client = get_qdrant_client()
+    embedding_generator = get_embedding_generator()
+
+    if not qdrant_client:
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Qdrant client not available"
+        )
+
+    try:
+        from qdrant_client.models import Filter, FieldCondition, MatchValue, Range
+        from datetime import timedelta
+
+        trajectories = []
+
+        # Build filter conditions
+        filter_conditions = []
+
+        if request.agent:
+            filter_conditions.append(
+                FieldCondition(key="agent", match=MatchValue(value=request.agent))
+            )
+
+        if request.outcome:
+            filter_conditions.append(
+                FieldCondition(key="outcome", match=MatchValue(value=request.outcome.value))
+            )
+
+        if request.task_id:
+            filter_conditions.append(
+                FieldCondition(key="task_id", match=MatchValue(value=request.task_id))
+            )
+
+        # Time filter using timestamp_unix (new records only - old records may not have this field)
+        if request.hours_ago:
+            cutoff_unix = (datetime.now(timezone.utc) - timedelta(hours=request.hours_ago)).timestamp()
+            filter_conditions.append(
+                FieldCondition(key="timestamp_unix", range=Range(gte=cutoff_unix))
+            )
+
+        query_filter = Filter(must=filter_conditions) if filter_conditions else None
+
+        # Semantic search if query provided
+        if request.query:
+            # Generate embedding for query
+            if embedding_generator:
+                try:
+                    query_embedding = await embedding_generator.generate_embedding(request.query)
+                except Exception as e:
+                    api_logger.warning(f"Query embedding failed: {e}")
+                    import hashlib
+                    hash_bytes = hashlib.sha256(request.query.encode()).digest()
+                    query_embedding = [float(b) / 255.0 for b in hash_bytes[:384]] + [0.0] * (384 - 32)
+            else:
+                import hashlib
+                hash_bytes = hashlib.sha256(request.query.encode()).digest()
+                query_embedding = [float(b) / 255.0 for b in hash_bytes[:384]] + [0.0] * (384 - 32)
+
+            # Search with embedding
+            results = qdrant_client.client.search(
+                collection_name=TRAJECTORY_COLLECTION,
+                query_vector=query_embedding,
+                query_filter=query_filter,
+                limit=request.limit,
+                with_payload=True
+            )
+
+            for hit in results:
+                payload = hit.payload
+                trajectories.append(TrajectoryRecord(
+                    trajectory_id=payload.get("trajectory_id", "unknown"),
+                    task_id=payload.get("task_id", "unknown"),
+                    agent=payload.get("agent", "unknown"),
+                    outcome=payload.get("outcome", "unknown"),
+                    error=payload.get("error"),
+                    duration_ms=payload.get("duration_ms", 0),
+                    cost_usd=payload.get("cost_usd", 0),
+                    trace_id=payload.get("trace_id", "unknown"),
+                    timestamp=payload.get("timestamp", ""),
+                    metadata=payload.get("metadata"),
+                    score=hit.score
+                ))
+        else:
+            # Scroll without semantic search
+            results, _ = qdrant_client.client.scroll(
+                collection_name=TRAJECTORY_COLLECTION,
+                scroll_filter=query_filter,
+                limit=request.limit,
+                with_payload=True,
+                with_vectors=False
+            )
+
+            for point in results:
+                payload = point.payload
+                trajectories.append(TrajectoryRecord(
+                    trajectory_id=payload.get("trajectory_id", "unknown"),
+                    task_id=payload.get("task_id", "unknown"),
+                    agent=payload.get("agent", "unknown"),
+                    outcome=payload.get("outcome", "unknown"),
+                    error=payload.get("error"),
+                    duration_ms=payload.get("duration_ms", 0),
+                    cost_usd=payload.get("cost_usd", 0),
+                    trace_id=payload.get("trace_id", "unknown"),
+                    timestamp=payload.get("timestamp", ""),
+                    metadata=payload.get("metadata"),
+                    score=None
+                ))
+
+        api_logger.info(
+            "Trajectory search completed",
+            count=len(trajectories),
+            trace_id=trace_id
+        )
+
+        return TrajectorySearchResponse(
+            success=True,
+            trajectories=trajectories,
+            count=len(trajectories),
+            total_available=None,
+            trace_id=trace_id
+        )
+
+    except Exception as e:
+        api_logger.error(
+            "Failed to search trajectories",
+            error=str(e),
+            trace_id=trace_id
+        )
+        raise HTTPException(
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to search trajectories: {str(e)}"
         )

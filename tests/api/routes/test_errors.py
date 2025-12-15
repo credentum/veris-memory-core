@@ -221,3 +221,242 @@ class TestErrorLogRequestValidation:
                 trace_id="trace_123",
                 # Missing service, error_type, error_message
             )
+
+
+class TestSearchErrorsEndpoint:
+    """Tests for POST /search endpoint (V-006)."""
+
+    @pytest.fixture
+    def mock_request(self):
+        """Create a mock FastAPI request."""
+        request = Mock()
+        request.state = Mock()
+        request.state.trace_id = "test_error_search_123"
+        return request
+
+    @pytest.mark.asyncio
+    async def test_search_errors_semantic_search(self, mock_request):
+        """Test semantic search with query parameter."""
+        from src.api.routes.errors import search_errors
+        from src.api.models import ErrorSearchRequest
+
+        mock_qdrant = Mock()
+        mock_collections = Mock()
+        mock_collections.collections = [Mock(name=ERROR_COLLECTION)]
+        mock_qdrant.client.get_collections.return_value = mock_collections
+
+        # Mock search results
+        mock_hit = Mock()
+        mock_hit.score = 0.92
+        mock_hit.payload = {
+            "error_id": "err_abc123",
+            "trace_id": "mcp_123",
+            "task_id": "task-001",
+            "service": "orchestrator",
+            "error_type": "ValueError",
+            "error_message": "Invalid packet format",
+            "context": {"packet_id": "pp-001"},
+            "timestamp": "2025-12-15T10:00:00"
+        }
+        mock_qdrant.client.search.return_value = [mock_hit]
+
+        mock_embedding_gen = Mock()
+        mock_embedding_gen.generate_embedding = Mock(return_value=[0.1] * 384)
+
+        with patch('src.api.routes.errors.get_qdrant_client', return_value=mock_qdrant), \
+             patch('src.api.routes.errors.get_embedding_generator', return_value=mock_embedding_gen), \
+             patch('src.api.routes.errors.api_logger'):
+
+            request = ErrorSearchRequest(query="invalid packet", limit=10)
+            result = await search_errors(mock_request, request)
+
+            assert result.success is True
+            assert result.count == 1
+            assert len(result.errors) == 1
+            assert result.errors[0].error_id == "err_abc123"
+            assert result.errors[0].score == 0.92
+            mock_qdrant.client.search.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_search_errors_filter_search(self, mock_request):
+        """Test filter-based search without query parameter."""
+        from src.api.routes.errors import search_errors
+        from src.api.models import ErrorSearchRequest
+
+        mock_qdrant = Mock()
+        mock_collections = Mock()
+        mock_collections.collections = [Mock(name=ERROR_COLLECTION)]
+        mock_qdrant.client.get_collections.return_value = mock_collections
+
+        # Mock scroll results
+        mock_point = Mock()
+        mock_point.payload = {
+            "error_id": "err_def456",
+            "trace_id": "mcp_456",
+            "task_id": "task-002",
+            "service": "coder_agent",
+            "error_type": "FileWriteError",
+            "error_message": "Permission denied",
+            "context": {"file": "src/test.py"},
+            "timestamp": "2025-12-15T11:00:00"
+        }
+        mock_qdrant.client.scroll.return_value = ([mock_point], None)
+
+        with patch('src.api.routes.errors.get_qdrant_client', return_value=mock_qdrant), \
+             patch('src.api.routes.errors.get_embedding_generator', return_value=None), \
+             patch('src.api.routes.errors.api_logger'):
+
+            request = ErrorSearchRequest(service="coder_agent", limit=20)
+            result = await search_errors(mock_request, request)
+
+            assert result.success is True
+            assert result.count == 1
+            assert result.errors[0].service == "coder_agent"
+            assert result.errors[0].error_type == "FileWriteError"
+            mock_qdrant.client.scroll.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_search_errors_combined_search(self, mock_request):
+        """Test combined semantic + filter search."""
+        from src.api.routes.errors import search_errors
+        from src.api.models import ErrorSearchRequest
+
+        mock_qdrant = Mock()
+        mock_collections = Mock()
+        mock_collections.collections = [Mock(name=ERROR_COLLECTION)]
+        mock_qdrant.client.get_collections.return_value = mock_collections
+
+        mock_hit = Mock()
+        mock_hit.score = 0.85
+        mock_hit.payload = {
+            "error_id": "err_ghi789",
+            "trace_id": "mcp_789",
+            "task_id": None,
+            "service": "orchestrator",
+            "error_type": "ConnectionError",
+            "error_message": "Connection refused",
+            "context": {},
+            "timestamp": "2025-12-15T12:00:00"
+        }
+        mock_qdrant.client.search.return_value = [mock_hit]
+
+        mock_embedding_gen = Mock()
+        mock_embedding_gen.generate_embedding = Mock(return_value=[0.1] * 384)
+
+        with patch('src.api.routes.errors.get_qdrant_client', return_value=mock_qdrant), \
+             patch('src.api.routes.errors.get_embedding_generator', return_value=mock_embedding_gen), \
+             patch('src.api.routes.errors.api_logger'):
+
+            request = ErrorSearchRequest(
+                query="connection refused",
+                service="orchestrator",
+                error_type="ConnectionError",
+                limit=10
+            )
+            result = await search_errors(mock_request, request)
+
+            assert result.success is True
+            assert len(result.errors) == 1
+            # Search should be called (not scroll) because query is provided
+            mock_qdrant.client.search.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_search_errors_trace_id_filter(self, mock_request):
+        """Test filtering by trace_id."""
+        from src.api.routes.errors import search_errors
+        from src.api.models import ErrorSearchRequest
+
+        mock_qdrant = Mock()
+        mock_collections = Mock()
+        mock_collections.collections = [Mock(name=ERROR_COLLECTION)]
+        mock_qdrant.client.get_collections.return_value = mock_collections
+
+        mock_point = Mock()
+        mock_point.payload = {
+            "error_id": "err_trace123",
+            "trace_id": "specific_trace_id",
+            "task_id": "task-xyz",
+            "service": "api",
+            "error_type": "ValidationError",
+            "error_message": "Missing field",
+            "context": {},
+            "timestamp": "2025-12-15T13:00:00"
+        }
+        mock_qdrant.client.scroll.return_value = ([mock_point], None)
+
+        with patch('src.api.routes.errors.get_qdrant_client', return_value=mock_qdrant), \
+             patch('src.api.routes.errors.get_embedding_generator', return_value=None), \
+             patch('src.api.routes.errors.api_logger'):
+
+            request = ErrorSearchRequest(trace_id="specific_trace_id", limit=10)
+            result = await search_errors(mock_request, request)
+
+            assert result.success is True
+            assert result.count == 1
+            assert result.errors[0].trace_id == "specific_trace_id"
+
+    @pytest.mark.asyncio
+    async def test_search_errors_time_filter(self, mock_request):
+        """Test time-based filtering with hours_ago parameter."""
+        from src.api.routes.errors import search_errors
+        from src.api.models import ErrorSearchRequest
+
+        mock_qdrant = Mock()
+        mock_collections = Mock()
+        mock_collections.collections = [Mock(name=ERROR_COLLECTION)]
+        mock_qdrant.client.get_collections.return_value = mock_collections
+        mock_qdrant.client.scroll.return_value = ([], None)
+
+        with patch('src.api.routes.errors.get_qdrant_client', return_value=mock_qdrant), \
+             patch('src.api.routes.errors.get_embedding_generator', return_value=None), \
+             patch('src.api.routes.errors.api_logger'):
+
+            request = ErrorSearchRequest(hours_ago=24, limit=20)
+            result = await search_errors(mock_request, request)
+
+            assert result.success is True
+            # Verify scroll was called with time filter
+            mock_qdrant.client.scroll.assert_called_once()
+            call_kwargs = mock_qdrant.client.scroll.call_args.kwargs
+            assert call_kwargs.get('scroll_filter') is not None
+
+    @pytest.mark.asyncio
+    async def test_search_errors_no_qdrant_client(self, mock_request):
+        """Test error when Qdrant client not available."""
+        from src.api.routes.errors import search_errors
+        from src.api.models import ErrorSearchRequest
+
+        with patch('src.api.routes.errors.get_qdrant_client', return_value=None), \
+             patch('src.api.routes.errors.get_embedding_generator', return_value=None), \
+             patch('src.api.routes.errors.api_logger'):
+
+            request = ErrorSearchRequest(limit=10)
+
+            with pytest.raises(HTTPException) as exc_info:
+                await search_errors(mock_request, request)
+
+            assert exc_info.value.status_code == 503
+            assert "Qdrant client not available" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_search_errors_empty_results(self, mock_request):
+        """Test search returns empty list when no matches."""
+        from src.api.routes.errors import search_errors
+        from src.api.models import ErrorSearchRequest
+
+        mock_qdrant = Mock()
+        mock_collections = Mock()
+        mock_collections.collections = [Mock(name=ERROR_COLLECTION)]
+        mock_qdrant.client.get_collections.return_value = mock_collections
+        mock_qdrant.client.scroll.return_value = ([], None)
+
+        with patch('src.api.routes.errors.get_qdrant_client', return_value=mock_qdrant), \
+             patch('src.api.routes.errors.get_embedding_generator', return_value=None), \
+             patch('src.api.routes.errors.api_logger'):
+
+            request = ErrorSearchRequest(service="nonexistent", limit=10)
+            result = await search_errors(mock_request, request)
+
+            assert result.success is True
+            assert result.count == 0
+            assert len(result.errors) == 0
