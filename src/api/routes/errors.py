@@ -269,14 +269,15 @@ async def search_errors(
                 hash_bytes = hashlib.sha256(request.query.encode()).digest()
                 query_embedding = [float(b) / 255.0 for b in hash_bytes[:384]] + [0.0] * (384 - 32)
 
-            # Search with embedding
-            results = qdrant_client.client.search(
+            # Search with embedding (using query_points for qdrant-client v1.7+)
+            response = qdrant_client.client.query_points(
                 collection_name=ERROR_COLLECTION,
-                query_vector=query_embedding,
+                query=query_embedding,
                 query_filter=query_filter,
                 limit=request.limit,
                 with_payload=True
             )
+            results = response.points
 
             for hit in results:
                 payload = hit.payload

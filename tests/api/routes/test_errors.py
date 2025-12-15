@@ -258,7 +258,9 @@ class TestSearchErrorsEndpoint:
             "context": {"packet_id": "pp-001"},
             "timestamp": "2025-12-15T10:00:00"
         }
-        mock_qdrant.client.search.return_value = [mock_hit]
+        mock_response = Mock()
+        mock_response.points = [mock_hit]
+        mock_qdrant.client.query_points.return_value = mock_response
 
         mock_embedding_gen = Mock()
         mock_embedding_gen.generate_embedding = Mock(return_value=[0.1] * 384)
@@ -275,7 +277,7 @@ class TestSearchErrorsEndpoint:
             assert len(result.errors) == 1
             assert result.errors[0].error_id == "err_abc123"
             assert result.errors[0].score == 0.92
-            mock_qdrant.client.search.assert_called_once()
+            mock_qdrant.client.query_points.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_search_errors_filter_search(self, mock_request):
@@ -338,7 +340,9 @@ class TestSearchErrorsEndpoint:
             "context": {},
             "timestamp": "2025-12-15T12:00:00"
         }
-        mock_qdrant.client.search.return_value = [mock_hit]
+        mock_response = Mock()
+        mock_response.points = [mock_hit]
+        mock_qdrant.client.query_points.return_value = mock_response
 
         mock_embedding_gen = Mock()
         mock_embedding_gen.generate_embedding = Mock(return_value=[0.1] * 384)
@@ -357,8 +361,8 @@ class TestSearchErrorsEndpoint:
 
             assert result.success is True
             assert len(result.errors) == 1
-            # Search should be called (not scroll) because query is provided
-            mock_qdrant.client.search.assert_called_once()
+            # query_points should be called (not scroll) because query is provided
+            mock_qdrant.client.query_points.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_search_errors_trace_id_filter(self, mock_request):
