@@ -537,6 +537,17 @@ try:
 except ImportError as e:
     logger.warning(f"REST API compatibility layer not registered: {e}")
 
+# Register Research Hardening Sprint routes (V-001, V-002, V-003, V-005)
+try:
+    from ..api.routes import trajectories, errors, packets, telemetry
+    app.include_router(trajectories.router, prefix="/api/v1/trajectories", tags=["trajectories"])
+    app.include_router(errors.router, prefix="/api/v1/errors", tags=["errors"])
+    app.include_router(packets.router, prefix="/api/v1/packets", tags=["packets"])
+    app.include_router(telemetry.router, prefix="/api/v1/telemetry", tags=["telemetry"])
+    logger.info("Research Hardening Sprint routes registered: /api/v1/trajectories/*, /api/v1/errors/*, /api/v1/packets/*, /api/v1/telemetry/*")
+except ImportError as e:
+    logger.warning(f"Research Hardening Sprint routes not registered: {e}")
+
 # Import queue operations module (routes registered after Redis init)
 try:
     from .queue_operations import register_routes as register_queue_routes
