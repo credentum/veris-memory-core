@@ -98,7 +98,8 @@ async def log_trajectory(
         # Ensure collection exists
         ensure_collection_exists(qdrant_client)
 
-        # Generate unique trajectory ID
+        # Generate unique trajectory ID (UUID for Qdrant, friendly string for response)
+        point_uuid = str(uuid.uuid4())
         trajectory_id = f"traj_{uuid.uuid4().hex[:12]}"
 
         # Create embedding text for similarity search
@@ -143,7 +144,7 @@ async def log_trajectory(
         qdrant_client.client.upsert(
             collection_name=TRAJECTORY_COLLECTION,
             points=[PointStruct(
-                id=trajectory_id,
+                id=point_uuid,
                 vector=embedding,
                 payload=payload
             )],

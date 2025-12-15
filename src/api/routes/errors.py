@@ -98,7 +98,8 @@ async def log_error(
         # Ensure collection exists
         ensure_collection_exists(qdrant_client)
 
-        # Generate unique error ID
+        # Generate unique error ID (UUID for Qdrant, friendly string for response)
+        point_uuid = str(uuid.uuid4())
         error_id = f"err_{uuid.uuid4().hex[:12]}"
 
         # Create embedding text for similarity search
@@ -137,7 +138,7 @@ async def log_error(
         qdrant_client.client.upsert(
             collection_name=ERROR_COLLECTION,
             points=[PointStruct(
-                id=error_id,
+                id=point_uuid,
                 vector=embedding,
                 payload=payload
             )],

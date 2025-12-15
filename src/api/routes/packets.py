@@ -98,15 +98,24 @@ async def replay_packet(
     source = None
 
     try:
-        # Try to fetch packet from Redis hash first
-        # Packets are often stored as hash with packet_id key
-        packet_json = kv_store.get(f"packet:{packet_id}")
+        # Get the underlying Redis client (supports both SimpleRedisClient and ContextKV)
+        redis_client = getattr(kv_store, 'client', None) or getattr(kv_store, 'redis_client', None)
+        if not redis_client:
+            raise HTTPException(
+                status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Redis client not properly initialized"
+            )
+
+        # Try to fetch packet from Redis string first
+        packet_json = redis_client.get(f"packet:{packet_id}")
         if packet_json:
+            if isinstance(packet_json, bytes):
+                packet_json = packet_json.decode()
             packet_data = json.loads(packet_json)
             source = "redis"
         else:
             # Try hgetall for hash-stored packets
-            packet_hash = kv_store.redis_client.hgetall(f"packet:{packet_id}")
+            packet_hash = redis_client.hgetall(f"packet:{packet_id}")
             if packet_hash:
                 # Convert bytes to strings if needed
                 packet_data = {
@@ -156,7 +165,7 @@ async def replay_packet(
 
         # Re-publish to queue
         packet_json = json.dumps(packet_data)
-        kv_store.redis_client.lpush(queue_key, packet_json)
+        redis_client.lpush(queue_key, packet_json)
 
         api_logger.info(
             "Packet replayed successfully",
