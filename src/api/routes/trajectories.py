@@ -24,7 +24,7 @@ router = APIRouter()
 TRAJECTORY_COLLECTION = "trajectory_logs"
 
 
-async def ensure_collection_exists(qdrant_client) -> bool:
+def ensure_collection_exists(qdrant_client) -> bool:
     """Ensure the trajectory_logs collection exists in Qdrant."""
     try:
         from qdrant_client.models import Distance, VectorParams
@@ -96,7 +96,7 @@ async def log_trajectory(
 
     try:
         # Ensure collection exists
-        await ensure_collection_exists(qdrant_client)
+        ensure_collection_exists(qdrant_client)
 
         # Generate unique trajectory ID
         trajectory_id = f"traj_{uuid.uuid4().hex[:12]}"

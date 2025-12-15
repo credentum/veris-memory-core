@@ -23,7 +23,7 @@ router = APIRouter()
 ERROR_COLLECTION = "error_logs"
 
 
-async def ensure_collection_exists(qdrant_client) -> bool:
+def ensure_collection_exists(qdrant_client) -> bool:
     """Ensure the error_logs collection exists in Qdrant."""
     try:
         from qdrant_client.models import Distance, VectorParams
@@ -96,7 +96,7 @@ async def log_error(
 
     try:
         # Ensure collection exists
-        await ensure_collection_exists(qdrant_client)
+        ensure_collection_exists(qdrant_client)
 
         # Generate unique error ID
         error_id = f"err_{uuid.uuid4().hex[:12]}"

@@ -33,34 +33,34 @@ def set_query_dispatcher(dispatcher: QueryDispatcher) -> None:
 
 # Research Hardening Sprint - Storage client getters/setters
 
-def get_qdrant_client():
-    """Get the global Qdrant client instance."""
+def get_qdrant_client() -> Optional[Any]:
+    """Get the global Qdrant client instance (VectorDBInitializer)."""
     return qdrant_client
 
 
-def set_qdrant_client(client) -> None:
+def set_qdrant_client(client: Optional[Any]) -> None:
     """Set the global Qdrant client instance."""
     global qdrant_client
     qdrant_client = client
 
 
-def get_kv_store_client():
-    """Get the global KV store (Redis) client instance."""
+def get_kv_store_client() -> Optional[Any]:
+    """Get the global KV store (Redis) client instance (ContextKV)."""
     return kv_store_client
 
 
-def set_kv_store_client(client) -> None:
+def set_kv_store_client(client: Optional[Any]) -> None:
     """Set the global KV store client instance."""
     global kv_store_client
     kv_store_client = client
 
 
-def get_embedding_generator():
+def get_embedding_generator() -> Optional[Any]:
     """Get the global embedding generator instance."""
     return embedding_generator
 
 
-def set_embedding_generator(generator) -> None:
+def set_embedding_generator(generator: Optional[Any]) -> None:
     """Set the global embedding generator instance."""
     global embedding_generator
     embedding_generator = generator
