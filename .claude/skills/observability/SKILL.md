@@ -1,6 +1,6 @@
 ---
 name: observability
-version: "1.0"
+version: "1.1"
 trigger_phrases:
   - "search trajectories"
   - "find errors"
@@ -26,6 +26,23 @@ Use this skill when the user:
 - Wants to debug or trace issues
 - Asks "what failed?" or "show errors"
 - Mentions searching logs or observability data
+
+## Time-Based Filtering
+
+The `hours_ago` parameter filters results to records created within the last N hours.
+
+**How it works:**
+- Records store `timestamp_unix` (Unix timestamp) for efficient range queries
+- Filter uses Qdrant Range query: `timestamp_unix >= (now - hours_ago)`
+- Only records logged after this feature was deployed have `timestamp_unix`
+- Older records without `timestamp_unix` are excluded from time-filtered searches
+
+**Example:** Find failures in the last 2 hours:
+```bash
+curl -X POST http://172.17.0.1:8000/api/v1/trajectories/search \
+  -H "Content-Type: application/json" \
+  -d '{"outcome": "failure", "hours_ago": 2}'
+```
 
 ## Endpoints
 
