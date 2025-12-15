@@ -1142,6 +1142,25 @@ async def startup_event() -> None:
         else:
             print("⚠️ SimpleRedisClient connection failed, scratchpad operations may fail")
 
+        # Inject storage clients into API dependencies for Research Hardening Sprint routes
+        try:
+            from ..api.dependencies import (
+                set_qdrant_client as set_api_qdrant,
+                set_kv_store_client as set_api_kv,
+                set_embedding_generator as set_api_embedding
+            )
+            if qdrant_client:
+                set_api_qdrant(qdrant_client)
+                logger.info("Injected Qdrant client into API dependencies")
+            if simple_redis and simple_redis.client:
+                set_api_kv(simple_redis)
+                logger.info("Injected KV store client into API dependencies")
+            if embedding_service:
+                set_api_embedding(embedding_service)
+                logger.info("Injected embedding generator into API dependencies")
+        except ImportError as e:
+            logger.warning(f"Could not inject storage clients into API dependencies: {e}")
+
         print("✅ Storage initialization completed (services may be degraded)")
 
         # PHASE 1: Initialize unified backend architecture
