@@ -166,8 +166,12 @@ def get_ideas_channel(user_id: str) -> str:
 
 
 def get_product_packets_channel(user_id: str) -> str:
-    """Get the pub/sub channel for product packets."""
-    return f"{user_id}:product_packets"
+    """Get the pub/sub channel for product packets.
+
+    Note: The orchestrator subscribes to 'product_packets' (no user prefix)
+    for simplicity. User context is carried within the packet itself.
+    """
+    return "product_packets"
 
 
 # =============================================================================
