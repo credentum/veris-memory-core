@@ -578,6 +578,16 @@ except ImportError as e:
     FILE_OPERATIONS_AVAILABLE = False
     register_file_operations = None
 
+# Import product team tools module (routes registered after Redis init)
+try:
+    from .product_team_tools import register_routes as register_product_team_tools
+    PRODUCT_TEAM_TOOLS_AVAILABLE = True
+    logger.info("Product team tools module imported")
+except ImportError as e:
+    logger.warning(f"Product team tools module not available: {e}")
+    PRODUCT_TEAM_TOOLS_AVAILABLE = False
+    register_product_team_tools = None
+
 
 # Global exception handler for production security with request tracking
 @app.exception_handler(Exception)
@@ -1139,6 +1149,16 @@ async def startup_event() -> None:
                 except Exception as e:
                     print(f"⚠️ File operations registration failed: {e}")
                     logger.error(f"Failed to register file operations routes: {e}")
+
+            # Register product team tools API routes (requires Redis client)
+            if PRODUCT_TEAM_TOOLS_AVAILABLE and register_product_team_tools:
+                try:
+                    register_product_team_tools(app, simple_redis.client)
+                    print("✅ Product team tools API routes registered")
+                    logger.info("Product team tools API registered: /tools/submit_idea, /tools/handoff_to_architect, /tools/idea_status")
+                except Exception as e:
+                    print(f"⚠️ Product team tools registration failed: {e}")
+                    logger.error(f"Failed to register product team tools routes: {e}")
         else:
             print("⚠️ SimpleRedisClient connection failed, scratchpad operations may fail")
 

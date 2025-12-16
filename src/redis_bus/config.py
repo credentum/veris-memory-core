@@ -130,6 +130,23 @@ CHANNELS: Dict[str, ChannelConfig] = {
         shared_support=False,
         ttl_seconds=300,  # 5 minutes
     ),
+    "ideas": ChannelConfig(
+        name="ideas",
+        pattern="{user_id}:ideas",
+        description="Human/API -> Product Team: Raw ideas for analysis - private to team",
+        publishers=["human", "api"],
+        subscribers=["product_team"],
+        shared_support=False,
+    ),
+    "product_packets": ChannelConfig(
+        name="product_packets",
+        pattern="{user_id}:product_packets",
+        shared_pattern="shared:product_packets",
+        description="Product Team -> Orchestrator: Validated product packets ready for architect",
+        publishers=["product_team"],
+        subscribers=["orchestrator"],
+        shared_support=True,
+    ),
 }
 
 # Queue Definitions
