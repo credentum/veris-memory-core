@@ -40,6 +40,9 @@ class WorkPacket(BaseModel):
 
     packet_id: str = Field(..., description="Unique identifier for the packet")
     task: Dict[str, Any] = Field(..., description="Task details")
+    workspace_id: Optional[str] = Field(
+        default=None, description="Workspace ID for file operations"
+    )
     session_context: Dict[str, Any] = Field(
         default_factory=dict, description="Pre-hydrated context for warm start"
     )
@@ -53,6 +56,9 @@ class SubmitWorkPacketRequest(BaseModel):
     """Request to submit a work packet."""
 
     user_id: str = Field(..., description="Team/user ID for queue isolation")
+    workspace_id: Optional[str] = Field(
+        default=None, description="Workspace ID (injected into packet if not present)"
+    )
     packet: WorkPacket = Field(..., description="Work packet to submit")
 
 
@@ -217,7 +223,14 @@ async def submit_work_packet(
     """
     try:
         queue_key = get_work_queue_key(request.user_id)
-        packet_json = json.dumps(request.packet.model_dump())
+
+        # Get packet data and inject workspace_id if provided at request level
+        packet_data = request.packet.model_dump()
+        if request.workspace_id and not packet_data.get("workspace_id"):
+            packet_data["workspace_id"] = request.workspace_id
+            logger.info(f"Injected workspace_id={request.workspace_id} into packet")
+
+        packet_json = json.dumps(packet_data)
 
         # Debug: Log Redis connection info
         redis_info = f"type={type(redis).__name__}"
