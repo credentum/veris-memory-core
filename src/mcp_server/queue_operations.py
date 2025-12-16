@@ -18,9 +18,11 @@ Endpoints:
 import asyncio
 import json
 import logging
+import os
 import time
 from typing import Any, Dict, List, Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
@@ -28,6 +30,11 @@ logger = logging.getLogger(__name__)
 
 # Create router for queue operations
 router = APIRouter(tags=["queue"])
+
+# Repo Manager configuration
+REPO_MANAGER_URL = os.environ.get("REPO_MANAGER_URL", "http://repo-manager:8080")
+REPO_MANAGER_API_KEY = os.environ.get("VERIS_API_KEY_REPO_MANAGER", "")
+DEFAULT_REPO_KEY = os.environ.get("DEFAULT_REPO_KEY", "credentum/agent-dev")
 
 
 # =============================================================================
@@ -58,6 +65,17 @@ class SubmitWorkPacketRequest(BaseModel):
     user_id: str = Field(..., description="Team/user ID for queue isolation")
     workspace_id: Optional[str] = Field(
         default=None, description="Workspace ID (injected into packet if not present)"
+    )
+    repo_key: Optional[str] = Field(
+        default=None,
+        description="Repository key for workspace creation (e.g., 'credentum/agent-dev')",
+    )
+    base_branch: str = Field(
+        default="main", description="Base branch for workspace creation"
+    )
+    create_workspace: bool = Field(
+        default=True,
+        description="Whether to auto-create workspace via repo-manager",
     )
     packet: WorkPacket = Field(..., description="Work packet to submit")
 
@@ -182,6 +200,102 @@ def get_redis():
 
 
 # =============================================================================
+# Workspace Creation Helper
+# =============================================================================
+
+
+async def create_workspace_via_repo_manager(
+    workspace_id: str,
+    repo_key: Optional[str] = None,
+    base_branch: str = "main",
+) -> Optional[str]:
+    """
+    Create a workspace via repo-manager API.
+
+    Calls repo-manager's /repo/workspace/create endpoint to create a git worktree
+    with an isolated branch for the task.
+
+    Args:
+        workspace_id: Unique identifier for the workspace (used as task_id)
+        repo_key: Repository key (e.g., 'credentum/agent-dev')
+        base_branch: Base branch to create worktree from
+
+    Returns:
+        workspace_path if successful, None if failed
+    """
+    repo = repo_key or DEFAULT_REPO_KEY
+
+    try:
+        # Build request payload
+        payload = {
+            "repo_key": repo,
+            "task_id": workspace_id,
+            "base_branch": base_branch,
+        }
+
+        # Build headers with API key if available
+        headers = {"Content-Type": "application/json"}
+        if REPO_MANAGER_API_KEY:
+            # Extract just the key part (before first colon) if in server format
+            api_key = REPO_MANAGER_API_KEY.split(":")[0]
+            headers["X-API-Key"] = api_key
+
+        logger.info(
+            f"Creating workspace via repo-manager: workspace_id={workspace_id}, "
+            f"repo_key={repo}, base_branch={base_branch}"
+        )
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{REPO_MANAGER_URL}/repo/workspace/create",
+                json=payload,
+                headers=headers,
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                workspace_path = result.get("workspace_path")
+                branch_name = result.get("branch_name")
+                logger.info(
+                    f"Workspace created: workspace_id={workspace_id}, "
+                    f"path={workspace_path}, branch={branch_name}"
+                )
+                return workspace_path
+            elif response.status_code == 409:
+                # Workspace already exists - extract path from response
+                result = response.json()
+                workspace_path = result.get("workspace_path")
+                if workspace_path:
+                    logger.info(
+                        f"Workspace already exists: workspace_id={workspace_id}, "
+                        f"path={workspace_path}"
+                    )
+                    return workspace_path
+                # Fall back to derived path
+                logger.warning(
+                    f"Workspace exists but no path in response, "
+                    f"deriving from workspace_id={workspace_id}"
+                )
+                return f"/veris_storage/workspaces/{workspace_id}"
+            else:
+                logger.error(
+                    f"Repo-manager workspace creation failed: "
+                    f"status={response.status_code}, body={response.text}"
+                )
+                return None
+
+    except httpx.ConnectError as e:
+        logger.error(f"Cannot connect to repo-manager at {REPO_MANAGER_URL}: {e}")
+        return None
+    except httpx.TimeoutException:
+        logger.error(f"Timeout connecting to repo-manager for workspace {workspace_id}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error creating workspace {workspace_id}: {e}")
+        return None
+
+
+# =============================================================================
 # Queue Key Helpers
 # =============================================================================
 
@@ -220,15 +334,39 @@ async def submit_work_packet(
 
     The packet will be added to the left of the queue (LPUSH),
     so workers using BRPOP will get FIFO ordering.
+
+    If create_workspace=True (default), this endpoint will first call repo-manager
+    to create a git worktree for the workspace before queuing the packet.
     """
     try:
         queue_key = get_work_queue_key(request.user_id)
 
         # Get packet data and inject workspace_id if provided at request level
         packet_data = request.packet.model_dump()
-        if request.workspace_id and not packet_data.get("workspace_id"):
-            packet_data["workspace_id"] = request.workspace_id
-            logger.info(f"Injected workspace_id={request.workspace_id} into packet")
+        workspace_id = request.workspace_id or packet_data.get("workspace_id")
+
+        if workspace_id and not packet_data.get("workspace_id"):
+            packet_data["workspace_id"] = workspace_id
+            logger.info(f"Injected workspace_id={workspace_id} into packet")
+
+        # Auto-create workspace via repo-manager if enabled and workspace_id provided
+        workspace_path = None
+        if request.create_workspace and workspace_id:
+            workspace_path = await create_workspace_via_repo_manager(
+                workspace_id=workspace_id,
+                repo_key=request.repo_key,
+                base_branch=request.base_branch,
+            )
+            if workspace_path:
+                packet_data["workspace_path"] = workspace_path
+                logger.info(f"Injected workspace_path={workspace_path} into packet")
+            else:
+                # Fall back to derived path if repo-manager call fails
+                fallback_path = f"/veris_storage/workspaces/{workspace_id}"
+                packet_data["workspace_path"] = fallback_path
+                logger.warning(
+                    f"Repo-manager workspace creation failed, using fallback: {fallback_path}"
+                )
 
         packet_json = json.dumps(packet_data)
 
