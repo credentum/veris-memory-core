@@ -353,13 +353,30 @@ async def complete_task(
         completion_key = f"{request.user_id}:completions:{request.packet_id}"
         redis.setex(completion_key, 86400, json.dumps(completion_event))  # 24h TTL
 
-        # Publish to completion channel
+        # Publish to completion channel (per-packet for orchestrator)
         channel = get_completion_channel(request.user_id, request.packet_id)
         subscribers = redis.publish(channel, json.dumps(completion_event))
 
+        # Publish to general publish_requests channel for Repo Manager
+        # This triggers PR creation when agents complete tasks successfully
+        publish_channel = f"{request.user_id}:publish_requests"
+        publish_message = {
+            "task_id": request.packet_id,
+            "packet_id": request.packet_id,
+            "workspace_id": request.packet_id,
+            "title": f"Agent completion: {request.packet_id}",
+            "body": request.output or f"Task completed with status: {request.status}",
+            "files": request.files_modified + request.files_created,
+            "status": request.status,
+            "agent_id": request.agent_id,
+            "timestamp": time.time(),
+        }
+        repo_subscribers = redis.publish(publish_channel, json.dumps(publish_message))
+
         logger.info(
             f"Task {request.packet_id} completed by {request.agent_id}, "
-            f"status={request.status}, notified={subscribers} subscribers"
+            f"status={request.status}, notified={subscribers} subscribers, "
+            f"repo_manager={repo_subscribers} subscribers"
         )
 
         return CompleteTaskResponse(
