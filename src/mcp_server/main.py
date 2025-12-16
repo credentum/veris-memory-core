@@ -588,17 +588,6 @@ except ImportError as e:
     PRODUCT_TEAM_TOOLS_AVAILABLE = False
     register_product_team_tools = None
 
-# Import publish operations module (routes registered after Redis init)
-# This module proxies to repo-manager for commit/push/PR operations
-try:
-    from .publish_operations import register_routes as register_publish_operations
-    PUBLISH_OPERATIONS_AVAILABLE = True
-    logger.info("Publish operations module imported")
-except ImportError as e:
-    logger.warning(f"Publish operations module not available: {e}")
-    PUBLISH_OPERATIONS_AVAILABLE = False
-    register_publish_operations = None
-
 
 # Global exception handler for production security with request tracking
 @app.exception_handler(Exception)
@@ -1170,16 +1159,6 @@ async def startup_event() -> None:
                 except Exception as e:
                     print(f"⚠️ Product team tools registration failed: {e}")
                     logger.error(f"Failed to register product team tools routes: {e}")
-
-            # Register publish operations API routes (no Redis needed, proxies to repo-manager)
-            if PUBLISH_OPERATIONS_AVAILABLE and register_publish_operations:
-                try:
-                    register_publish_operations(app)
-                    print("✅ Publish operations API routes registered")
-                    logger.info("Publish operations API registered: /tools/publish_changes")
-                except Exception as e:
-                    print(f"⚠️ Publish operations registration failed: {e}")
-                    logger.error(f"Failed to register publish operations routes: {e}")
         else:
             print("⚠️ SimpleRedisClient connection failed, scratchpad operations may fail")
 
