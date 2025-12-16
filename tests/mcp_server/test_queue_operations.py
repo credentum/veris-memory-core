@@ -176,10 +176,14 @@ class TestCompleteTaskEndpoint:
         assert call_args[0] == "test_team:completions:pkt-003"
         assert call_args[1] == 86400  # 24h TTL
 
-        # Verify pub/sub notification
-        mock_redis.publish.assert_called_once()
-        channel = mock_redis.publish.call_args[0][0]
-        assert channel == "test_team:completion:pkt-003"
+        # Verify pub/sub notifications (2 calls: completion channel + publish_requests)
+        assert mock_redis.publish.call_count == 2
+        # First call: completion channel for orchestrator
+        first_call_channel = mock_redis.publish.call_args_list[0][0][0]
+        assert first_call_channel == "test_team:completion:pkt-003"
+        # Second call: publish_requests channel for Repo Manager
+        second_call_channel = mock_redis.publish.call_args_list[1][0][0]
+        assert second_call_channel == "test_team:publish_requests"
 
     @pytest.mark.asyncio
     async def test_complete_task_with_error(self):
