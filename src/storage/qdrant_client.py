@@ -35,6 +35,11 @@ from qdrant_client.models import (
     OptimizersConfigDiff,
     PointStruct,
     VectorParams,
+    SparseVectorParams,
+    SparseIndexParams,
+    NamedVector,
+    NamedSparseVector,
+    SparseVector as QdrantSparseVector,
 )
 
 # SPRINT 11: Import HNSW parameter manager
@@ -52,6 +57,14 @@ except ImportError:
 
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
     from core.config import Config
+
+# Sparse embeddings configuration
+import os as _os
+SPARSE_EMBEDDINGS_ENABLED = _os.getenv("SPARSE_EMBEDDINGS_ENABLED", "true").lower() == "true"
+
+# Named vector configuration for hybrid search
+DENSE_VECTOR_NAME = "dense"
+SPARSE_VECTOR_NAME = "sparse"
 
 
 class VectorDBInitializer:
@@ -194,13 +207,36 @@ class VectorDBInitializer:
                 from ..core.error_handler import handle_v1_dimension_mismatch
                 error_response = handle_v1_dimension_mismatch(384, Config.EMBEDDING_DIMENSIONS)
                 raise ValueError(f"Configuration error: {error_response['message']}")
-            
-            self.client.create_collection(
-                collection_name=collection_name,
-                vectors_config=VectorParams(
+
+            # Configure vectors - use named vectors for hybrid search
+            if SPARSE_EMBEDDINGS_ENABLED:
+                # Named vectors configuration for hybrid search (dense + sparse)
+                logger.info("Creating collection with hybrid search support (dense + sparse vectors)")
+                vectors_config = {
+                    DENSE_VECTOR_NAME: VectorParams(
+                        size=384,  # SPRINT 11: Hard-coded to 384 for v1.0 compliance
+                        distance=Distance.COSINE,
+                    )
+                }
+                sparse_vectors_config = {
+                    SPARSE_VECTOR_NAME: SparseVectorParams(
+                        index=SparseIndexParams(
+                            on_disk=False,  # Keep in memory for speed
+                        )
+                    )
+                }
+            else:
+                # Legacy single vector configuration (no sparse)
+                vectors_config = VectorParams(
                     size=384,  # SPRINT 11: Hard-coded to 384 for v1.0 compliance
                     distance=Distance.COSINE,
-                ),
+                )
+                sparse_vectors_config = None
+
+            self.client.create_collection(
+                collection_name=collection_name,
+                vectors_config=vectors_config,
+                sparse_vectors_config=sparse_vectors_config,
                 optimizers_config=OptimizersConfigDiff(
                     deleted_threshold=0.2,
                     vacuum_min_vector_number=1000,
@@ -315,14 +351,19 @@ class VectorDBInitializer:
             return False
 
     def store_vector(
-        self, vector_id: str, embedding: list, metadata: Optional[Dict[str, Any]] = None
+        self,
+        vector_id: str,
+        embedding: list,
+        metadata: Optional[Dict[str, Any]] = None,
+        sparse_vector: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Store a vector in the Qdrant collection.
 
         Args:
             vector_id: Unique identifier for the vector
-            embedding: The vector embedding
+            embedding: The dense vector embedding
             metadata: Optional metadata to store with the vector
+            sparse_vector: Optional sparse vector dict with 'indices' and 'values' keys
 
         Returns:
             str: The vector ID that was stored
@@ -347,17 +388,37 @@ class VectorDBInitializer:
             from qdrant_client.models import PointStruct
 
             # PHASE 0: Verbose logging for storage pipeline
-            logger.info(f"📦 Storing vector: ID={vector_id}, embedding_dims={len(embedding)}")
+            sparse_info = f", sparse_dims={len(sparse_vector.get('indices', []))}" if sparse_vector else ""
+            logger.info(f"📦 Storing vector: ID={vector_id}, embedding_dims={len(embedding)}{sparse_info}")
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(f"📊 Embedding checksum: first_6_values={embedding[:6]}, last_value={embedding[-1] if embedding else 'None'}")
                 logger.debug(f"📋 Metadata keys: {list((metadata or {}).keys())}")
+
+            # Build vector configuration based on whether hybrid search is enabled
+            if SPARSE_EMBEDDINGS_ENABLED and sparse_vector:
+                # Named vectors for hybrid search
+                vector_data = {
+                    DENSE_VECTOR_NAME: embedding,
+                    SPARSE_VECTOR_NAME: QdrantSparseVector(
+                        indices=sparse_vector["indices"],
+                        values=sparse_vector["values"],
+                    ),
+                }
+            elif SPARSE_EMBEDDINGS_ENABLED:
+                # Named vector format but only dense (sparse not provided)
+                vector_data = {
+                    DENSE_VECTOR_NAME: embedding,
+                }
+            else:
+                # Legacy single vector format
+                vector_data = embedding
 
             upsert_result = self.client.upsert(
                 collection_name=collection_name,
                 points=[
                     PointStruct(
                         id=vector_id,
-                        vector=embedding,
+                        vector=vector_data,
                         payload=metadata or {},
                     )
                 ],
@@ -377,14 +438,29 @@ class VectorDBInitializer:
                 )
                 if not retrieved_points or len(retrieved_points) == 0:
                     raise RuntimeError(f"Storage verification failed: Vector {vector_id} not found after upsert")
-                
+
                 # Additional verification: check if vector exists and has expected properties
                 stored_point = retrieved_points[0]
-                if not stored_point.vector or len(stored_point.vector) != len(embedding):
-                    raise RuntimeError(f"Storage verification failed: Vector {vector_id} corrupted or incomplete")
-                    
-                logger.info(f"✓ Vector storage verified: {vector_id} exists with {len(stored_point.vector)} dimensions")
-                
+
+                # Handle both named vectors (dict) and legacy single vectors (list)
+                if isinstance(stored_point.vector, dict):
+                    # Named vectors - verify dense vector
+                    dense_vector = stored_point.vector.get(DENSE_VECTOR_NAME)
+                    if not dense_vector or len(dense_vector) != len(embedding):
+                        raise RuntimeError(f"Storage verification failed: Dense vector {vector_id} corrupted or incomplete")
+                    dims_info = f"{len(dense_vector)} dense dims"
+                    # Also verify sparse if present
+                    if sparse_vector and SPARSE_VECTOR_NAME in stored_point.vector:
+                        sparse_stored = stored_point.vector[SPARSE_VECTOR_NAME]
+                        dims_info += f", {len(getattr(sparse_stored, 'indices', []))} sparse dims"
+                else:
+                    # Legacy single vector
+                    if not stored_point.vector or len(stored_point.vector) != len(embedding):
+                        raise RuntimeError(f"Storage verification failed: Vector {vector_id} corrupted or incomplete")
+                    dims_info = f"{len(stored_point.vector)} dimensions"
+
+                logger.info(f"✓ Vector storage verified: {vector_id} exists with {dims_info}")
+
             except Exception as verification_error:
                 # This is a critical failure - the upsert claimed success but verification failed
                 raise RuntimeError(f"Storage verification failed for vector {vector_id}: {verification_error}")
@@ -405,10 +481,10 @@ class VectorDBInitializer:
     def search(
         self, query_vector: list, limit: int = 10, filter_dict: Optional[Dict[str, Any]] = None
     ) -> list:
-        """Search for similar vectors in the collection.
+        """Search for similar vectors in the collection (dense vector only).
 
         Args:
-            query_vector: The query vector to search for
+            query_vector: The dense query vector to search for
             limit: Maximum number of results to return
             filter_dict: Optional filter conditions
 
@@ -436,10 +512,16 @@ class VectorDBInitializer:
             raise ValueError("filter_dict must be a dictionary or None")
 
         try:
+            # For named vectors, specify the vector name
+            if SPARSE_EMBEDDINGS_ENABLED:
+                query = NamedVector(name=DENSE_VECTOR_NAME, vector=query_vector)
+            else:
+                query = query_vector
+
             # Use query_points for qdrant-client v1.7+ (search() was deprecated)
             response = self.client.query_points(
                 collection_name=collection_name,
-                query=query_vector,
+                query=query,
                 limit=limit,
                 query_filter=filter_dict,
             )
@@ -466,6 +548,117 @@ class VectorDBInitializer:
             raise
         except Exception as e:
             raise RuntimeError(f"Failed to search vectors: {e}")
+
+    def hybrid_search(
+        self,
+        dense_vector: list,
+        sparse_vector: Optional[Dict[str, Any]] = None,
+        limit: int = 10,
+        filter_dict: Optional[Dict[str, Any]] = None,
+    ) -> list:
+        """Perform hybrid search using both dense and sparse vectors with RRF fusion.
+
+        Uses Qdrant's Query API with Reciprocal Rank Fusion (RRF) to combine
+        dense (semantic) and sparse (keyword) search results.
+
+        Args:
+            dense_vector: The dense embedding vector for semantic search
+            sparse_vector: Optional sparse vector dict with 'indices' and 'values' keys
+            limit: Maximum number of results to return
+            filter_dict: Optional filter conditions
+
+        Returns:
+            list: Search results with fused scores and metadata
+
+        Raises:
+            RuntimeError: If not connected or search fails
+        """
+        from qdrant_client.models import Prefetch, FusionQuery, Fusion
+
+        if not self.client:
+            raise RuntimeError("Not connected to Qdrant")
+
+        collection_name = self.config.get("qdrant", {}).get("collection_name", "context_embeddings")
+
+        # Validate inputs
+        if not dense_vector or not isinstance(dense_vector, list):
+            raise ValueError("dense_vector must be a non-empty list")
+        if not all(isinstance(x, (int, float)) for x in dense_vector):
+            raise ValueError("dense_vector must contain only numeric values")
+
+        try:
+            # Build prefetch queries for each vector type
+            prefetch_queries = []
+
+            # Dense vector prefetch (always included)
+            prefetch_queries.append(
+                Prefetch(
+                    query=NamedVector(name=DENSE_VECTOR_NAME, vector=dense_vector),
+                    limit=limit * 2,  # Fetch more candidates for fusion
+                )
+            )
+
+            # Sparse vector prefetch (if provided and enabled)
+            if SPARSE_EMBEDDINGS_ENABLED and sparse_vector:
+                prefetch_queries.append(
+                    Prefetch(
+                        query=NamedSparseVector(
+                            name=SPARSE_VECTOR_NAME,
+                            vector=QdrantSparseVector(
+                                indices=sparse_vector["indices"],
+                                values=sparse_vector["values"],
+                            ),
+                        ),
+                        limit=limit * 2,  # Fetch more candidates for fusion
+                    )
+                )
+
+            # Execute hybrid search with RRF fusion
+            if len(prefetch_queries) > 1:
+                # True hybrid search with fusion
+                response = self.client.query_points(
+                    collection_name=collection_name,
+                    prefetch=prefetch_queries,
+                    query=FusionQuery(fusion=Fusion.RRF),
+                    limit=limit,
+                    query_filter=filter_dict,
+                )
+                logger.debug(f"Hybrid search executed with {len(prefetch_queries)} prefetch queries")
+            else:
+                # Fallback to dense-only search if sparse not available
+                response = self.client.query_points(
+                    collection_name=collection_name,
+                    query=NamedVector(name=DENSE_VECTOR_NAME, vector=dense_vector),
+                    limit=limit,
+                    query_filter=filter_dict,
+                )
+                logger.debug("Dense-only search executed (sparse vector not provided)")
+
+            results = response.points
+
+            # Convert results to a more usable format
+            search_results = []
+            for result in results:
+                search_results.append(
+                    {
+                        "id": result.id,
+                        "score": result.score,
+                        "payload": result.payload or {},
+                        "hybrid": len(prefetch_queries) > 1,  # Flag if hybrid was used
+                    }
+                )
+
+            return search_results
+
+        except ConnectionError as e:
+            raise RuntimeError(f"Qdrant connection error during hybrid search: {e}")
+        except TimeoutError as e:
+            raise RuntimeError(f"Qdrant timeout error during hybrid search: {e}")
+        except ValueError as e:
+            raise
+        except Exception as e:
+            logger.error(f"Hybrid search failed: {e}")
+            raise RuntimeError(f"Failed to perform hybrid search: {e}")
 
     def get_collections(self):
         """Get information about available collections.

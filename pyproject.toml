@@ -44,6 +44,7 @@ dependencies = [
     "loguru>=0.7.0",
     "redis>=5.0.0",
     "httpx>=0.25.0",
+    "fastembed>=0.3.0",  # For sparse BM25 embeddings in hybrid search
 ]
 
 [project.optional-dependencies]

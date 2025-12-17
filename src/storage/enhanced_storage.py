@@ -20,7 +20,16 @@ from typing import Any, Dict, List, Optional
 from ..backends.text_backend import TextSearchBackend, get_text_backend
 from ..storage.kv_store import ContextKV
 from ..storage.neo4j_client import Neo4jInitializer
-from ..storage.qdrant_client import VectorDBInitializer
+from ..storage.qdrant_client import VectorDBInitializer, SPARSE_EMBEDDINGS_ENABLED
+
+# Import sparse embedding service
+try:
+    from ..embedding.sparse_service import get_sparse_embedding_service, SparseVector
+    SPARSE_SERVICE_AVAILABLE = True
+except ImportError:
+    SPARSE_SERVICE_AVAILABLE = False
+    get_sparse_embedding_service = None
+    SparseVector = None
 
 logger = logging.getLogger(__name__)
 
@@ -349,13 +358,13 @@ class EnhancedStorageOrchestrator:
     async def _store_in_vector_db(
         self, request: StorageRequest, text_content: str
     ) -> StorageResult:
-        """Store content in vector database."""
+        """Store content in vector database with optional sparse vectors for hybrid search."""
         start_time = time.time()
 
         try:
             logger.debug(f"Storing in vector database: {request.context_id}")
 
-            # Generate embedding
+            # Generate dense embedding
             embedding = None
             if self.embedding_generator:
                 try:
@@ -366,10 +375,29 @@ class EnhancedStorageOrchestrator:
                         # Fallback for callable embedding generators
                         embedding = await self.embedding_generator(text_content)
                 except Exception as e:
-                    logger.warning(f"Embedding generation failed: {e}")
+                    logger.warning(f"Dense embedding generation failed: {e}")
                     # Continue without embedding - will use fallback in store_vector
 
-            # Store vector
+            # Generate sparse embedding for hybrid search
+            sparse_vector = None
+            if SPARSE_EMBEDDINGS_ENABLED and SPARSE_SERVICE_AVAILABLE and text_content:
+                try:
+                    sparse_service = get_sparse_embedding_service()
+                    if not sparse_service.is_available():
+                        await sparse_service.initialize()
+
+                    if sparse_service.is_available():
+                        sparse_result = sparse_service.generate_sparse_embedding(text_content)
+                        if sparse_result:
+                            sparse_vector = sparse_result.to_dict()
+                            logger.debug(
+                                f"Generated sparse embedding: {len(sparse_vector.get('indices', []))} non-zero elements"
+                            )
+                except Exception as e:
+                    logger.warning(f"Sparse embedding generation failed: {e}")
+                    # Continue without sparse embedding
+
+            # Store vector with optional sparse component
             vector_id = self.qdrant_client.store_vector(
                 vector_id=request.context_id,
                 embedding=embedding,
@@ -380,6 +408,7 @@ class EnhancedStorageOrchestrator:
                     "tags": request.tags,
                     "stored_at": datetime.now().isoformat(),
                 },
+                sparse_vector=sparse_vector,
             )
 
             processing_time = (time.time() - start_time) * 1000
@@ -389,7 +418,11 @@ class EnhancedStorageOrchestrator:
                 success=True,
                 result_id=vector_id,
                 processing_time_ms=processing_time,
-                metadata={"embedding_dimensions": len(embedding) if embedding else None},
+                metadata={
+                    "embedding_dimensions": len(embedding) if embedding else None,
+                    "sparse_dimensions": len(sparse_vector.get("indices", [])) if sparse_vector else None,
+                    "hybrid_enabled": sparse_vector is not None,
+                },
             )
 
         except Exception as e:
