@@ -700,5 +700,179 @@ class TestVectorDBInitializerEdgeCases:
             mock_echo.assert_called_with("✗ Test point verification failed", err=True)
 
 
+class TestHybridSearch:
+    """Tests for VectorDBInitializer.hybrid_search() method."""
+
+    def test_hybrid_search_not_connected(self):
+        """Test hybrid_search raises error when not connected."""
+        config = {"qdrant": {"collection_name": "test_collection"}}
+        initializer = VectorDBInitializer(config=config, test_mode=True)
+
+        with pytest.raises(RuntimeError, match="Not connected to Qdrant"):
+            initializer.hybrid_search(dense_vector=[0.1, 0.2, 0.3])
+
+    def test_hybrid_search_invalid_dense_vector_empty(self):
+        """Test hybrid_search raises error for empty dense vector."""
+        config = {"qdrant": {"collection_name": "test_collection"}}
+        initializer = VectorDBInitializer(config=config, test_mode=True)
+        initializer.client = Mock()
+
+        with pytest.raises(ValueError, match="dense_vector must be a non-empty list"):
+            initializer.hybrid_search(dense_vector=[])
+
+    def test_hybrid_search_invalid_dense_vector_none(self):
+        """Test hybrid_search raises error for None dense vector."""
+        config = {"qdrant": {"collection_name": "test_collection"}}
+        initializer = VectorDBInitializer(config=config, test_mode=True)
+        initializer.client = Mock()
+
+        with pytest.raises(ValueError, match="dense_vector must be a non-empty list"):
+            initializer.hybrid_search(dense_vector=None)
+
+    def test_hybrid_search_invalid_dense_vector_non_numeric(self):
+        """Test hybrid_search raises error for non-numeric dense vector."""
+        config = {"qdrant": {"collection_name": "test_collection"}}
+        initializer = VectorDBInitializer(config=config, test_mode=True)
+        initializer.client = Mock()
+
+        with pytest.raises(ValueError, match="dense_vector must contain only numeric values"):
+            initializer.hybrid_search(dense_vector=["a", "b", "c"])
+
+    def test_hybrid_search_dense_only(self):
+        """Test hybrid_search with dense vector only (no sparse)."""
+        config = {"qdrant": {"collection_name": "test_collection"}}
+        initializer = VectorDBInitializer(config=config, test_mode=True)
+
+        mock_response = Mock()
+        mock_response.points = [
+            Mock(id="doc-1", score=0.95, payload={"title": "Test"}),
+            Mock(id="doc-2", score=0.85, payload={"title": "Other"}),
+        ]
+
+        mock_client = Mock()
+        mock_client.query_points.return_value = mock_response
+        initializer.client = mock_client
+
+        results = initializer.hybrid_search(
+            dense_vector=[0.1, 0.2, 0.3],
+            sparse_vector=None,
+            limit=10
+        )
+
+        assert len(results) == 2
+        assert results[0]["id"] == "doc-1"
+        assert results[0]["score"] == 0.95
+        assert results[0]["hybrid"] is False  # No sparse vector provided
+
+    @patch("storage.qdrant_client.SPARSE_EMBEDDINGS_ENABLED", True)
+    def test_hybrid_search_with_sparse_vector(self):
+        """Test hybrid_search with both dense and sparse vectors."""
+        config = {"qdrant": {"collection_name": "test_collection"}}
+        initializer = VectorDBInitializer(config=config, test_mode=True)
+
+        mock_response = Mock()
+        mock_response.points = [
+            Mock(id="doc-1", score=0.95, payload={"title": "Keyword Match"}),
+            Mock(id="doc-2", score=0.90, payload={"title": "Semantic Match"}),
+        ]
+
+        mock_client = Mock()
+        mock_client.query_points.return_value = mock_response
+        initializer.client = mock_client
+
+        sparse_vector = {"indices": [0, 5, 10], "values": [0.1, 0.5, 0.3]}
+
+        results = initializer.hybrid_search(
+            dense_vector=[0.1, 0.2, 0.3],
+            sparse_vector=sparse_vector,
+            limit=10
+        )
+
+        assert len(results) == 2
+        assert results[0]["hybrid"] is True  # Both vectors used
+
+        # Verify query_points was called with prefetch (hybrid mode)
+        call_args = mock_client.query_points.call_args
+        assert call_args is not None
+
+    def test_hybrid_search_connection_error(self):
+        """Test hybrid_search handles connection errors."""
+        config = {"qdrant": {"collection_name": "test_collection"}}
+        initializer = VectorDBInitializer(config=config, test_mode=True)
+
+        mock_client = Mock()
+        mock_client.query_points.side_effect = ConnectionError("Connection failed")
+        initializer.client = mock_client
+
+        with pytest.raises(RuntimeError, match="Qdrant connection error during hybrid search"):
+            initializer.hybrid_search(dense_vector=[0.1, 0.2, 0.3])
+
+    def test_hybrid_search_timeout_error(self):
+        """Test hybrid_search handles timeout errors."""
+        config = {"qdrant": {"collection_name": "test_collection"}}
+        initializer = VectorDBInitializer(config=config, test_mode=True)
+
+        mock_client = Mock()
+        mock_client.query_points.side_effect = TimeoutError("Request timed out")
+        initializer.client = mock_client
+
+        with pytest.raises(RuntimeError, match="Qdrant timeout error during hybrid search"):
+            initializer.hybrid_search(dense_vector=[0.1, 0.2, 0.3])
+
+    def test_hybrid_search_generic_error(self):
+        """Test hybrid_search handles generic errors."""
+        config = {"qdrant": {"collection_name": "test_collection"}}
+        initializer = VectorDBInitializer(config=config, test_mode=True)
+
+        mock_client = Mock()
+        mock_client.query_points.side_effect = Exception("Unknown error")
+        initializer.client = mock_client
+
+        with pytest.raises(RuntimeError, match="Failed to perform hybrid search"):
+            initializer.hybrid_search(dense_vector=[0.1, 0.2, 0.3])
+
+    def test_hybrid_search_respects_limit(self):
+        """Test hybrid_search respects the limit parameter."""
+        config = {"qdrant": {"collection_name": "test_collection"}}
+        initializer = VectorDBInitializer(config=config, test_mode=True)
+
+        mock_response = Mock()
+        mock_response.points = [
+            Mock(id=f"doc-{i}", score=0.9 - i * 0.1, payload={})
+            for i in range(5)
+        ]
+
+        mock_client = Mock()
+        mock_client.query_points.return_value = mock_response
+        initializer.client = mock_client
+
+        results = initializer.hybrid_search(
+            dense_vector=[0.1, 0.2, 0.3],
+            limit=5
+        )
+
+        assert len(results) == 5
+
+        # Verify limit was passed to query_points
+        call_args = mock_client.query_points.call_args
+        assert call_args.kwargs.get("limit") == 5
+
+    def test_hybrid_search_empty_results(self):
+        """Test hybrid_search with no results."""
+        config = {"qdrant": {"collection_name": "test_collection"}}
+        initializer = VectorDBInitializer(config=config, test_mode=True)
+
+        mock_response = Mock()
+        mock_response.points = []
+
+        mock_client = Mock()
+        mock_client.query_points.return_value = mock_response
+        initializer.client = mock_client
+
+        results = initializer.hybrid_search(dense_vector=[0.1, 0.2, 0.3])
+
+        assert results == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

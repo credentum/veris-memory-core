@@ -12,7 +12,7 @@ This module:
 import logging
 import sys
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import click
 import yaml
@@ -353,7 +353,7 @@ class VectorDBInitializer:
     def store_vector(
         self,
         vector_id: str,
-        embedding: list,
+        embedding: List[float],
         metadata: Optional[Dict[str, Any]] = None,
         sparse_vector: Optional[Dict[str, Any]] = None,
     ) -> str:
@@ -479,8 +479,8 @@ class VectorDBInitializer:
             raise RuntimeError(f"Failed to store vector: {e}")
 
     def search(
-        self, query_vector: list, limit: int = 10, filter_dict: Optional[Dict[str, Any]] = None
-    ) -> list:
+        self, query_vector: List[float], limit: int = 10, filter_dict: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
         """Search for similar vectors in the collection (dense vector only).
 
         Args:
@@ -551,11 +551,11 @@ class VectorDBInitializer:
 
     def hybrid_search(
         self,
-        dense_vector: list,
+        dense_vector: List[float],
         sparse_vector: Optional[Dict[str, Any]] = None,
         limit: int = 10,
         filter_dict: Optional[Dict[str, Any]] = None,
-    ) -> list:
+    ) -> List[Dict[str, Any]]:
         """Perform hybrid search using both dense and sparse vectors with RRF fusion.
 
         Uses Qdrant's Query API with Reciprocal Rank Fusion (RRF) to combine
