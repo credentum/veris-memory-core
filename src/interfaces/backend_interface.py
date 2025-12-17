@@ -79,7 +79,8 @@ class BackendSearchInterface(ABC):
     async def search_by_embedding(
         self,
         embedding: List[float],
-        options: SearchOptions
+        options: SearchOptions,
+        original_query: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Search using a pre-computed embedding vector (optional).
@@ -94,6 +95,9 @@ class BackendSearchInterface(ABC):
         Args:
             embedding: Pre-computed embedding vector
             options: Search configuration options
+            original_query: Original query text for generating sparse embeddings
+                           in hybrid search mode. When provided, enables BM25/keyword
+                           matching alongside the dense HyDE embedding.
 
         Returns:
             List of results in normalized format
