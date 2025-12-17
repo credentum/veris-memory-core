@@ -361,26 +361,66 @@ class EmbeddingService:
         raise EmbeddingError(f"All {self.config.max_retries} attempts failed. Last error: {last_error}")
     
     def _extract_text(self, content: Union[str, Dict[str, Any]]) -> str:
-        """Extract text from content for embedding."""
+        """
+        Extract text from content for embedding with contextual headers.
+
+        Uses newline separators to prevent "concept bleed" where the embedding
+        model might interpret adjacent values as a single phrase.
+
+        Structure:
+          TITLE: ...
+          TYPE: ...
+          SEVERITY: ...
+
+          [body content joined with spaces]
+        """
         if isinstance(content, str):
             return content
-        
+
         if isinstance(content, dict):
-            # Extract meaningful text from structured content
-            text_parts = []
-            
-            # Common text fields
-            for field in ["title", "description", "text", "content", "body"]:
+            # --- SECTION 1: METADATA HEADERS ---
+            # Use NEWLINES to separate distinct concepts for the embedding model
+            header_fields = ["title", "type", "severity", "verdict", "status"]
+            header_parts = []
+            for field in header_fields:
                 if field in content and content[field]:
-                    text_parts.append(str(content[field]))
-            
-            # If no text found, use JSON representation
-            if not text_parts:
+                    # Format: "FIELD_NAME: Value" - uppercase field names for clarity
+                    header_parts.append(f"{field.upper()}: {content[field]}")
+
+            # --- SECTION 2: CORE CONTENT ---
+            # These fields contain the main semantic content
+            content_fields = [
+                "proposal", "description", "text", "content", "body",
+                "key_principle", "finding", "decision", "summary",
+                "rationale", "diagnosis", "message"
+            ]
+            body_parts = []
+            for field in content_fields:
+                if field in content and content[field]:
+                    value = content[field]
+                    # Handle nested dicts (like panel_analysis)
+                    if isinstance(value, dict):
+                        import json
+                        body_parts.append(json.dumps(value, ensure_ascii=False))
+                    else:
+                        body_parts.append(str(value))
+
+            # --- COMBINE WITH PROPER SEPARATORS ---
+            # Headers separated by newlines, body joined with spaces
+            # Double newline between headers and body
+            if header_parts and body_parts:
+                full_text = "\n".join(header_parts) + "\n\n" + " ".join(body_parts)
+            elif header_parts:
+                full_text = "\n".join(header_parts)
+            elif body_parts:
+                full_text = " ".join(body_parts)
+            else:
+                # Fallback: JSON representation of entire content
                 import json
-                text_parts = [json.dumps(content, sort_keys=True)]
-            
-            return " ".join(text_parts)
-        
+                full_text = json.dumps(content, sort_keys=True, ensure_ascii=False)
+
+            return full_text.strip()
+
         return str(content)
     
     def _adjust_dimensions(self, embedding: List[float]) -> List[float]:
