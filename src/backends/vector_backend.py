@@ -20,6 +20,17 @@ from ..interfaces.backend_interface import (
 from ..interfaces.memory_result import ContentType, MemoryResult, ResultSource
 from ..utils.logging_middleware import backend_logger, log_backend_timing
 
+# Import sparse embedding support for hybrid search
+try:
+    from ..embedding.sparse_service import get_sparse_embedding_service, SPARSE_ENABLED
+    from ..storage.qdrant_client import SPARSE_EMBEDDINGS_ENABLED
+    HYBRID_SEARCH_AVAILABLE = SPARSE_ENABLED and SPARSE_EMBEDDINGS_ENABLED
+except ImportError:
+    HYBRID_SEARCH_AVAILABLE = False
+    get_sparse_embedding_service = None
+    SPARSE_ENABLED = False
+    SPARSE_EMBEDDINGS_ENABLED = False
+
 
 class VectorBackend(BackendSearchInterface):
     """
@@ -49,7 +60,10 @@ class VectorBackend(BackendSearchInterface):
 
     async def search(self, query: str, options: SearchOptions) -> List[MemoryResult]:
         """
-        Search vector database using semantic similarity.
+        Search vector database using semantic similarity with optional hybrid search.
+
+        When sparse embeddings are enabled, performs hybrid search combining
+        dense (semantic) and sparse (keyword/BM25) vectors for improved retrieval.
 
         Args:
             query: Search query text
@@ -63,7 +77,7 @@ class VectorBackend(BackendSearchInterface):
         """
         async with log_backend_timing(self.backend_name, "search", backend_logger) as metadata:
             try:
-                # Generate query embedding
+                # Generate dense query embedding
                 embed_start = time.time()
                 query_vector = await self._generate_query_embedding(query)
                 embed_time = (time.time() - embed_start) * 1000
@@ -71,13 +85,35 @@ class VectorBackend(BackendSearchInterface):
                 metadata["embedding_time_ms"] = embed_time
                 metadata["embedding_dimensions"] = len(query_vector) if query_vector else 0
 
-                # Perform vector search
+                # Generate sparse query embedding for hybrid search
+                sparse_vector = None
+                if HYBRID_SEARCH_AVAILABLE and get_sparse_embedding_service:
+                    try:
+                        sparse_start = time.time()
+                        sparse_service = get_sparse_embedding_service()
+                        if not sparse_service.is_available():
+                            await sparse_service.initialize()
+
+                        if sparse_service.is_available():
+                            sparse_result = sparse_service.generate_sparse_embedding(query)
+                            if sparse_result:
+                                sparse_vector = sparse_result.to_dict()
+                                sparse_time = (time.time() - sparse_start) * 1000
+                                metadata["sparse_embedding_time_ms"] = sparse_time
+                                metadata["sparse_dimensions"] = len(sparse_vector.get("indices", []))
+                    except Exception as e:
+                        backend_logger.warning(f"Sparse embedding generation failed: {e}")
+
+                # Perform vector search (hybrid if sparse available)
                 search_start = time.time()
-                raw_results = await self._perform_vector_search(query_vector, options)
+                raw_results = await self._perform_vector_search_with_sparse(
+                    query_vector, sparse_vector, options
+                )
                 search_time = (time.time() - search_start) * 1000
 
                 metadata["search_time_ms"] = search_time
                 metadata["raw_result_count"] = len(raw_results)
+                metadata["hybrid_search"] = sparse_vector is not None
 
                 # Convert to normalized format
                 results = self._convert_to_memory_results(raw_results)
@@ -88,7 +124,12 @@ class VectorBackend(BackendSearchInterface):
                 metadata["result_count"] = len(filtered_results)
                 metadata["top_score"] = filtered_results[0].score if filtered_results else 0.0
 
-                backend_logger.info("Vector search completed", query_length=len(query), **metadata)
+                backend_logger.info(
+                    "Vector search completed",
+                    query_length=len(query),
+                    hybrid=sparse_vector is not None,
+                    **metadata
+                )
 
                 return filtered_results
 
@@ -265,24 +306,66 @@ class VectorBackend(BackendSearchInterface):
     async def _perform_vector_search(
         self, query_vector: List[float], options: SearchOptions
     ) -> List[Any]:
-        """Perform the actual vector search operation."""
+        """Perform dense-only vector search (used by search_by_embedding for HyDE)."""
         try:
-            # Call VectorDBInitializer.search() using correct method signature
             results = self.client.search(
                 query_vector=query_vector,
                 limit=options.limit,
-                filter_dict=None,  # Use VectorDBInitializer signature
+                filter_dict=None,
             )
 
-            # Apply score threshold manually since VectorDBInitializer doesn't support it
+            # Apply score threshold manually
             if options.score_threshold > 0:
-                results = [r for r in results if r.score >= options.score_threshold]
+                results = [r for r in results if r.get("score", 1.0) >= options.score_threshold]
 
             return results
 
         except Exception as e:
             backend_logger.error(f"Qdrant search failed: {e}")
             raise
+
+    async def _perform_vector_search_with_sparse(
+        self,
+        query_vector: List[float],
+        sparse_vector: dict,
+        options: SearchOptions
+    ) -> List[Any]:
+        """Perform hybrid search combining dense and sparse vectors when available."""
+        try:
+            # Use hybrid_search if we have sparse vector and client supports it
+            if sparse_vector and hasattr(self.client, 'hybrid_search'):
+                backend_logger.debug(
+                    f"Performing hybrid search with {len(sparse_vector.get('indices', []))} sparse dims"
+                )
+                results = self.client.hybrid_search(
+                    dense_vector=query_vector,
+                    sparse_vector=sparse_vector,
+                    limit=options.limit,
+                    filter_dict=None,
+                )
+
+                # Apply score threshold
+                if options.score_threshold > 0:
+                    results = [r for r in results if r.get("score", 1.0) >= options.score_threshold]
+
+                return results
+
+            # Fallback to dense-only search
+            backend_logger.debug("Falling back to dense-only search (no sparse vector or hybrid not supported)")
+            return self.client.search(
+                query_vector=query_vector,
+                limit=options.limit,
+                filter_dict=None,
+            )
+
+        except Exception as e:
+            backend_logger.warning(f"Hybrid search failed, falling back to dense: {e}")
+            # Fallback to dense-only search
+            return self.client.search(
+                query_vector=query_vector,
+                limit=options.limit,
+                filter_dict=None,
+            )
 
     def _convert_to_memory_results(self, raw_results: List[Any]) -> List[MemoryResult]:
         """Convert Qdrant results to normalized MemoryResult format."""

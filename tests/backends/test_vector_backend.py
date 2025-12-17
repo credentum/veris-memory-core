@@ -377,5 +377,175 @@ class TestVectorBackendSearchByEmbedding:
             assert result.metadata.get("vector_search") is True
 
 
+class TestVectorBackendHybridSearch:
+    """Test suite for hybrid search functionality in VectorBackend."""
+
+    @pytest.fixture
+    def vector_backend(self):
+        """Create a vector backend instance for testing."""
+        mock_client = Mock()
+        mock_embedding_generator = Mock()
+        backend = VectorBackend(mock_client, mock_embedding_generator)
+        return backend
+
+    @pytest.fixture
+    def mock_qdrant_results(self):
+        """Create mock Qdrant search results."""
+        return [
+            {"id": "doc_1", "score": 0.95, "payload": {"text": "Covenant breach", "type": "governance"}},
+            {"id": "doc_2", "score": 0.85, "payload": {"text": "Policy document", "type": "documentation"}},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_search_generates_sparse_embedding_when_available(self, vector_backend, mock_qdrant_results):
+        """Test that search generates sparse embedding when hybrid is available."""
+        from src.interfaces.backend_interface import SearchOptions
+        from unittest.mock import patch, MagicMock
+
+        vector_backend.client.search = Mock(return_value=mock_qdrant_results)
+        vector_backend.embedding_generator.generate_embedding = AsyncMock(return_value=[0.1, 0.2, 0.3])
+
+        # Mock sparse service
+        mock_sparse_service = MagicMock()
+        mock_sparse_service.is_available.return_value = True
+        mock_sparse_vector = MagicMock()
+        mock_sparse_vector.to_dict.return_value = {"indices": [0, 5], "values": [0.1, 0.5]}
+        mock_sparse_service.generate_sparse_embedding.return_value = mock_sparse_vector
+
+        with patch('backends.vector_backend.HYBRID_SEARCH_AVAILABLE', True):
+            with patch('backends.vector_backend.get_sparse_embedding_service', return_value=mock_sparse_service):
+                options = SearchOptions(limit=10)
+                results = await vector_backend.search("covenant breach", options)
+
+                assert len(results) == 2
+
+    @pytest.mark.asyncio
+    async def test_search_falls_back_to_dense_when_sparse_unavailable(self, vector_backend, mock_qdrant_results):
+        """Test that search falls back to dense when sparse is not available."""
+        from src.interfaces.backend_interface import SearchOptions
+        from unittest.mock import patch
+
+        vector_backend.client.search = Mock(return_value=mock_qdrant_results)
+        vector_backend.embedding_generator.generate_embedding = AsyncMock(return_value=[0.1, 0.2, 0.3])
+
+        with patch('backends.vector_backend.HYBRID_SEARCH_AVAILABLE', False):
+            options = SearchOptions(limit=10)
+            results = await vector_backend.search("test query", options)
+
+            assert len(results) == 2
+            # Should use regular search, not hybrid_search
+            vector_backend.client.search.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_perform_vector_search_with_sparse_uses_hybrid(self, vector_backend, mock_qdrant_results):
+        """Test _perform_vector_search_with_sparse uses hybrid_search when sparse provided."""
+        from src.interfaces.backend_interface import SearchOptions
+
+        # Mock hybrid_search method on client
+        vector_backend.client.hybrid_search = Mock(return_value=mock_qdrant_results)
+
+        sparse_vector = {"indices": [0, 5, 10], "values": [0.1, 0.5, 0.3]}
+        options = SearchOptions(limit=10)
+
+        results = await vector_backend._perform_vector_search_with_sparse(
+            query_vector=[0.1, 0.2, 0.3],
+            sparse_vector=sparse_vector,
+            options=options
+        )
+
+        assert len(results) == 2
+        vector_backend.client.hybrid_search.assert_called_once()
+        call_args = vector_backend.client.hybrid_search.call_args
+        assert call_args.kwargs["sparse_vector"] == sparse_vector
+
+    @pytest.mark.asyncio
+    async def test_perform_vector_search_with_sparse_no_sparse_provided(self, vector_backend, mock_qdrant_results):
+        """Test _perform_vector_search_with_sparse falls back to dense when no sparse."""
+        from src.interfaces.backend_interface import SearchOptions
+
+        vector_backend.client.search = Mock(return_value=mock_qdrant_results)
+
+        options = SearchOptions(limit=10)
+
+        results = await vector_backend._perform_vector_search_with_sparse(
+            query_vector=[0.1, 0.2, 0.3],
+            sparse_vector=None,
+            options=options
+        )
+
+        assert len(results) == 2
+        vector_backend.client.search.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_perform_vector_search_with_sparse_handles_error(self, vector_backend, mock_qdrant_results):
+        """Test _perform_vector_search_with_sparse handles errors gracefully."""
+        from src.interfaces.backend_interface import SearchOptions
+
+        # Make hybrid_search fail
+        vector_backend.client.hybrid_search = Mock(side_effect=Exception("Hybrid failed"))
+        # But regular search works
+        vector_backend.client.search = Mock(return_value=mock_qdrant_results)
+
+        sparse_vector = {"indices": [0, 5], "values": [0.1, 0.5]}
+        options = SearchOptions(limit=10)
+
+        # Should fall back to dense search
+        results = await vector_backend._perform_vector_search_with_sparse(
+            query_vector=[0.1, 0.2, 0.3],
+            sparse_vector=sparse_vector,
+            options=options
+        )
+
+        assert len(results) == 2
+        vector_backend.client.search.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_perform_vector_search_with_sparse_score_threshold(self, vector_backend):
+        """Test _perform_vector_search_with_sparse respects score threshold."""
+        from src.interfaces.backend_interface import SearchOptions
+
+        mock_results = [
+            {"id": "doc_1", "score": 0.95, "payload": {}},
+            {"id": "doc_2", "score": 0.5, "payload": {}},  # Below threshold
+            {"id": "doc_3", "score": 0.8, "payload": {}},
+        ]
+        vector_backend.client.hybrid_search = Mock(return_value=mock_results)
+
+        sparse_vector = {"indices": [0], "values": [0.1]}
+        options = SearchOptions(limit=10, score_threshold=0.7)
+
+        results = await vector_backend._perform_vector_search_with_sparse(
+            query_vector=[0.1, 0.2, 0.3],
+            sparse_vector=sparse_vector,
+            options=options
+        )
+
+        # Should filter out doc_2 (score 0.5 < threshold 0.7)
+        assert len(results) == 2
+        assert all(r["score"] >= 0.7 for r in results)
+
+    @pytest.mark.asyncio
+    async def test_search_with_sparse_embedding_failure(self, vector_backend, mock_qdrant_results):
+        """Test search continues when sparse embedding generation fails."""
+        from src.interfaces.backend_interface import SearchOptions
+        from unittest.mock import patch, MagicMock
+
+        vector_backend.client.search = Mock(return_value=mock_qdrant_results)
+        vector_backend.embedding_generator.generate_embedding = AsyncMock(return_value=[0.1, 0.2, 0.3])
+
+        # Mock sparse service that fails
+        mock_sparse_service = MagicMock()
+        mock_sparse_service.is_available.return_value = True
+        mock_sparse_service.generate_sparse_embedding.side_effect = Exception("Sparse generation failed")
+
+        with patch('backends.vector_backend.HYBRID_SEARCH_AVAILABLE', True):
+            with patch('backends.vector_backend.get_sparse_embedding_service', return_value=mock_sparse_service):
+                options = SearchOptions(limit=10)
+                # Should not raise, should fall back to dense
+                results = await vector_backend.search("test query", options)
+
+                assert len(results) == 2
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

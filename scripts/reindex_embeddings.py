@@ -88,11 +88,27 @@ class EmbeddingReindexer:
         )
         logger.info(f"Connected to Qdrant at {self.qdrant_host}:{self.qdrant_port}")
 
-        # Embedding service
+        # Dense embedding service
         from embedding.service import EmbeddingService
         self._embedding_service = EmbeddingService()
         await self._embedding_service.initialize()
-        logger.info("Embedding service initialized")
+        logger.info("Dense embedding service initialized")
+
+        # Sparse embedding service (for hybrid search)
+        self._sparse_service = None
+        try:
+            from embedding.sparse_service import get_sparse_embedding_service
+            self._sparse_service = get_sparse_embedding_service()
+            await self._sparse_service.initialize()
+            if self._sparse_service.is_available():
+                logger.info("Sparse embedding service initialized (hybrid search enabled)")
+            else:
+                logger.warning("Sparse embedding service not available")
+                self._sparse_service = None
+        except ImportError:
+            logger.info("Sparse embedding service not installed (dense-only mode)")
+        except Exception as e:
+            logger.warning(f"Failed to initialize sparse embedding service: {e}")
 
     def close(self):
         """Close connections."""
@@ -168,24 +184,42 @@ class EmbeddingReindexer:
         self,
         doc_id: str,
         embedding: List[float],
+        sparse_vector: Optional[Dict[str, Any]] = None,
         collection: str = "veris_memory"
     ) -> bool:
         """
-        Update ONLY the embedding vector in Qdrant, preserving existing payload.
+        Update embedding vector(s) in Qdrant, preserving existing payload.
 
         Uses update_vectors() instead of upsert() to avoid overwriting metadata.
+        Supports both dense-only and hybrid (dense + sparse) updates.
         """
-        from qdrant_client.models import PointVectors
+        from qdrant_client.models import PointVectors, SparseVector as QdrantSparseVector
 
         try:
-            # Use update_vectors to ONLY update the vector, not the payload
-            # This preserves all existing metadata in the point
+            # Build vector data based on what's available
+            # Check if collection uses named vectors or single vector
+            collection_info = self._qdrant_client.get_collection(collection)
+            vectors_config = collection_info.config.params.vectors
+
+            if isinstance(vectors_config, dict):
+                # Named vectors (hybrid search enabled)
+                vector_data = {"dense": embedding}
+                if sparse_vector:
+                    vector_data["sparse"] = QdrantSparseVector(
+                        indices=sparse_vector["indices"],
+                        values=sparse_vector["values"],
+                    )
+                logger.debug(f"Updating with named vectors: dense={len(embedding)}, sparse={len(sparse_vector.get('indices', [])) if sparse_vector else 0}")
+            else:
+                # Legacy single vector
+                vector_data = embedding
+
             self._qdrant_client.update_vectors(
                 collection_name=collection,
                 points=[
                     PointVectors(
                         id=doc_id,
-                        vector=embedding,
+                        vector=vector_data,
                     )
                 ],
                 wait=True
@@ -200,7 +234,7 @@ class EmbeddingReindexer:
         doc: Dict[str, Any],
         dry_run: bool = False
     ) -> bool:
-        """Re-index a single document."""
+        """Re-index a single document with dense and optionally sparse embeddings."""
         doc_id = doc['id']
         content = doc.get('content', {})
 
@@ -213,18 +247,32 @@ class EmbeddingReindexer:
         logger.info(f"  {extracted_text[:200]}...")
 
         if dry_run:
-            logger.info(f"[DRY RUN] Would re-index {doc_id}")
+            sparse_info = " + sparse" if self._sparse_service else ""
+            logger.info(f"[DRY RUN] Would re-index {doc_id} with dense{sparse_info} embeddings")
             return True
 
-        # Generate new embedding
+        # Generate new embeddings
         try:
+            # Dense embedding
             embedding = await self.generate_new_embedding(content)
-            logger.info(f"Generated embedding: {len(embedding)} dimensions")
+            logger.info(f"Generated dense embedding: {len(embedding)} dimensions")
 
-            # Update Qdrant
-            success = await self.update_qdrant_embedding(doc_id, embedding)
+            # Sparse embedding (if available)
+            sparse_vector = None
+            if self._sparse_service and extracted_text:
+                try:
+                    sparse_result = self._sparse_service.generate_sparse_embedding(extracted_text)
+                    if sparse_result:
+                        sparse_vector = sparse_result.to_dict()
+                        logger.info(f"Generated sparse embedding: {len(sparse_vector.get('indices', []))} non-zero elements")
+                except Exception as e:
+                    logger.warning(f"Failed to generate sparse embedding: {e}")
+
+            # Update Qdrant with both vectors
+            success = await self.update_qdrant_embedding(doc_id, embedding, sparse_vector)
             if success:
-                logger.info(f"✅ Updated {doc_id}")
+                sparse_info = f" + {len(sparse_vector.get('indices', []))} sparse dims" if sparse_vector else ""
+                logger.info(f"✅ Updated {doc_id} ({len(embedding)} dense dims{sparse_info})")
             else:
                 logger.error(f"❌ Failed to update {doc_id}")
             return success
