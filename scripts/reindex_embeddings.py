@@ -185,18 +185,18 @@ class EmbeddingReindexer:
         doc_id: str,
         embedding: List[float],
         sparse_vector: Optional[Dict[str, Any]] = None,
-        collection: str = "veris_memory"
+        collection: str = "context_embeddings",
+        payload: Optional[Dict[str, Any]] = None
     ) -> bool:
         """
-        Update embedding vector(s) in Qdrant, preserving existing payload.
+        Upsert embedding vector(s) in Qdrant with payload.
 
-        Uses update_vectors() instead of upsert() to avoid overwriting metadata.
-        Supports both dense-only and hybrid (dense + sparse) updates.
+        Uses upsert() to create or update points with full payload.
+        Supports both dense-only and hybrid (dense + sparse) vectors.
         """
-        from qdrant_client.models import PointVectors, SparseVector as QdrantSparseVector
+        from qdrant_client.models import PointStruct, SparseVector as QdrantSparseVector
 
         try:
-            # Build vector data based on what's available
             # Check if collection uses named vectors or single vector
             collection_info = self._qdrant_client.get_collection(collection)
             vectors_config = collection_info.config.params.vectors
@@ -209,24 +209,25 @@ class EmbeddingReindexer:
                         indices=sparse_vector["indices"],
                         values=sparse_vector["values"],
                     )
-                logger.debug(f"Updating with named vectors: dense={len(embedding)}, sparse={len(sparse_vector.get('indices', [])) if sparse_vector else 0}")
+                logger.debug(f"Upserting with named vectors: dense={len(embedding)}, sparse={len(sparse_vector.get('indices', [])) if sparse_vector else 0}")
             else:
                 # Legacy single vector
                 vector_data = embedding
 
-            self._qdrant_client.update_vectors(
+            self._qdrant_client.upsert(
                 collection_name=collection,
                 points=[
-                    PointVectors(
+                    PointStruct(
                         id=doc_id,
                         vector=vector_data,
+                        payload=payload or {}
                     )
                 ],
                 wait=True
             )
             return True
         except Exception as e:
-            logger.error(f"Failed to update Qdrant for {doc_id}: {e}")
+            logger.error(f"Failed to upsert Qdrant for {doc_id}: {e}")
             return False
 
     async def reindex_document(
@@ -268,13 +269,24 @@ class EmbeddingReindexer:
                 except Exception as e:
                     logger.warning(f"Failed to generate sparse embedding: {e}")
 
-            # Update Qdrant with both vectors
-            success = await self.update_qdrant_embedding(doc_id, embedding, sparse_vector)
+            # Build payload from document data
+            payload = {
+                "content": content,
+                "type": doc.get('type', 'unknown'),
+                "metadata": {
+                    "reindexed_at": __import__('datetime').datetime.utcnow().isoformat(),
+                },
+            }
+            if doc.get('searchable_text'):
+                payload["searchable_text"] = doc['searchable_text']
+
+            # Upsert to Qdrant with vectors and payload
+            success = await self.update_qdrant_embedding(doc_id, embedding, sparse_vector, payload=payload)
             if success:
                 sparse_info = f" + {len(sparse_vector.get('indices', []))} sparse dims" if sparse_vector else ""
-                logger.info(f"✅ Updated {doc_id} ({len(embedding)} dense dims{sparse_info})")
+                logger.info(f"✅ Upserted {doc_id} ({len(embedding)} dense dims{sparse_info})")
             else:
-                logger.error(f"❌ Failed to update {doc_id}")
+                logger.error(f"❌ Failed to upsert {doc_id}")
             return success
 
         except Exception as e:
