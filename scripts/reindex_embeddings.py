@@ -259,10 +259,12 @@ class EmbeddingReindexer:
             logger.info(f"Generated dense embedding: {len(embedding)} dimensions")
 
             # Sparse embedding (if available)
+            # Use searchable_text from Neo4j (has all fields) for better keyword matching
             sparse_vector = None
-            if self._sparse_service and extracted_text:
+            sparse_text = doc.get('searchable_text') or extracted_text
+            if self._sparse_service and sparse_text:
                 try:
-                    sparse_result = self._sparse_service.generate_sparse_embedding(extracted_text)
+                    sparse_result = self._sparse_service.generate_sparse_embedding(sparse_text)
                     if sparse_result:
                         sparse_vector = sparse_result.to_dict()
                         logger.info(f"Generated sparse embedding: {len(sparse_vector.get('indices', []))} non-zero elements")

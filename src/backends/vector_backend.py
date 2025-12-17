@@ -25,11 +25,13 @@ try:
     from ..embedding.sparse_service import get_sparse_embedding_service, SPARSE_ENABLED
     from ..storage.qdrant_client import SPARSE_EMBEDDINGS_ENABLED
     HYBRID_SEARCH_AVAILABLE = SPARSE_ENABLED and SPARSE_EMBEDDINGS_ENABLED
-except ImportError:
+    backend_logger.info(f"🔍 Hybrid search config: SPARSE_ENABLED={SPARSE_ENABLED}, SPARSE_EMBEDDINGS_ENABLED={SPARSE_EMBEDDINGS_ENABLED}, HYBRID_AVAILABLE={HYBRID_SEARCH_AVAILABLE}")
+except ImportError as e:
     HYBRID_SEARCH_AVAILABLE = False
     get_sparse_embedding_service = None
     SPARSE_ENABLED = False
     SPARSE_EMBEDDINGS_ENABLED = False
+    backend_logger.warning(f"⚠️ Hybrid search disabled - import failed: {e}")
 
 
 class VectorBackend(BackendSearchInterface):
