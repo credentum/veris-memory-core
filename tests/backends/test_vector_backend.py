@@ -402,7 +402,8 @@ class TestVectorBackendHybridSearch:
         from src.interfaces.backend_interface import SearchOptions
         from unittest.mock import patch, MagicMock
 
-        vector_backend.client.search = Mock(return_value=mock_qdrant_results)
+        # When hybrid search is available, hybrid_search is called, not search
+        vector_backend.client.hybrid_search = Mock(return_value=mock_qdrant_results)
         vector_backend.embedding_generator.generate_embedding = AsyncMock(return_value=[0.1, 0.2, 0.3])
 
         # Mock sparse service
@@ -412,12 +413,14 @@ class TestVectorBackendHybridSearch:
         mock_sparse_vector.to_dict.return_value = {"indices": [0, 5], "values": [0.1, 0.5]}
         mock_sparse_service.generate_sparse_embedding.return_value = mock_sparse_vector
 
-        with patch('backends.vector_backend.HYBRID_SEARCH_AVAILABLE', True):
-            with patch('backends.vector_backend.get_sparse_embedding_service', return_value=mock_sparse_service):
+        with patch('src.backends.vector_backend.HYBRID_SEARCH_AVAILABLE', True):
+            with patch('src.backends.vector_backend.get_sparse_embedding_service', return_value=mock_sparse_service):
                 options = SearchOptions(limit=10)
                 results = await vector_backend.search("covenant breach", options)
 
                 assert len(results) == 2
+                # Verify hybrid_search was called with sparse vector
+                vector_backend.client.hybrid_search.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_search_falls_back_to_dense_when_sparse_unavailable(self, vector_backend, mock_qdrant_results):
@@ -428,7 +431,7 @@ class TestVectorBackendHybridSearch:
         vector_backend.client.search = Mock(return_value=mock_qdrant_results)
         vector_backend.embedding_generator.generate_embedding = AsyncMock(return_value=[0.1, 0.2, 0.3])
 
-        with patch('backends.vector_backend.HYBRID_SEARCH_AVAILABLE', False):
+        with patch('src.backends.vector_backend.HYBRID_SEARCH_AVAILABLE', False):
             options = SearchOptions(limit=10)
             results = await vector_backend.search("test query", options)
 
@@ -538,8 +541,8 @@ class TestVectorBackendHybridSearch:
         mock_sparse_service.is_available.return_value = True
         mock_sparse_service.generate_sparse_embedding.side_effect = Exception("Sparse generation failed")
 
-        with patch('backends.vector_backend.HYBRID_SEARCH_AVAILABLE', True):
-            with patch('backends.vector_backend.get_sparse_embedding_service', return_value=mock_sparse_service):
+        with patch('src.backends.vector_backend.HYBRID_SEARCH_AVAILABLE', True):
+            with patch('src.backends.vector_backend.get_sparse_embedding_service', return_value=mock_sparse_service):
                 options = SearchOptions(limit=10)
                 # Should not raise, should fall back to dense
                 results = await vector_backend.search("test query", options)

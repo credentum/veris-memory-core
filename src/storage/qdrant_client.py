@@ -37,8 +37,6 @@ from qdrant_client.models import (
     VectorParams,
     SparseVectorParams,
     SparseIndexParams,
-    NamedVector,
-    NamedSparseVector,
     SparseVector as QdrantSparseVector,
 )
 
@@ -512,19 +510,23 @@ class VectorDBInitializer:
             raise ValueError("filter_dict must be a dictionary or None")
 
         try:
-            # For named vectors, specify the vector name
-            if SPARSE_EMBEDDINGS_ENABLED:
-                query = NamedVector(name=DENSE_VECTOR_NAME, vector=query_vector)
-            else:
-                query = query_vector
-
             # Use query_points for qdrant-client v1.7+ (search() was deprecated)
-            response = self.client.query_points(
-                collection_name=collection_name,
-                query=query,
-                limit=limit,
-                query_filter=filter_dict,
-            )
+            # For named vectors, use the 'using' parameter
+            if SPARSE_EMBEDDINGS_ENABLED:
+                response = self.client.query_points(
+                    collection_name=collection_name,
+                    query=query_vector,
+                    using=DENSE_VECTOR_NAME,
+                    limit=limit,
+                    query_filter=filter_dict,
+                )
+            else:
+                response = self.client.query_points(
+                    collection_name=collection_name,
+                    query=query_vector,
+                    limit=limit,
+                    query_filter=filter_dict,
+                )
             results = response.points
 
             # Convert results to a more usable format
@@ -593,7 +595,8 @@ class VectorDBInitializer:
             # Dense vector prefetch (always included)
             prefetch_queries.append(
                 Prefetch(
-                    query=NamedVector(name=DENSE_VECTOR_NAME, vector=dense_vector),
+                    query=dense_vector,
+                    using=DENSE_VECTOR_NAME,
                     limit=limit * 2,  # Fetch more candidates for fusion
                 )
             )
@@ -602,13 +605,11 @@ class VectorDBInitializer:
             if SPARSE_EMBEDDINGS_ENABLED and sparse_vector:
                 prefetch_queries.append(
                     Prefetch(
-                        query=NamedSparseVector(
-                            name=SPARSE_VECTOR_NAME,
-                            vector=QdrantSparseVector(
-                                indices=sparse_vector["indices"],
-                                values=sparse_vector["values"],
-                            ),
+                        query=QdrantSparseVector(
+                            indices=sparse_vector["indices"],
+                            values=sparse_vector["values"],
                         ),
+                        using=SPARSE_VECTOR_NAME,
                         limit=limit * 2,  # Fetch more candidates for fusion
                     )
                 )
@@ -628,7 +629,8 @@ class VectorDBInitializer:
                 # Fallback to dense-only search if sparse not available
                 response = self.client.query_points(
                     collection_name=collection_name,
-                    query=NamedVector(name=DENSE_VECTOR_NAME, vector=dense_vector),
+                    query=dense_vector,
+                    using=DENSE_VECTOR_NAME,
                     limit=limit,
                     query_filter=filter_dict,
                 )
