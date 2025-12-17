@@ -116,10 +116,17 @@ class CompleteTaskRequest(BaseModel):
     packet_id: str = Field(..., description="Packet ID being completed")
     agent_id: str = Field(..., description="Agent that completed the task")
     status: str = Field(..., description="Completion status: SUCCESS, FAILED, ERROR")
+    review_verdict: Optional[str] = Field(
+        default=None,
+        description="Review verdict: APPROVED, REJECTED, NEEDS_CHANGES",
+    )
     files_modified: List[str] = Field(default_factory=list)
     files_created: List[str] = Field(default_factory=list)
     output: Optional[str] = Field(default=None, description="Task output/result")
     error: Optional[str] = Field(default=None, description="Error message if failed")
+    workspace_path: Optional[str] = Field(default=None, description="Workspace path for PR")
+    branch_name: Optional[str] = Field(default=None, description="Branch name for PR")
+    repo_url: Optional[str] = Field(default=None, description="Repository URL")
 
 
 class CompleteTaskResponse(BaseModel):
@@ -476,6 +483,11 @@ async def get_queue_depth(
         raise HTTPException(status_code=500, detail=f"Failed to get queue depth: {e}")
 
 
+def get_approved_completions_key(user_id: str) -> str:
+    """Get the approved completions queue key for a user/team."""
+    return f"{user_id}:queue:approved_completions"
+
+
 @router.post("/tools/complete_task", response_model=CompleteTaskResponse)
 async def complete_task(
     request: CompleteTaskRequest, redis=Depends(get_redis)
@@ -483,8 +495,9 @@ async def complete_task(
     """
     Mark a task as complete and publish notification.
 
-    This stores the completion record and publishes to the
-    completion channel so orchestrators can be notified.
+    This stores the completion record and:
+    - If review_verdict is APPROVED: pushes to approved_completions queue for PR creation
+    - Otherwise: publishes to completion channel for monitoring
     """
     try:
         # Build completion event
@@ -493,10 +506,14 @@ async def complete_task(
             "agent_id": request.agent_id,
             "user_id": request.user_id,
             "status": request.status,
+            "review_verdict": request.review_verdict,
             "files_modified": request.files_modified,
             "files_created": request.files_created,
             "output": request.output,
             "error": request.error,
+            "workspace_path": request.workspace_path,
+            "branch_name": request.branch_name,
+            "repo_url": request.repo_url,
             "timestamp": time.time(),
         }
 
@@ -504,36 +521,45 @@ async def complete_task(
         completion_key = f"{request.user_id}:completions:{request.packet_id}"
         redis.setex(completion_key, 86400, json.dumps(completion_event))  # 24h TTL
 
-        # Publish to completion channel (per-packet for orchestrator)
+        # Publish to completion channel (per-packet for monitoring)
         channel = get_completion_channel(request.user_id, request.packet_id)
         subscribers = redis.publish(channel, json.dumps(completion_event))
 
-        # Publish to general publish_requests channel for Repo Manager
-        # This triggers PR creation when agents complete tasks successfully
-        publish_channel = f"{request.user_id}:publish_requests"
-        publish_message = {
-            "task_id": request.packet_id,
-            "packet_id": request.packet_id,
-            "workspace_id": request.packet_id,
-            "title": f"Agent completion: {request.packet_id}",
-            "body": request.output or f"Task completed with status: {request.status}",
-            "files": request.files_modified + request.files_created,
-            "status": request.status,
-            "agent_id": request.agent_id,
-            "timestamp": time.time(),
-        }
-        repo_subscribers = redis.publish(publish_channel, json.dumps(publish_message))
+        # If review_verdict is APPROVED, push to approved_completions queue
+        # for orchestrator to handle PR creation
+        queued_for_publish = False
+        if request.review_verdict == "APPROVED":
+            approved_queue_key = get_approved_completions_key(request.user_id)
+            # Include all fields needed for PR creation
+            publish_data = {
+                "packet_id": request.packet_id,
+                "agent_id": request.agent_id,
+                "user_id": request.user_id,
+                "workspace_path": request.workspace_path,
+                "branch_name": request.branch_name,
+                "repo_url": request.repo_url,
+                "title": request.output or f"Agent completion: {request.packet_id}",
+                "body": f"Reviewed and approved by {request.agent_id}",
+                "files": request.files_modified + request.files_created,
+                "timestamp": time.time(),
+            }
+            redis.lpush(approved_queue_key, json.dumps(publish_data))
+            queued_for_publish = True
+            logger.info(
+                f"Task {request.packet_id} APPROVED - queued for publish to {approved_queue_key}"
+            )
 
         logger.info(
             f"Task {request.packet_id} completed by {request.agent_id}, "
-            f"status={request.status}, notified={subscribers} subscribers, "
-            f"repo_manager={repo_subscribers} subscribers"
+            f"status={request.status}, verdict={request.review_verdict}, "
+            f"notified={subscribers}, queued_for_publish={queued_for_publish}"
         )
 
-        return CompleteTaskResponse(
-            success=True,
-            message=f"Completion recorded, {subscribers} subscriber(s) notified",
-        )
+        message = f"Completion recorded, {subscribers} subscriber(s) notified"
+        if queued_for_publish:
+            message += ", queued for PR creation"
+
+        return CompleteTaskResponse(success=True, message=message)
 
     except Exception as e:
         logger.error(f"Failed to complete task: {e}")
