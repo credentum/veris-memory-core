@@ -197,15 +197,16 @@ class RetrievalCore:
                         hyde_result = await hyde_generator.generate_hyde_embedding(effective_query)
 
                         if hyde_result.embedding and not hyde_result.error:
-                            # Search using hypothetical doc embedding
+                            # Search using hypothetical doc embedding + original query for hybrid
                             search_response = await self.dispatcher.search_by_embedding(
                                 embedding=hyde_result.embedding,
                                 options=search_options,
-                                search_mode=search_mode_enum
+                                search_mode=search_mode_enum,
+                                original_query=effective_query  # Pass original for sparse/BM25
                             )
                             hyde_used = True
                             logger.info(
-                                f"HyDE search completed: {len(search_response.results)} results, "
+                                f"HyDE+Hybrid search completed: {len(search_response.results)} results, "
                                 f"cache_hit={hyde_result.cache_hit}, "
                                 f"time={hyde_result.generation_time_ms:.2f}ms"
                             )

@@ -124,19 +124,25 @@ class QueryDispatcher:
         self,
         embedding: List[float],
         options: SearchOptions,
-        search_mode: SearchMode
+        search_mode: SearchMode,
+        original_query: str = None
     ) -> SearchResultResponse:
         """
-        Search using a pre-computed embedding vector.
+        Search using a pre-computed embedding vector with optional hybrid search.
 
         This method is used by HyDE (Hypothetical Document Embeddings) to search
         using the embedding of a hypothetical document rather than generating
         an embedding from the query text.
 
+        When original_query is provided, enables hybrid search by generating
+        sparse embeddings from the original query for BM25/keyword matching.
+
         Args:
             embedding: Pre-computed embedding vector
             options: Search configuration options
             search_mode: Which backends to use (primarily vector)
+            original_query: Original query text for sparse embedding generation.
+                           Enables hybrid search when provided.
 
         Returns:
             SearchResultResponse with results
@@ -157,8 +163,10 @@ class QueryDispatcher:
             )
 
         try:
-            # Use the vector backend's search_by_embedding method
-            results = await vector_backend.search_by_embedding(embedding, options)
+            # Use the vector backend's search_by_embedding method with original query for hybrid
+            results = await vector_backend.search_by_embedding(
+                embedding, options, original_query=original_query
+            )
 
             total_time = (time.time() - start_time) * 1000
 

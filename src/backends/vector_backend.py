@@ -141,18 +141,24 @@ class VectorBackend(BackendSearchInterface):
                 raise BackendSearchError(self.backend_name, error_msg, e)
 
     async def search_by_embedding(
-        self, embedding: List[float], options: SearchOptions
+        self, embedding: List[float], options: SearchOptions, original_query: str = None
     ) -> List[MemoryResult]:
         """
-        Search vector database using a pre-computed embedding.
+        Search vector database using a pre-computed embedding with optional hybrid search.
 
         This method is used by HyDE (Hypothetical Document Embeddings) to search
         using the embedding of a hypothetical document rather than generating
         an embedding from the query text.
 
+        When original_query is provided and hybrid search is available, generates
+        sparse embeddings from the original query to enable BM25/keyword matching
+        alongside the dense HyDE embedding.
+
         Args:
-            embedding: Pre-computed embedding vector
+            embedding: Pre-computed embedding vector (dense, from HyDE)
             options: Search configuration options
+            original_query: Original query text for sparse embedding generation.
+                           Enables hybrid search when provided.
 
         Returns:
             List of MemoryResult objects sorted by relevance score
@@ -165,9 +171,41 @@ class VectorBackend(BackendSearchInterface):
                 metadata["embedding_dimensions"] = len(embedding) if embedding else 0
                 metadata["search_type"] = "hyde"
 
-                # Perform vector search with pre-computed embedding
+                # Generate sparse embedding from original query for hybrid search
+                sparse_vector = None
+                if original_query and HYBRID_SEARCH_AVAILABLE and get_sparse_embedding_service:
+                    try:
+                        sparse_start = time.time()
+                        sparse_service = get_sparse_embedding_service()
+                        if not sparse_service.is_available():
+                            await sparse_service.initialize()
+
+                        if sparse_service.is_available():
+                            sparse_result = sparse_service.generate_sparse_embedding(original_query)
+                            if sparse_result:
+                                sparse_vector = sparse_result.to_dict()
+                                sparse_time = (time.time() - sparse_start) * 1000
+                                metadata["sparse_embedding_time_ms"] = sparse_time
+                                metadata["sparse_dimensions"] = len(sparse_vector.get("indices", []))
+                                backend_logger.debug(
+                                    f"HyDE+Hybrid: Generated sparse embedding from original query "
+                                    f"({len(sparse_vector.get('indices', []))} dims)"
+                                )
+                    except Exception as e:
+                        backend_logger.warning(f"Sparse embedding generation for HyDE failed: {e}")
+
+                # Perform vector search (hybrid if sparse available)
                 search_start = time.time()
-                raw_results = await self._perform_vector_search(embedding, options)
+                if sparse_vector:
+                    # Use hybrid search with HyDE dense + original query sparse
+                    raw_results = await self._perform_vector_search_with_sparse(
+                        embedding, sparse_vector, options
+                    )
+                    metadata["hybrid_search"] = True
+                else:
+                    # Fall back to dense-only search
+                    raw_results = await self._perform_vector_search(embedding, options)
+                    metadata["hybrid_search"] = False
                 search_time = (time.time() - search_start) * 1000
 
                 metadata["search_time_ms"] = search_time
@@ -185,6 +223,8 @@ class VectorBackend(BackendSearchInterface):
                 backend_logger.info(
                     "Vector search by embedding completed",
                     embedding_dims=len(embedding),
+                    hybrid=sparse_vector is not None,
+                    original_query_provided=original_query is not None,
                     **metadata
                 )
 
