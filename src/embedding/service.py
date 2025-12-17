@@ -422,7 +422,22 @@ class EmbeddingService:
             return full_text.strip()
 
         return str(content)
-    
+
+    def extract_text_for_embedding(self, content: Union[str, Dict[str, Any]]) -> str:
+        """
+        Public method to extract text from content for embedding.
+
+        This is useful for previewing what text will be embedded without
+        actually generating the embedding (e.g., in re-indexing scripts).
+
+        Args:
+            content: String or dict content to extract text from
+
+        Returns:
+            Extracted text that will be used for embedding generation
+        """
+        return self._extract_text(content)
+
     def _adjust_dimensions(self, embedding: List[float]) -> List[float]:
         """Adjust embedding dimensions to target size."""
         current_dim = len(embedding)

@@ -161,7 +161,8 @@ class EmbeddingReindexer:
 
     def preview_text_extraction(self, content: Dict[str, Any]) -> str:
         """Preview what text will be extracted for embedding."""
-        return self._embedding_service._extract_text(content)
+        # Use the public extract_text_for_embedding method
+        return self._embedding_service.extract_text_for_embedding(content)
 
     async def update_qdrant_embedding(
         self,
@@ -169,18 +170,22 @@ class EmbeddingReindexer:
         embedding: List[float],
         collection: str = "veris_memory"
     ) -> bool:
-        """Update embedding in Qdrant."""
-        from qdrant_client.models import PointStruct
+        """
+        Update ONLY the embedding vector in Qdrant, preserving existing payload.
+
+        Uses update_vectors() instead of upsert() to avoid overwriting metadata.
+        """
+        from qdrant_client.models import PointVectors
 
         try:
-            # Update the point with new embedding
-            self._qdrant_client.upsert(
+            # Use update_vectors to ONLY update the vector, not the payload
+            # This preserves all existing metadata in the point
+            self._qdrant_client.update_vectors(
                 collection_name=collection,
                 points=[
-                    PointStruct(
+                    PointVectors(
                         id=doc_id,
                         vector=embedding,
-                        payload={}  # Keep existing payload
                     )
                 ],
                 wait=True
