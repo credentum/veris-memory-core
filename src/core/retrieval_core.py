@@ -83,6 +83,8 @@ ENABLE_HYDE = os.getenv("HYDE_ENABLED", "false").lower() == "true"  # Disabled b
 ENABLE_CROSS_ENCODER = os.getenv("CROSS_ENCODER_RERANKER_ENABLED", "false").lower() == "true"
 CROSS_ENCODER_TOP_K = int(os.getenv("CROSS_ENCODER_TOP_K", "50"))  # Candidates to re-rank
 CROSS_ENCODER_RETURN_K = int(os.getenv("CROSS_ENCODER_RETURN_K", "10"))  # Results to return
+# Fallback threshold: if ALL cross-encoder scores are below this, use original vector results
+CROSS_ENCODER_FALLBACK_THRESHOLD = float(os.getenv("CROSS_ENCODER_FALLBACK_THRESHOLD", "-5.0"))
 
 
 class RetrievalCore:
@@ -326,14 +328,45 @@ class RetrievalCore:
                             ))
 
                     if reranked_results:
-                        search_response.results = reranked_results
-                        cross_encoder_used = True
-                        rerank_time_ms = (time.time() - rerank_start) * 1000
+                        # Check if ALL cross-encoder scores are below threshold
+                        # This indicates HyDE generated a poor hypothetical doc
+                        all_scores = [r.metadata.get("original_vector_score", r.score)
+                                     for r in reranked_results
+                                     if "original_vector_score" in r.metadata]
 
-                        logger.info(
-                            f"Cross-encoder re-ranking: {len(candidates)} candidates -> "
-                            f"{len(reranked_results)} results in {rerank_time_ms:.1f}ms"
-                        )
+                        # Get actual rerank scores (before we replaced with them)
+                        rerank_scores = [reranked_item.get("rerank_score", 0)
+                                        for reranked_item in reranked[:CROSS_ENCODER_RETURN_K]]
+
+                        if rerank_scores and all(s < CROSS_ENCODER_FALLBACK_THRESHOLD for s in rerank_scores):
+                            # All scores are very negative - cross-encoder found no good matches
+                            # Fall back to original vector search results
+                            rerank_time_ms = (time.time() - rerank_start) * 1000
+                            logger.warning(
+                                f"Cross-encoder fallback triggered: all {len(rerank_scores)} scores "
+                                f"below threshold {CROSS_ENCODER_FALLBACK_THRESHOLD} "
+                                f"(best={max(rerank_scores):.2f}, worst={min(rerank_scores):.2f}). "
+                                f"Using original vector results."
+                            )
+
+                            # Keep original results but mark that fallback was used
+                            for result in search_response.results[:CROSS_ENCODER_RETURN_K]:
+                                result.metadata["cross_encoder_fallback"] = True
+                                result.metadata["cross_encoder_best_score"] = max(rerank_scores)
+
+                            # Trim to RETURN_K
+                            search_response.results = search_response.results[:CROSS_ENCODER_RETURN_K]
+                            cross_encoder_used = False  # Mark as not effectively used
+                        else:
+                            # Normal case: use reranked results
+                            search_response.results = reranked_results
+                            cross_encoder_used = True
+                            rerank_time_ms = (time.time() - rerank_start) * 1000
+
+                            logger.info(
+                                f"Cross-encoder re-ranking: {len(candidates)} candidates -> "
+                                f"{len(reranked_results)} results in {rerank_time_ms:.1f}ms"
+                            )
 
                 except Exception as e:
                     logger.warning(f"Cross-encoder re-ranking failed, using original results: {e}")
