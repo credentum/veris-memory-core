@@ -9,6 +9,7 @@ Tests cover:
 - Task completion (complete_task)
 - Circuit breaker check/reset
 - Blocked packet management (blocked_packets, unblock_packet, block_packet)
+- Intervention escalation (escalate_intervention)
 """
 
 import json
@@ -386,6 +387,80 @@ class TestRedisKeyHelpers:
         key = queue_operations.get_circuit_breaker_key("pkt-456")
         assert key == "circuit_breaker:pkt-456"
 
+    def test_get_intervention_queue_key(self):
+        """Test intervention queue key format."""
+        key = queue_operations.get_intervention_queue_key("my_team")
+        assert key == "my_team:queue:intervention"
+
+
+class TestInterventionEndpoints:
+    """Tests for intervention queue operations."""
+
+    @pytest.mark.asyncio
+    async def test_escalate_intervention_success(self):
+        """Test successful escalation to intervention queue."""
+        mock_redis = Mock()
+        mock_redis.lpush.return_value = 1
+
+        request = queue_operations.EscalateInterventionRequest(
+            user_id="test_team",
+            intervention=queue_operations.InterventionData(
+                type="review_rejection_final",
+                packet_id="wp-001",
+                reason="Code review failed after max retries",
+                context={"issues": ["test failure", "lint error"]},
+                agent_id="coding_agent",
+            ),
+        )
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.escalate_intervention(request, redis=mock_redis)
+
+        assert result.success is True
+        assert result.queue_depth == 1
+        assert "wp-001" in result.message
+
+        # Verify Redis call
+        mock_redis.lpush.assert_called_once()
+        call_args = mock_redis.lpush.call_args
+        assert call_args[0][0] == "test_team:queue:intervention"
+
+        # Verify intervention data structure
+        intervention_json = call_args[0][1]
+        intervention_data = json.loads(intervention_json)
+        assert intervention_data["type"] == "review_rejection_final"
+        assert intervention_data["packet_id"] == "wp-001"
+        assert intervention_data["reason"] == "Code review failed after max retries"
+        assert intervention_data["agent_id"] == "coding_agent"
+        assert "timestamp" in intervention_data
+
+    @pytest.mark.asyncio
+    async def test_escalate_intervention_with_timestamp(self):
+        """Test escalation preserves provided timestamp."""
+        mock_redis = Mock()
+        mock_redis.lpush.return_value = 3
+
+        request = queue_operations.EscalateInterventionRequest(
+            user_id="dev_team",
+            intervention=queue_operations.InterventionData(
+                type="publish_failure",
+                packet_id="wp-002",
+                reason="PR creation failed",
+                timestamp="2025-01-15T12:00:00Z",
+                agent_id="orchestrator",
+            ),
+        )
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.escalate_intervention(request, redis=mock_redis)
+
+        assert result.success is True
+
+        # Verify timestamp was preserved
+        intervention_json = mock_redis.lpush.call_args[0][1]
+        intervention_data = json.loads(intervention_json)
+        assert intervention_data["timestamp"] == "2025-01-15T12:00:00Z"
+
 
 class TestRouteRegistration:
     """Tests for route registration."""
@@ -410,6 +485,7 @@ class TestRouteRegistration:
         assert "/tools/blocked_packets" in routes
         assert "/tools/unblock_packet" in routes
         assert "/tools/block_packet" in routes
+        assert "/tools/escalate_intervention" in routes
 
     def test_get_redis_raises_when_not_initialized(self):
         """Test that get_redis raises 503 when Redis not initialized."""
