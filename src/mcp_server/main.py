@@ -96,6 +96,19 @@ except ImportError:
     EMBEDDING_SERVICE_AVAILABLE = False
     generate_embedding_async = None
 
+# Sparse embedding service for hybrid search
+try:
+    from ..embedding.sparse_service import get_sparse_embedding_service
+    from ..storage.qdrant_client import SPARSE_EMBEDDINGS_ENABLED
+
+    SPARSE_SERVICE_AVAILABLE = True
+    logger.info(f"Sparse embedding service available (SPARSE_EMBEDDINGS_ENABLED={SPARSE_EMBEDDINGS_ENABLED})")
+except ImportError as e:
+    logger.warning(f"Sparse embedding service not available: {e}")
+    SPARSE_SERVICE_AVAILABLE = False
+    SPARSE_EMBEDDINGS_ENABLED = False
+    get_sparse_embedding_service = None
+
 # Health check constants
 HEALTH_CHECK_GRACE_PERIOD_DEFAULT = 60
 HEALTH_CHECK_MAX_RETRIES_DEFAULT = 3
@@ -2469,6 +2482,28 @@ async def store_context(
                 # Only store vector if embedding generation succeeded
                 if embedding is not None:
                     logger.info("Storing vector in Qdrant...")
+
+                    # Generate sparse embedding for hybrid search
+                    sparse_vector = None
+                    if SPARSE_EMBEDDINGS_ENABLED and SPARSE_SERVICE_AVAILABLE:
+                        try:
+                            # Create searchable text from content
+                            searchable_text = generate_searchable_text(request.content)
+                            if searchable_text:
+                                sparse_service = get_sparse_embedding_service()
+                                if not sparse_service.is_available():
+                                    await asyncio.to_thread(sparse_service.initialize)
+
+                                if sparse_service.is_available():
+                                    sparse_result = sparse_service.generate_sparse_embedding(searchable_text)
+                                    if sparse_result:
+                                        sparse_vector = sparse_result.to_dict()
+                                        logger.info(
+                                            f"Generated sparse embedding: {len(sparse_vector.get('indices', []))} non-zero dims"
+                                        )
+                        except Exception as sparse_err:
+                            logger.warning(f"Sparse embedding generation failed (continuing without): {sparse_err}")
+
                     # Run synchronous Qdrant call in thread pool to avoid blocking event loop
                     vector_id = await asyncio.to_thread(
                         qdrant_client.store_vector,
@@ -2482,8 +2517,9 @@ async def store_context(
                             "shared": request.shared,
                             "author": author or "unknown",
                         },
+                        sparse_vector=sparse_vector,
                     )
-                    logger.info(f"Successfully stored vector with ID: {vector_id}")
+                    logger.info(f"Successfully stored vector with ID: {vector_id} (hybrid={sparse_vector is not None})")
                 else:
                     logger.warning("Skipping vector storage - no embedding available")
                     vector_id = None
