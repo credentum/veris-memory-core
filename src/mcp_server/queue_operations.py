@@ -13,6 +13,7 @@ Endpoints:
 - POST /tools/circuit_breaker/reset - Reset hop counter
 - GET /tools/blocked_packets - List blocked packets
 - POST /tools/unblock_packet - Move packet from blocked to main queue
+- POST /tools/escalate_intervention - Escalate to intervention queue
 """
 
 import asyncio
@@ -189,6 +190,36 @@ class UnblockPacketResponse(BaseModel):
     queue_depth: int = 0
 
 
+class InterventionData(BaseModel):
+    """Intervention escalation data."""
+
+    type: str = Field(..., description="Escalation type (e.g., 'review_rejection_final')")
+    packet_id: str = Field(..., description="Work packet ID being escalated")
+    reason: str = Field(..., description="Human-readable reason for escalation")
+    context: Dict[str, Any] = Field(
+        default_factory=dict, description="Additional context (issues, feedback)"
+    )
+    timestamp: Optional[str] = Field(
+        default=None, description="ISO timestamp (auto-generated if not provided)"
+    )
+    agent_id: str = Field(default="unknown", description="Agent ID that triggered escalation")
+
+
+class EscalateInterventionRequest(BaseModel):
+    """Request to escalate to intervention queue."""
+
+    user_id: str = Field(..., description="Team/user ID for queue isolation")
+    intervention: InterventionData = Field(..., description="Intervention details")
+
+
+class EscalateInterventionResponse(BaseModel):
+    """Response after escalating to intervention queue."""
+
+    success: bool
+    queue_depth: int = 0
+    message: str = ""
+
+
 # =============================================================================
 # Redis Client Dependency
 # =============================================================================
@@ -325,6 +356,11 @@ def get_completion_channel(user_id: str, packet_id: str) -> str:
 def get_circuit_breaker_key(packet_id: str) -> str:
     """Get the circuit breaker counter key."""
     return f"circuit_breaker:{packet_id}"
+
+
+def get_intervention_queue_key(user_id: str) -> str:
+    """Get the intervention queue key for a user/team."""
+    return f"{user_id}:queue:intervention"
 
 
 # =============================================================================
@@ -778,6 +814,60 @@ async def block_packet(
     except Exception as e:
         logger.error(f"Failed to block packet: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to block packet: {e}")
+
+
+# =============================================================================
+# Intervention Queue Endpoints
+# =============================================================================
+
+
+@router.post("/tools/escalate_intervention", response_model=EscalateInterventionResponse)
+async def escalate_intervention(
+    request: EscalateInterventionRequest, redis=Depends(get_redis)
+) -> EscalateInterventionResponse:
+    """
+    Escalate a task to the intervention queue for human review.
+
+    Used when:
+    - Review rejection after max retries
+    - Task blocked and needs manual intervention
+    - Unexpected errors that require human judgment
+    - Product packets needing clarification
+
+    The intervention will be added to the user's intervention queue,
+    where it can be monitored and processed by human operators.
+    """
+    try:
+        queue_key = get_intervention_queue_key(request.user_id)
+
+        # Build intervention entry with timestamp if not provided
+        intervention_data = request.intervention.model_dump()
+        if not intervention_data.get("timestamp"):
+            from datetime import datetime, timezone
+            intervention_data["timestamp"] = datetime.now(timezone.utc).isoformat()
+
+        intervention_entry = json.dumps(intervention_data)
+
+        # LPUSH to intervention queue
+        queue_depth = redis.lpush(queue_key, intervention_entry)
+
+        logger.info(
+            f"Escalated to intervention: packet_id={request.intervention.packet_id}, "
+            f"type={request.intervention.type}, reason={request.intervention.reason[:50]}..., "
+            f"queue_depth={queue_depth}"
+        )
+
+        return EscalateInterventionResponse(
+            success=True,
+            queue_depth=queue_depth,
+            message=f"Escalated {request.intervention.packet_id} to intervention queue",
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to escalate to intervention: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to escalate to intervention: {e}"
+        )
 
 
 # =============================================================================
