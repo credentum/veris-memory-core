@@ -37,7 +37,11 @@ class HyDEConfig:
     cache_enabled: bool = True
     cache_ttl_seconds: int = 3600
     fallback_to_mq: bool = True  # Fall back to template MQE on failure
-    system_prompt: str = "You are a technical documentation assistant for Veris Memory, a context storage system."
+    system_prompt: str = (
+        "You are an assistant for Veris Memory, a context storage system. "
+        "Answer questions about technical configuration, governance decisions, "
+        "ethical guidelines, architectural patterns, and policy documents."
+    )
     # Timeout for LLM calls (seconds) - prevents hanging on slow/unresponsive APIs
     llm_timeout_seconds: float = 30.0
 
@@ -68,7 +72,8 @@ class HyDEGenerator:
     """
 
     PROMPT_TEMPLATE = """Write a short, informative paragraph that directly answers this question.
-Be specific and technical. Focus on configuration, setup, or implementation details.
+Be specific and focus on the topic being asked about, whether it's technical configuration,
+governance decisions, ethical guidelines, architectural patterns, or policy documents.
 Do not include any preamble like "Here's the answer" - just provide the answer directly.
 
 Question: {query}
