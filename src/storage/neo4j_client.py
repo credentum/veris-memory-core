@@ -10,6 +10,7 @@ This module:
 """
 
 import logging
+import re
 import sys
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -568,19 +569,26 @@ class Neo4jInitializer:
         if not relationship_type or not isinstance(relationship_type, str):
             raise ValueError("Relationship type must be a non-empty string")
 
+        # Sanitize relationship type - Neo4j relationship types can only contain
+        # alphanumeric characters and underscores, must start with a letter
+        sanitized_type = re.sub(r'[^A-Za-z0-9_]', '_', relationship_type.upper())
+        if not sanitized_type or not sanitized_type[0].isalpha():
+            sanitized_type = 'REL_' + sanitized_type
+
         try:
             with self.driver.session(database=self.database) as session:
-                result = session.run(
-                    """
+                # Build query dynamically since Neo4j doesn't support parameterized relationship types
+                cypher = f"""
                     MATCH (a), (b)
                     WHERE id(a) = $start_id AND id(b) = $end_id
-                    CREATE (a)-[r:TYPE]->(b)
-                    SET r = $properties, r.type = $rel_type
+                    CREATE (a)-[r:{sanitized_type}]->(b)
+                    SET r = $properties
                     RETURN id(r) as rel_id
-                    """,
+                    """
+                result = session.run(
+                    cypher,
                     start_id=start_id,
                     end_id=end_id,
-                    rel_type=relationship_type,
                     properties=properties or {},
                 )
                 record = result.single()
