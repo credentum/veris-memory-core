@@ -195,6 +195,9 @@ class Neo4jInitializer:
             ("Metric", "name"),
             # Version tracking
             ("Version", "hash"),
+            # Audit provenance (Phase 2)
+            ("Artifact", "id"),
+            ("AuditEntry", "id"),
         ]
 
         try:
