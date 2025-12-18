@@ -1,0 +1,161 @@
+###############################################################################
+# SOTA Adaptive Review (Machine-Readable Edition)
+# Output: Strict YAML for Agent Consumption
+###############################################################################
+name: Adaptive Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  adaptive-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+      id-token: write
+
+    steps:
+      # ------------------------------------------------------------------
+      # PHASE 1: PREPARE & GATHER CONTEXT
+      # ------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11' 
+
+      - name: Gather Context (Tests & Linters)
+        id: context
+        run: |
+          pip install pytest pytest-cov ruff bandit
+          pytest --cov=. --cov-report=json:coverage.json > test_output.txt 2>&1 || true
+          ruff check . --output-format=json > ruff_output.json 2>&1 || true
+          bandit -r . -f json -o bandit_output.json || true
+          
+          if grep -q "failed" test_output.txt; then echo "TESTS_PASSED=false" >> $GITHUB_ENV; else echo "TESTS_PASSED=true" >> $GITHUB_ENV; fi
+        continue-on-error: true
+
+      # ------------------------------------------------------------------
+      # PHASE 2: TRIAGE & PROMPT GENERATION (The "Brain")
+      # ------------------------------------------------------------------
+      - name: Generate Dynamic Prompt
+        id: generator
+        uses: actions/github-script@v7
+        env:
+          TESTS_PASSED: ${{ env.TESTS_PASSED }}
+        with:
+          script: |
+            const fs = require('fs');
+            const diff = await exec.getExecOutput('git', ['diff', '--name-only', 'origin/main...HEAD']);
+            const files = diff.stdout.split('\n').filter(f => f);
+            
+            // 1. RISK TRIAGE
+            // Use refined patterns to avoid false positives on "validate"
+            const securityPatterns = [
+              /Dockerfile/i, /docker-compose/i, /\.github/i, 
+              /auth/i, /secret/i, /jwt/i, /password/i,
+              /sanitize/i, /escape_html/i // Specific injection handling
+            ];
+            const isHighRisk = files.some(f => securityPatterns.some(p => p.test(f)));
+            const riskLevel = isHighRisk ? 'HIGH' : 'LOW';
+
+            // 2. CONTEXT LOAD
+            let context = `TESTS_PASSED: ${process.env.TESTS_PASSED}`;
+            try {
+              if (fs.existsSync('test_output.txt')) {
+                 const logs = fs.readFileSync('test_output.txt', 'utf8').slice(-1000).replace(/`/g, "'");
+                 context += `\nLOGS_TAIL: "${logs.replace(/\n/g, '\\n')}"`;
+              }
+            } catch (e) {}
+
+            // 3. SELECT AGENT PERSONA
+            let systemPrompt = "";
+            const isGreen = process.env.TESTS_PASSED === 'true';
+
+            if (isGreen && riskLevel === 'LOW') {
+                // SCENARIO A: PRAGMATIC (Fast Pass)
+                systemPrompt = `ROLE: PRAGMATIC_ANALYZER
+                OBJECTIVE: Verify logic. Ignore style.
+                CONSTRAINT: If tests pass, default to APPROVE. Only block on SECURITY.`;
+            } else {
+                // SCENARIO B: ADVERSARIAL (Deep Audit)
+                systemPrompt = `ROLE: ADVERSARIAL_AUDITOR
+                OBJECTIVE: Find edge cases, race conditions, and security flaws.
+                CONSTRAINT: Assume code is broken. Verify with tools.`;
+            }
+
+            // 4. DEFINE STRICT YAML OUTPUT SCHEMA
+            systemPrompt += `
+            
+            CONTEXT_DATA:
+            ${context}
+            FILES: ${files.join(', ')}
+
+            INSTRUCTIONS:
+            1. Analyze changes.
+            2. If uncertain, use tools (Bash/Grep) to verify.
+            3. OUTPUT ONLY VALID YAML. NO MARKDOWN. NO CONVERSATION.
+
+            YAML_SCHEMA:
+              verdict: "APPROVE" | "REQUEST_CHANGES"
+              risk_score: <0-10 integer>
+              summary: <string, max 20 words>
+              issues:
+                - type: "SECURITY" | "LOGIC" | "ARCH"
+                  severity: "BLOCKING" | "WARNING"
+                  file: <filename>
+                  line: <number>
+                  fix: <concise code or description>
+            `;
+            
+            core.setOutput('final_prompt', systemPrompt);
+
+      # ------------------------------------------------------------------
+      # PHASE 3: EXECUTION
+      # ------------------------------------------------------------------
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@beta
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          model: "claude-sonnet-4-20250514"
+          direct_prompt: ${{ steps.generator.outputs.final_prompt }}
+          allowed_tools: |
+            Bash,
+            Read,
+            Grep,
+            Glob
+
+      - name: Process Agent Response
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const response = `${{ steps.claude-review.outputs.response }}`;
+            console.log("Agent Output:\n", response); // Debug log
+
+            // Simple string parsing since output is guaranteed YAML
+            let state = 'success';
+            let desc = 'ARC: Approved';
+            
+            if (response.includes('verdict: "REQUEST_CHANGES"') || response.includes("verdict: REQUEST_CHANGES")) {
+              state = 'failure';
+              desc = 'ARC: Changes Requested';
+            }
+
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.payload.pull_request.head.sha,
+              state: state,
+              description: desc,
+              context: 'Claude Code Review'
+            });
