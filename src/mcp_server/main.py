@@ -4900,5 +4900,259 @@ async def get_audit_stats() -> Dict[str, Any]:
     return result
 
 
+# ============================================================================
+# Phase 3: Retention & Learning Endpoints
+# ============================================================================
+
+
+class RetentionProcessRequest(BaseModel):
+    """Request model for retention processing."""
+
+    batch_size: int = Field(100, ge=1, le=1000, description="Entries per batch")
+    max_entries: Optional[int] = Field(None, ge=1, description="Max entries to process")
+    dry_run: bool = Field(True, description="If true, report actions without executing")
+
+
+class PrecedentQueryRequest(BaseModel):
+    """Request model for precedent queries."""
+
+    query: str = Field(..., description="Semantic search query")
+    precedent_type: Optional[str] = Field(
+        None,
+        pattern="^(failure|success|decision|skill|pattern)$",
+        description="Filter by precedent type",
+    )
+    limit: int = Field(5, ge=1, le=50, description="Maximum results")
+
+
+class StorePrecedentRequest(BaseModel):
+    """Request model for storing a precedent."""
+
+    precedent_type: str = Field(
+        ...,
+        pattern="^(failure|success|decision|skill|pattern)$",
+        description="Type of precedent",
+    )
+    title: str = Field(..., min_length=5, max_length=200, description="Short title")
+    learning: str = Field(..., min_length=10, description="The actual learning/insight")
+    context: Optional[Dict[str, Any]] = Field(None, description="Additional context")
+    tags: Optional[List[str]] = Field(None, description="Tags for retrieval")
+    source_trajectory: Optional[str] = Field(None, description="Source trajectory ID")
+    actor_id: Optional[str] = Field(None, description="Actor that created this")
+
+
+@app.post("/audit/retention/process")
+async def process_retention(
+    request: RetentionProcessRequest,
+) -> Dict[str, Any]:
+    """
+    Process audit entries according to retention policy.
+
+    Actions taken based on RetentionClass and age:
+    - EPHEMERAL (>7 days): Delete
+    - TRACE (>30 days): Compress
+    - TRACE (>90 days): Delete
+    - SCAR (>90 days): Archive (never delete)
+
+    Use dry_run=true to preview actions without executing.
+    """
+    if not qdrant_client:
+        return {
+            "success": False,
+            "error": "Qdrant not available",
+        }
+
+    try:
+        from ..audit import RetentionManager
+
+        manager = RetentionManager(
+            qdrant_client=qdrant_client,
+            collection_name="audit_log",
+            dry_run=request.dry_run,
+        )
+
+        result = await manager.process_retention(
+            batch_size=request.batch_size,
+            max_entries=request.max_entries,
+        )
+
+        return result
+
+    except ImportError:
+        return {
+            "success": False,
+            "error": "Retention module not available",
+        }
+    except Exception as e:
+        logger.error(f"Retention processing failed: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+        }
+
+
+@app.post("/learning/precedents/query")
+async def query_precedents(
+    request: PrecedentQueryRequest,
+) -> Dict[str, Any]:
+    """
+    Query precedents by semantic similarity.
+
+    Agents use this to find relevant learnings before attempting tasks.
+    For example: "How to handle API timeouts" returns failure and success
+    precedents related to timeout handling.
+    """
+    if not qdrant_client:
+        return {
+            "success": False,
+            "error": "Qdrant not available",
+            "precedents": [],
+        }
+
+    try:
+        from ..audit import LearningExtractor, PrecedentType
+
+        extractor = LearningExtractor(
+            veris_client=qdrant_client,
+            collection_name="context_embeddings",
+        )
+
+        # Convert string to enum if provided
+        precedent_type = None
+        if request.precedent_type:
+            precedent_type = PrecedentType(request.precedent_type)
+
+        precedents = await extractor.query_precedents(
+            query=request.query,
+            precedent_type=precedent_type,
+            limit=request.limit,
+        )
+
+        return {
+            "success": True,
+            "query": request.query,
+            "precedent_type": request.precedent_type,
+            "precedents": precedents,
+            "count": len(precedents),
+        }
+
+    except ImportError:
+        return {
+            "success": False,
+            "error": "Learning module not available",
+            "precedents": [],
+        }
+    except Exception as e:
+        logger.error(f"Precedent query failed: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "precedents": [],
+        }
+
+
+@app.post("/learning/precedents/store")
+async def store_precedent(
+    request: StorePrecedentRequest,
+    api_key_info: Optional[APIKeyInfo] = (
+        Depends(verify_api_key) if API_KEY_AUTH_AVAILABLE else None
+    ),
+) -> Dict[str, Any]:
+    """
+    Store a precedent for agent learning.
+
+    Agents call this after completing tasks to record learnings.
+    The learning is stored in Veris Memory with embeddings for
+    semantic retrieval.
+    """
+    if not qdrant_client:
+        return {
+            "success": False,
+            "error": "Qdrant not available",
+        }
+
+    try:
+        from ..audit import LearningExtractor, PrecedentType
+
+        extractor = LearningExtractor(
+            veris_client=qdrant_client,
+            collection_name="context_embeddings",
+        )
+
+        # Get actor from API key if not provided
+        actor_id = request.actor_id
+        if not actor_id and api_key_info:
+            actor_id = api_key_info.user_id
+
+        precedent_id = await extractor.store_precedent(
+            precedent_type=PrecedentType(request.precedent_type),
+            title=request.title,
+            learning=request.learning,
+            context=request.context,
+            tags=request.tags,
+            source_trajectory=request.source_trajectory,
+            actor_id=actor_id,
+        )
+
+        if precedent_id:
+            return {
+                "success": True,
+                "precedent_id": precedent_id,
+                "message": f"Precedent stored: {request.title}",
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Failed to store precedent - check logs",
+            }
+
+    except ImportError:
+        return {
+            "success": False,
+            "error": "Learning module not available",
+        }
+    except Exception as e:
+        logger.error(f"Store precedent failed: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+        }
+
+
+@app.get("/learning/stats")
+async def get_learning_stats() -> Dict[str, Any]:
+    """
+    Get learning and retention statistics.
+    """
+    result = {
+        "success": True,
+        "retention": None,
+        "learning": None,
+    }
+
+    if qdrant_client:
+        try:
+            from ..audit import RetentionManager, LearningExtractor
+
+            retention_mgr = RetentionManager(
+                qdrant_client=qdrant_client,
+                collection_name="audit_log",
+            )
+            result["retention"] = retention_mgr.get_stats()
+
+            learning_ext = LearningExtractor(
+                veris_client=qdrant_client,
+            )
+            result["learning"] = learning_ext.get_stats()
+
+        except ImportError:
+            result["retention"] = {"error": "Module not available"}
+            result["learning"] = {"error": "Module not available"}
+        except Exception as e:
+            result["error"] = str(e)
+
+    return result
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("MCP_SERVER_PORT", 8000)))
