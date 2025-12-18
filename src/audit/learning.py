@@ -367,40 +367,40 @@ class LearningExtractor:
             if not embedding:
                 return []
 
-            # Build filter
-            filter_conditions = [{"key": "type", "match": {"value": "precedent"}}]
-
-            if precedent_type:
-                filter_conditions.append({
-                    "key": "precedent_type",
-                    "match": {"value": precedent_type.value},
-                })
-
-            # Search
+            # Build filter using Qdrant Filter model
             from qdrant_client.http import models as qdrant_models
 
+            filter_conditions = [
+                qdrant_models.FieldCondition(
+                    key="type",
+                    match=qdrant_models.MatchValue(value="precedent"),
+                )
+            ]
+
+            if precedent_type:
+                filter_conditions.append(
+                    qdrant_models.FieldCondition(
+                        key="precedent_type",
+                        match=qdrant_models.MatchValue(value=precedent_type.value),
+                    )
+                )
+
+            # Search using VectorDBInitializer interface
+            query_filter = qdrant_models.Filter(must=filter_conditions)
+
             results = self._veris.search(
-                collection_name=self._collection,
                 query_vector=embedding,
                 limit=limit,
-                query_filter=qdrant_models.Filter(
-                    must=[
-                        qdrant_models.FieldCondition(
-                            key=f["key"],
-                            match=qdrant_models.MatchValue(**f["match"]),
-                        )
-                        for f in filter_conditions
-                    ]
-                ),
+                filter_dict=query_filter,
             )
 
             precedents = []
             for hit in results:
-                payload = hit.payload or {}
+                payload = hit.get("payload", {})
                 content = payload.get("content", {})
                 precedents.append({
-                    "id": hit.id,
-                    "score": hit.score,
+                    "id": hit.get("id"),
+                    "score": hit.get("score"),
                     **content,
                 })
 
