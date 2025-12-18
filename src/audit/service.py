@@ -15,6 +15,7 @@ Coordinates:
 """
 
 import os
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
@@ -113,7 +114,7 @@ class AuditService:
             signer_backend=self._signer.backend_type if self._signer else None,
         )
 
-    def _ensure_collection(self):
+    def _ensure_collection(self) -> None:
         """Ensure the audit_log collection exists with proper config."""
         collections = self._qdrant.get_collections().collections
         exists = any(c.name == self.COLLECTION_NAME for c in collections)
@@ -155,7 +156,7 @@ class AuditService:
             return AuditChainHead.from_redis_dict(data)
         return None
 
-    def _update_chain_head(self, entry: AuditEntry):
+    def _update_chain_head(self, entry: AuditEntry) -> None:
         """Update chain head in Redis."""
         head = AuditChainHead(
             chain_id="main",
@@ -242,11 +243,15 @@ class AuditService:
             # In production, could embed the action description for searchability
             dummy_vector = [0.0] * self.VECTOR_SIZE
 
+            # Qdrant requires UUID or integer for point IDs
+            # Hash composite_key to create deterministic UUID (append-only semantics preserved)
+            point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, entry.composite_key))
+
             self._qdrant.upsert(
                 collection_name=self.COLLECTION_NAME,
                 points=[
                     qdrant_models.PointStruct(
-                        id=entry.composite_key,  # Composite key prevents overwrites
+                        id=point_id,
                         vector=dummy_vector,
                         payload=entry.to_qdrant_payload(),
                     )
@@ -276,18 +281,21 @@ class AuditService:
         """Synchronous version of log_action."""
         import asyncio
 
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # If we're already in an async context, create a task
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(
-                    asyncio.run, self.log_action(**kwargs)
-                )
-                return future.result()
-        else:
+        try:
+            # Check if we're in an async context
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop - safe to use asyncio.run()
             return asyncio.run(self.log_action(**kwargs))
+
+        # Already in async context - run in thread pool
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            future = pool.submit(
+                asyncio.run, self.log_action(**kwargs)
+            )
+            return future.result()
 
     async def query(
         self,

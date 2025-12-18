@@ -68,7 +68,7 @@ class WriteAheadLog:
         # Initialize or resume from existing WAL
         self._initialize()
 
-    def _initialize(self):
+    def _initialize(self) -> None:
         """Initialize WAL, resuming from existing file if present."""
         # Find the latest WAL file
         existing_files = sorted(self.log_dir.glob(f"{self.log_prefix}_*.jsonl"))
@@ -79,7 +79,7 @@ class WriteAheadLog:
         else:
             self._start_new_file()
 
-    def _start_new_file(self):
+    def _start_new_file(self) -> None:
         """Start a new WAL file."""
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         filename = f"{self.log_prefix}_{timestamp}.jsonl"
@@ -87,12 +87,14 @@ class WriteAheadLog:
 
         self._close_current_file()
         self._file_handle = open(self._current_file, "a")
+        # Acquire exclusive lock immediately after opening
+        fcntl.flock(self._file_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         self._sequence_number = 0
         self._prev_line_hash = None
 
         logger.info(f"Started new WAL file: {self._current_file}")
 
-    def _resume_from_file(self, filepath: Path):
+    def _resume_from_file(self, filepath: Path) -> None:
         """Resume from an existing WAL file."""
         logger.info(f"Resuming WAL from: {filepath}")
 
@@ -119,14 +121,18 @@ class WriteAheadLog:
                 self._prev_line_hash = None
 
         self._file_handle = open(filepath, "a")
+        # Acquire exclusive lock immediately after opening
+        fcntl.flock(self._file_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         self._bytes_written = filepath.stat().st_size
 
-    def _close_current_file(self):
-        """Close current file handle."""
+    def _close_current_file(self) -> None:
+        """Close current file handle and release lock."""
         if self._file_handle:
             try:
                 self._file_handle.flush()
                 os.fsync(self._file_handle.fileno())
+                # Release exclusive lock before closing
+                fcntl.flock(self._file_handle.fileno(), fcntl.LOCK_UN)
                 self._file_handle.close()
             except Exception as e:
                 logger.warning(f"Error closing WAL file: {e}")
