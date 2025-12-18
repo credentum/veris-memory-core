@@ -131,6 +131,19 @@ class CompleteTaskRequest(BaseModel):
     parent_packet_id: Optional[str] = Field(
         default=None, description="Parent product packet ID for workspace lookup"
     )
+    # Review data for PR body (agent learning signal)
+    review_confidence: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0, description="Reviewer confidence score (0.0-1.0)"
+    )
+    review_issues_count: int = Field(
+        default=0, description="Number of issues found by reviewer"
+    )
+    review_top_issues: List[str] = Field(
+        default_factory=list, description="Top issues found (for PR body)"
+    )
+    test_results: Optional[Dict[str, Any]] = Field(
+        default=None, description="Test results: {passed, total_tests, coverage_percent}"
+    )
 
 
 class CompleteTaskResponse(BaseModel):
@@ -570,7 +583,7 @@ async def complete_task(
         queued_for_publish = False
         if request.review_verdict == "APPROVED":
             approved_queue_key = get_approved_completions_key(request.user_id)
-            # Include all fields needed for PR creation
+            # Include all fields needed for PR creation + review data for learning
             publish_data = {
                 "packet_id": request.packet_id,
                 "agent_id": request.agent_id,
@@ -581,8 +594,15 @@ async def complete_task(
                 "parent_packet_id": request.parent_packet_id,  # For workspace lookup
                 "title": request.output or f"Agent completion: {request.packet_id}",
                 "body": f"Reviewed and approved by {request.agent_id}",
-                "files": request.files_modified + request.files_created,
                 "timestamp": time.time(),
+                # Review data for PR body (agent learning signal)
+                "verdict": request.review_verdict,
+                "confidence": request.review_confidence,
+                "issues_count": request.review_issues_count,
+                "top_issues": request.review_top_issues,
+                "test_results": request.test_results,
+                "files_modified": request.files_modified,
+                "files_created": request.files_created,
             }
             redis.lpush(approved_queue_key, json.dumps(publish_data))
             queued_for_publish = True
