@@ -12,7 +12,7 @@ This module:
 import logging
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import click
 import yaml
@@ -714,6 +714,64 @@ class VectorDBInitializer:
         """Close the client connection (no-op for Qdrant client)."""
         # Qdrant client doesn't require explicit closing
         pass
+
+    # === Delegation methods for RetentionManager compatibility ===
+
+    def scroll(
+        self,
+        collection_name: str,
+        limit: int = 10,
+        offset: Any = None,
+        with_payload: bool = True,
+        with_vectors: bool = False,
+    ) -> Tuple[List[Any], Any]:
+        """Scroll through collection entries.
+
+        Delegates to underlying Qdrant client for retention processing.
+        """
+        if not self.client:
+            raise RuntimeError("Qdrant client not connected")
+        return self.client.scroll(
+            collection_name=collection_name,
+            limit=limit,
+            offset=offset,
+            with_payload=with_payload,
+            with_vectors=with_vectors,
+        )
+
+    def set_payload(
+        self,
+        collection_name: str,
+        payload: Dict[str, Any],
+        points: List[Any],
+    ) -> None:
+        """Update payload on points.
+
+        Delegates to underlying Qdrant client for retention processing.
+        """
+        if not self.client:
+            raise RuntimeError("Qdrant client not connected")
+        self.client.set_payload(
+            collection_name=collection_name,
+            payload=payload,
+            points=points,
+        )
+
+    def delete(
+        self,
+        collection_name: str,
+        points_selector: Any,
+    ) -> None:
+        """Delete points from collection.
+
+        Delegates to underlying Qdrant client for retention processing.
+        """
+        if not self.client:
+            raise RuntimeError("Qdrant client not connected")
+        self.client.delete(
+            collection_name=collection_name,
+            points_selector=points_selector,
+        )
 
 
 @click.command()
