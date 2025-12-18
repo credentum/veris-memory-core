@@ -360,9 +360,13 @@ class EmbeddingService:
         
         raise EmbeddingError(f"All {self.config.max_retries} attempts failed. Last error: {last_error}")
     
-    def _extract_text(self, content: Union[str, Dict[str, Any]]) -> str:
+    def _extract_text(self, content: Union[str, Dict[str, Any]], depth: int = 0) -> str:
         """
         Extract text from content for embedding with contextual headers.
+
+        RECURSIVE EXTRACTION: Now extracts from ALL nested dicts and lists,
+        not just top-level fields. This ensures rich nested content like
+        'features.precedent_storage' or 'usage_guide.steps' gets embedded.
 
         Uses newline separators to prevent "concept bleed" where the embedding
         model might interpret adjacent values as a single phrase.
@@ -372,10 +376,28 @@ class EmbeddingService:
           TYPE: ...
           SEVERITY: ...
 
-          [body content joined with spaces]
+          [body content joined with spaces, including nested content]
+
+        Args:
+            content: String or dict content to extract text from
+            depth: Current recursion depth (max 5 to prevent infinite loops)
         """
+        # Prevent infinite recursion
+        if depth > 5:
+            return str(content) if content else ""
+
         if isinstance(content, str):
             return content
+
+        if isinstance(content, list):
+            # Recursively extract from list items
+            list_parts = []
+            for item in content:
+                if item:
+                    extracted = self._extract_text(item, depth + 1)
+                    if extracted:
+                        list_parts.append(extracted)
+            return " ".join(list_parts)
 
         if isinstance(content, dict):
             # --- SECTION 1: METADATA HEADERS ---
@@ -384,26 +406,53 @@ class EmbeddingService:
             header_parts = []
             for field in header_fields:
                 if field in content and content[field]:
-                    # Format: "FIELD_NAME: Value" - uppercase field names for clarity
-                    header_parts.append(f"{field.upper()}: {content[field]}")
+                    value = content[field]
+                    if isinstance(value, str):
+                        header_parts.append(f"{field.upper()}: {value}")
 
-            # --- SECTION 2: CORE CONTENT ---
+            # --- SECTION 2: CORE CONTENT (priority fields) ---
             # These fields contain the main semantic content
-            content_fields = [
+            priority_fields = [
                 "proposal", "description", "text", "content", "body",
                 "key_principle", "finding", "decision", "summary",
-                "rationale", "diagnosis", "message"
+                "rationale", "diagnosis", "message", "learning"
             ]
             body_parts = []
-            for field in content_fields:
+            processed_fields = set(header_fields + priority_fields)
+
+            for field in priority_fields:
                 if field in content and content[field]:
                     value = content[field]
-                    # Handle nested dicts (like panel_analysis)
-                    if isinstance(value, dict):
-                        import json
-                        body_parts.append(json.dumps(value, ensure_ascii=False))
-                    else:
-                        body_parts.append(str(value))
+                    extracted = self._extract_text(value, depth + 1)
+                    if extracted:
+                        body_parts.append(extracted)
+
+            # --- SECTION 3: RECURSIVE EXTRACTION OF REMAINING FIELDS ---
+            # Extract from ALL other fields (nested dicts, lists, etc.)
+            # This ensures nothing gets "lobotomized"
+            for key, value in content.items():
+                if key in processed_fields:
+                    continue  # Already processed
+                if key.startswith("_"):
+                    continue  # Skip private/internal fields
+                if value is None:
+                    continue
+
+                # Recursively extract from nested content
+                if isinstance(value, dict):
+                    nested_text = self._extract_text(value, depth + 1)
+                    if nested_text:
+                        # Include key name for context
+                        body_parts.append(f"{key}: {nested_text}")
+                elif isinstance(value, list):
+                    list_text = self._extract_text(value, depth + 1)
+                    if list_text:
+                        body_parts.append(f"{key}: {list_text}")
+                elif isinstance(value, str) and value.strip():
+                    body_parts.append(f"{key}: {value}")
+                elif isinstance(value, (int, float, bool)):
+                    # Include numeric/boolean values with context
+                    body_parts.append(f"{key}: {value}")
 
             # --- COMBINE WITH PROPER SEPARATORS ---
             # Headers separated by newlines, body joined with spaces
@@ -415,13 +464,13 @@ class EmbeddingService:
             elif body_parts:
                 full_text = " ".join(body_parts)
             else:
-                # Fallback: JSON representation of entire content
-                import json
-                full_text = json.dumps(content, sort_keys=True, ensure_ascii=False)
+                # Fallback: empty string (don't dump JSON - it's not searchable)
+                full_text = ""
 
             return full_text.strip()
 
-        return str(content)
+        # Handle other types (int, float, bool, etc.)
+        return str(content) if content else ""
 
     def extract_text_for_embedding(self, content: Union[str, Dict[str, Any]]) -> str:
         """

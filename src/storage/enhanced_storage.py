@@ -329,31 +329,74 @@ class EnhancedStorageOrchestrator:
 
         return response
 
-    def _extract_text_content(self, content: Any) -> str:
-        """Extract text content for indexing from various content types."""
+    def _extract_text_content(self, content: Any, depth: int = 0) -> str:
+        """Extract text content for indexing from various content types.
+
+        RECURSIVE EXTRACTION: Now extracts from ALL nested dicts and lists,
+        ensuring rich nested content gets properly indexed for search.
+
+        Args:
+            content: Content to extract text from
+            depth: Current recursion depth (max 5 to prevent infinite loops)
+        """
+        # Prevent infinite recursion
+        if depth > 5:
+            return str(content) if content else ""
+
         if isinstance(content, str):
             return content
-        elif isinstance(content, dict):
-            # Try common text fields
-            text_fields = ["text", "content", "body", "description", "title", "summary"]
-            for field in text_fields:
-                if field in content and isinstance(content[field], str):
-                    return content[field]
 
-            # Combine title and description/content
-            title = content.get("title", "")
-            description = content.get("description", content.get("content", ""))
-            if title or description:
-                return f"{title} {description}".strip()
+        if isinstance(content, list):
+            # Recursively extract from list items
+            list_parts = []
+            for item in content:
+                if item:
+                    extracted = self._extract_text_content(item, depth + 1)
+                    if extracted:
+                        list_parts.append(extracted)
+            return " ".join(list_parts)
 
-            # Fallback: join all string values
+        if isinstance(content, dict):
             text_parts = []
+
+            # Priority fields first (title, summary, etc.)
+            priority_fields = ["title", "summary", "description", "text", "content", "body", "learning"]
+            for field in priority_fields:
+                if field in content:
+                    value = content[field]
+                    if isinstance(value, str) and value.strip():
+                        text_parts.append(value)
+                    elif isinstance(value, (dict, list)):
+                        extracted = self._extract_text_content(value, depth + 1)
+                        if extracted:
+                            text_parts.append(extracted)
+
+            # Then recursively extract from all other fields
+            processed = set(priority_fields)
             for key, value in content.items():
+                if key in processed:
+                    continue
+                if key.startswith("_"):
+                    continue
+                if value is None:
+                    continue
+
                 if isinstance(value, str) and value.strip():
-                    text_parts.append(value)
-            return " ".join(text_parts) if text_parts else str(content)
-        else:
-            return str(content)
+                    text_parts.append(f"{key}: {value}")
+                elif isinstance(value, dict):
+                    nested = self._extract_text_content(value, depth + 1)
+                    if nested:
+                        text_parts.append(f"{key}: {nested}")
+                elif isinstance(value, list):
+                    list_text = self._extract_text_content(value, depth + 1)
+                    if list_text:
+                        text_parts.append(f"{key}: {list_text}")
+                elif isinstance(value, (int, float, bool)):
+                    text_parts.append(f"{key}: {value}")
+
+            return " ".join(text_parts) if text_parts else ""
+
+        return str(content) if content else ""
 
     async def _store_in_vector_db(
         self, request: StorageRequest, text_content: str
