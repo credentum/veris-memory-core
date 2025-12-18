@@ -506,8 +506,11 @@ class VectorDBInitializer:
             raise ValueError("limit must be a positive integer")
         if limit > 1000:  # Reasonable upper bound
             raise ValueError("limit cannot exceed 1000")
-        if filter_dict is not None and not isinstance(filter_dict, dict):
-            raise ValueError("filter_dict must be a dictionary or None")
+        # Accept dict or Qdrant Filter object for query_filter
+        if filter_dict is not None:
+            from qdrant_client.http import models as qdrant_models
+            if not isinstance(filter_dict, (dict, qdrant_models.Filter)):
+                raise ValueError("filter_dict must be a dictionary, Qdrant Filter, or None")
 
         try:
             # Use query_points for qdrant-client v1.7+ (search() was deprecated)
