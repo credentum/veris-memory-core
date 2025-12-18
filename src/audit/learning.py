@@ -21,6 +21,7 @@ Precedent types:
 
 import hashlib
 import json
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from enum import Enum
@@ -76,9 +77,13 @@ class LearningExtractor:
         self._precedents_created = 0
 
     def _generate_precedent_id(self, content: Dict[str, Any]) -> str:
-        """Generate deterministic ID for a precedent."""
+        """Generate deterministic UUID for a precedent.
+
+        Uses UUID5 with DNS namespace for deterministic generation
+        from content hash. Qdrant requires valid UUID or unsigned int.
+        """
         canonical = json.dumps(content, sort_keys=True)
-        return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+        return str(uuid.uuid5(uuid.NAMESPACE_DNS, canonical))
 
     async def extract_from_trajectory(
         self,
