@@ -211,6 +211,109 @@ class TestCompleteTaskEndpoint:
         assert stored_data["status"] == "ERROR"
         assert "Connection timeout" in stored_data["error"]
 
+    @pytest.mark.asyncio
+    async def test_complete_task_approved_with_review_data(self):
+        """Test APPROVED completion includes review data in approved_completions queue."""
+        mock_redis = Mock()
+        mock_redis.setex.return_value = True
+        mock_redis.publish.return_value = 1
+        mock_redis.lpush.return_value = 1
+
+        request = queue_operations.CompleteTaskRequest(
+            user_id="test_team",
+            packet_id="pkt-approved",
+            agent_id="coding_agent",
+            status="SUCCESS",
+            review_verdict="APPROVED",
+            files_modified=["src/calculator.py"],
+            files_created=["tests/test_calculator.py"],
+            workspace_path="/veris_storage/workspaces/test-001",
+            branch_name="task/test-001",
+            repo_url="https://github.com/test/repo",
+            parent_packet_id="parent-test-001",
+            # Review data for PR body
+            review_confidence=0.95,
+            review_issues_count=2,
+            review_top_issues=["minor: Could add more tests", "note: Good structure"],
+            test_results={"passed": 5, "total_tests": 5, "coverage_percent": 92.0},
+        )
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.complete_task(request, redis=mock_redis)
+
+        assert result.success is True
+
+        # Verify lpush was called to approved_completions queue
+        mock_redis.lpush.assert_called_once()
+        queue_key = mock_redis.lpush.call_args[0][0]
+        assert queue_key == "test_team:queue:approved_completions"
+
+        # Verify publish_data includes review data
+        publish_json = mock_redis.lpush.call_args[0][1]
+        publish_data = json.loads(publish_json)
+
+        # Check review data fields
+        assert publish_data["verdict"] == "APPROVED"
+        assert publish_data["confidence"] == 0.95
+        assert publish_data["issues_count"] == 2
+        assert publish_data["top_issues"] == ["minor: Could add more tests", "note: Good structure"]
+        assert publish_data["test_results"] == {"passed": 5, "total_tests": 5, "coverage_percent": 92.0}
+        assert publish_data["files_modified"] == ["src/calculator.py"]
+        assert publish_data["files_created"] == ["tests/test_calculator.py"]
+        assert publish_data["parent_packet_id"] == "parent-test-001"
+
+    @pytest.mark.asyncio
+    async def test_review_confidence_validation(self):
+        """Test review_confidence field validates 0.0-1.0 range."""
+        # Valid confidence values
+        valid_request = queue_operations.CompleteTaskRequest(
+            user_id="test_team",
+            packet_id="pkt-valid",
+            agent_id="agent-1",
+            status="SUCCESS",
+            review_confidence=0.5,
+        )
+        assert valid_request.review_confidence == 0.5
+
+        # Boundary values
+        valid_min = queue_operations.CompleteTaskRequest(
+            user_id="test_team",
+            packet_id="pkt-min",
+            agent_id="agent-1",
+            status="SUCCESS",
+            review_confidence=0.0,
+        )
+        assert valid_min.review_confidence == 0.0
+
+        valid_max = queue_operations.CompleteTaskRequest(
+            user_id="test_team",
+            packet_id="pkt-max",
+            agent_id="agent-1",
+            status="SUCCESS",
+            review_confidence=1.0,
+        )
+        assert valid_max.review_confidence == 1.0
+
+        # Invalid: above 1.0
+        with pytest.raises(Exception):  # Pydantic ValidationError
+            queue_operations.CompleteTaskRequest(
+                user_id="test_team",
+                packet_id="pkt-invalid",
+                agent_id="agent-1",
+                status="SUCCESS",
+                review_confidence=1.5,
+            )
+
+        # Invalid: below 0.0
+        with pytest.raises(Exception):  # Pydantic ValidationError
+            queue_operations.CompleteTaskRequest(
+                user_id="test_team",
+                packet_id="pkt-invalid",
+                agent_id="agent-1",
+                status="SUCCESS",
+                review_confidence=-0.1,
+            )
+
 
 class TestCircuitBreakerEndpoints:
     """Tests for circuit breaker functionality."""

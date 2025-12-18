@@ -133,7 +133,7 @@ class CompleteTaskRequest(BaseModel):
     )
     # Review data for PR body (agent learning signal)
     review_confidence: Optional[float] = Field(
-        default=None, description="Reviewer confidence score (0.0-1.0)"
+        default=None, ge=0.0, le=1.0, description="Reviewer confidence score (0.0-1.0)"
     )
     review_issues_count: int = Field(
         default=0, description="Number of issues found by reviewer"
@@ -594,7 +594,6 @@ async def complete_task(
                 "parent_packet_id": request.parent_packet_id,  # For workspace lookup
                 "title": request.output or f"Agent completion: {request.packet_id}",
                 "body": f"Reviewed and approved by {request.agent_id}",
-                "files": request.files_modified + request.files_created,
                 "timestamp": time.time(),
                 # Review data for PR body (agent learning signal)
                 "verdict": request.review_verdict,
@@ -603,6 +602,7 @@ async def complete_task(
                 "top_issues": request.review_top_issues,
                 "test_results": request.test_results,
                 "files_modified": request.files_modified,
+                "files_created": request.files_created,
             }
             redis.lpush(approved_queue_key, json.dumps(publish_data))
             queued_for_publish = True
