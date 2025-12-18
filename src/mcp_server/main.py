@@ -669,6 +669,7 @@ class StoreContextRequest(BaseModel):
         relationships: Optional list of relationships to other contexts
         author: Author of the context (Sprint 13: auto-populated from API key)
         author_type: Type of author - 'human' or 'agent' (Sprint 13)
+        parent_id: Optional parent context ID for lineage tracking (Phase 2)
     """
 
     content: Dict[str, Any]
@@ -689,6 +690,11 @@ class StoreContextRequest(BaseModel):
     shared: bool = Field(
         default=False,
         description="When true, context is visible to all teams regardless of API key namespace.",
+    )
+    # Phase 2: Provenance lineage tracking
+    parent_id: Optional[str] = Field(
+        None,
+        description="ID of parent context for lineage tracking. Creates DERIVED_FROM relationship.",
     )
 
 
@@ -2658,6 +2664,53 @@ async def store_context(
                 # Continue even if graph storage fails
                 graph_id = None
 
+        # Phase 2: Provenance tracking (optional, non-blocking)
+        provenance_artifact_id = None
+        provenance_lineage_id = None
+        if neo4j_client:
+            try:
+                from ..audit import ProvenanceGraph, AuditSigner
+
+                provenance = ProvenanceGraph(neo4j_client)
+
+                # Generate content hash for artifact
+                import hashlib
+                content_str = json.dumps(request.content, sort_keys=True)
+                content_hash = hashlib.sha256(content_str.encode()).hexdigest()
+
+                # Sign the content (stub signer for now)
+                signer = AuditSigner(force_stub=True)
+                signature, signer_key = signer.sign_hash(content_hash)
+
+                # Create artifact with signature
+                provenance_artifact_id = await provenance.create_artifact(
+                    context_id=context_id,
+                    content_hash=f"sha256:{content_hash}",
+                    signer_id=author or "unknown",
+                    signature=signature,
+                    artifact_type=request.type,
+                )
+
+                # Link to parent if provided
+                if request.parent_id:
+                    provenance_lineage_id = await provenance.link_lineage(
+                        child_id=context_id,
+                        parent_id=request.parent_id,
+                        relationship_type="DERIVED_FROM",
+                    )
+                    if provenance_lineage_id:
+                        logger.info(f"Created lineage: {context_id} -> {request.parent_id}")
+                    else:
+                        logger.warning(f"Failed to link lineage to parent {request.parent_id}")
+
+                logger.debug(f"Provenance artifact created: {provenance_artifact_id}")
+
+            except ImportError:
+                logger.debug("Provenance module not available - skipping artifact tracking")
+            except Exception as provenance_error:
+                logger.warning(f"Provenance tracking failed (non-blocking): {provenance_error}")
+                # Provenance is optional, don't fail the store
+
         # Determine embedding status for user feedback (Sprint 13)
         embedding_status = "completed" if vector_id else "failed"
         embedding_message = None
@@ -2678,6 +2731,12 @@ async def store_context(
             "message": "Context stored successfully",
             "embedding_status": embedding_status,  # Sprint 13: Add embedding feedback
             "relationships_created": relationships_created,  # Phase 3: Relationship validation feedback
+            # Phase 2: Provenance tracking
+            "provenance": {
+                "artifact_id": provenance_artifact_id,
+                "lineage_linked": provenance_lineage_id is not None,
+                "parent_id": request.parent_id if request.parent_id else None,
+            } if provenance_artifact_id else None,
         }
 
         if embedding_message:
@@ -4665,6 +4724,180 @@ async def get_user_facts_endpoint(
             "operation": "get_user_facts",
             "user_id": request.user_id,
         }
+
+
+# ============================================================================
+# Phase 2: Audit Provenance Endpoints
+# ============================================================================
+
+
+class AuditTraceRequest(BaseModel):
+    """Request model for audit trace endpoint."""
+
+    artifact_id: str = Field(..., description="ID of the artifact to trace")
+    max_depth: int = Field(10, ge=1, le=100, description="Maximum depth to traverse")
+    include_signatures: bool = Field(True, description="Include signature details")
+
+
+class AuditDescendantsRequest(BaseModel):
+    """Request model for descendants endpoint."""
+
+    artifact_id: str = Field(..., description="ID of the source artifact")
+    max_depth: int = Field(10, ge=1, le=100, description="Maximum depth to traverse")
+
+
+@app.post("/audit/trace/{artifact_id}")
+async def trace_provenance(
+    artifact_id: str,
+    max_depth: int = 10,
+    include_signatures: bool = True,
+) -> Dict[str, Any]:
+    """
+    Trace the complete lineage of an artifact.
+
+    Returns the full provenance chain from the artifact back to its origins,
+    including all SIGNED and DERIVED_FROM relationships.
+
+    Example:
+        GET /audit/trace/ctx-123?max_depth=5
+
+    Returns:
+        {
+            "artifact": {...},
+            "signer": {...},
+            "lineage": [
+                {"artifact": {...}, "signer": {...}, "depth": 1},
+                ...
+            ],
+            "depth": int,
+            "complete": bool
+        }
+    """
+    if not neo4j_client:
+        return {
+            "success": False,
+            "error": "Neo4j not available",
+            "artifact_id": artifact_id,
+        }
+
+    try:
+        from ..audit import ProvenanceGraph
+
+        provenance = ProvenanceGraph(neo4j_client)
+        result = await provenance.trace_lineage(
+            artifact_id=artifact_id,
+            max_depth=max_depth,
+            include_signatures=include_signatures,
+        )
+
+        return {
+            "success": True,
+            "artifact_id": artifact_id,
+            **result,
+        }
+
+    except ImportError:
+        return {
+            "success": False,
+            "error": "Provenance module not available",
+            "artifact_id": artifact_id,
+        }
+    except Exception as e:
+        logger.error(f"Provenance trace failed: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "artifact_id": artifact_id,
+        }
+
+
+@app.post("/audit/descendants/{artifact_id}")
+async def get_descendants(
+    artifact_id: str,
+    max_depth: int = 10,
+) -> Dict[str, Any]:
+    """
+    Get all artifacts derived from a source artifact.
+
+    Traces forward through DERIVED_FROM relationships to find
+    all children, grandchildren, etc.
+
+    Example:
+        GET /audit/descendants/ctx-123?max_depth=5
+
+    Returns:
+        {
+            "artifact_id": "ctx-123",
+            "descendants": [
+                {"artifact": {...}, "signer": {...}, "depth": 1},
+                ...
+            ],
+            "count": int
+        }
+    """
+    if not neo4j_client:
+        return {
+            "success": False,
+            "error": "Neo4j not available",
+            "artifact_id": artifact_id,
+        }
+
+    try:
+        from ..audit import ProvenanceGraph
+
+        provenance = ProvenanceGraph(neo4j_client)
+        descendants = await provenance.get_descendants(
+            artifact_id=artifact_id,
+            max_depth=max_depth,
+        )
+
+        return {
+            "success": True,
+            "artifact_id": artifact_id,
+            "descendants": descendants,
+            "count": len(descendants),
+        }
+
+    except ImportError:
+        return {
+            "success": False,
+            "error": "Provenance module not available",
+            "artifact_id": artifact_id,
+        }
+    except Exception as e:
+        logger.error(f"Get descendants failed: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "artifact_id": artifact_id,
+        }
+
+
+@app.get("/audit/stats")
+async def get_audit_stats() -> Dict[str, Any]:
+    """
+    Get audit and provenance statistics.
+
+    Returns counts of artifacts, audit entries, signatures, and lineage links.
+    """
+    result = {
+        "success": True,
+        "provenance": None,
+        "audit_service": None,
+    }
+
+    if neo4j_client:
+        try:
+            from ..audit import ProvenanceGraph
+
+            provenance = ProvenanceGraph(neo4j_client)
+            result["provenance"] = provenance.get_stats()
+        except ImportError:
+            result["provenance"] = {"error": "Provenance module not available"}
+        except Exception as e:
+            result["provenance"] = {"error": str(e)}
+
+    return result
 
 
 if __name__ == "__main__":
