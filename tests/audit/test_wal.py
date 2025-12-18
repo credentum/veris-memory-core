@@ -131,8 +131,8 @@ class TestWriteAheadLog:
         with open(wal_file, "w") as f:
             f.writelines(lines)
 
-        # Create new WAL and verify
-        wal2 = WriteAheadLog(log_dir=temp_log_dir)
+        # Create new WAL with same prefix and verify
+        wal2 = WriteAheadLog(log_dir=temp_log_dir, log_prefix="test_wal")
         result = wal2.verify_chain()
         wal2.close()
 

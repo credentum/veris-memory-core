@@ -81,7 +81,7 @@ class WriteAheadLog:
 
     def _start_new_file(self) -> None:
         """Start a new WAL file."""
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
         filename = f"{self.log_prefix}_{timestamp}.jsonl"
         self._current_file = self.log_dir / filename
 
@@ -195,12 +195,22 @@ class WriteAheadLog:
 
         return record
 
+    def flush(self) -> None:
+        """Flush the current file to disk."""
+        if self._file_handle:
+            self._file_handle.flush()
+            os.fsync(self._file_handle.fileno())
+
     def verify_chain(self, filepath: Optional[Path] = None) -> dict:
         """
         Verify the hash chain integrity of a WAL file.
 
         Returns verification result with any broken links.
         """
+        # Flush pending writes before verification
+        if filepath is None:
+            self.flush()
+
         filepath = filepath or self._current_file
         if not filepath or not filepath.exists():
             return {"valid": False, "error": "File not found"}
@@ -261,6 +271,10 @@ class WriteAheadLog:
         start_seq: int = 0,
     ) -> Iterator[dict]:
         """Iterate over WAL entries, optionally from a starting sequence."""
+        # Flush pending writes before iteration
+        if filepath is None:
+            self.flush()
+
         filepath = filepath or self._current_file
         if not filepath or not filepath.exists():
             return
