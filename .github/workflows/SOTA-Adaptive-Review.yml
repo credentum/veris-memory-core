@@ -1,6 +1,6 @@
 ###############################################################################
 # SOTA Adaptive Review (Machine-Readable Edition)
-# Output: Strict YAML for Agent Consumption
+# Fixed: Variable namespace collision
 ###############################################################################
 name: Adaptive Code Review
 
@@ -44,7 +44,7 @@ jobs:
         continue-on-error: true
 
       # ------------------------------------------------------------------
-      # PHASE 2: TRIAGE & PROMPT GENERATION (The "Brain")
+      # PHASE 2: TRIAGE & PROMPT GENERATION
       # ------------------------------------------------------------------
       - name: Generate Dynamic Prompt
         id: generator
@@ -58,21 +58,20 @@ jobs:
             const files = diff.stdout.split('\n').filter(f => f);
             
             // 1. RISK TRIAGE
-            // Use refined patterns to avoid false positives on "validate"
             const securityPatterns = [
               /Dockerfile/i, /docker-compose/i, /\.github/i, 
               /auth/i, /secret/i, /jwt/i, /password/i,
-              /sanitize/i, /escape_html/i // Specific injection handling
+              /sanitize/i, /escape_html/i 
             ];
             const isHighRisk = files.some(f => securityPatterns.some(p => p.test(f)));
             const riskLevel = isHighRisk ? 'HIGH' : 'LOW';
 
-            // 2. CONTEXT LOAD
-            let context = `TESTS_PASSED: ${process.env.TESTS_PASSED}`;
+            // 2. CONTEXT LOAD (Renamed variable to avoid collision)
+            let analysisContext = `TESTS_PASSED: ${process.env.TESTS_PASSED}`;
             try {
               if (fs.existsSync('test_output.txt')) {
                  const logs = fs.readFileSync('test_output.txt', 'utf8').slice(-1000).replace(/`/g, "'");
-                 context += `\nLOGS_TAIL: "${logs.replace(/\n/g, '\\n')}"`;
+                 analysisContext += `\nLOGS_TAIL: "${logs.replace(/\n/g, '\\n')}"`;
               }
             } catch (e) {}
 
@@ -81,12 +80,10 @@ jobs:
             const isGreen = process.env.TESTS_PASSED === 'true';
 
             if (isGreen && riskLevel === 'LOW') {
-                // SCENARIO A: PRAGMATIC (Fast Pass)
                 systemPrompt = `ROLE: PRAGMATIC_ANALYZER
                 OBJECTIVE: Verify logic. Ignore style.
                 CONSTRAINT: If tests pass, default to APPROVE. Only block on SECURITY.`;
             } else {
-                // SCENARIO B: ADVERSARIAL (Deep Audit)
                 systemPrompt = `ROLE: ADVERSARIAL_AUDITOR
                 OBJECTIVE: Find edge cases, race conditions, and security flaws.
                 CONSTRAINT: Assume code is broken. Verify with tools.`;
@@ -96,7 +93,7 @@ jobs:
             systemPrompt += `
             
             CONTEXT_DATA:
-            ${context}
+            ${analysisContext}
             FILES: ${files.join(', ')}
 
             INSTRUCTIONS:
@@ -140,9 +137,8 @@ jobs:
         with:
           script: |
             const response = `${{ steps.claude-review.outputs.response }}`;
-            console.log("Agent Output:\n", response); // Debug log
+            console.log("Agent Output:\n", response); 
 
-            // Simple string parsing since output is guaranteed YAML
             let state = 'success';
             let desc = 'ARC: Approved';
             
