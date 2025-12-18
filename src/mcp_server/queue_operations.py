@@ -128,6 +128,9 @@ class CompleteTaskRequest(BaseModel):
     workspace_path: Optional[str] = Field(default=None, description="Workspace path for PR")
     branch_name: Optional[str] = Field(default=None, description="Branch name for PR")
     repo_url: Optional[str] = Field(default=None, description="Repository URL")
+    parent_packet_id: Optional[str] = Field(
+        default=None, description="Parent product packet ID for workspace lookup"
+    )
 
 
 class CompleteTaskResponse(BaseModel):
@@ -550,6 +553,7 @@ async def complete_task(
             "workspace_path": request.workspace_path,
             "branch_name": request.branch_name,
             "repo_url": request.repo_url,
+            "parent_packet_id": request.parent_packet_id,
             "timestamp": time.time(),
         }
 
@@ -574,6 +578,7 @@ async def complete_task(
                 "workspace_path": request.workspace_path,
                 "branch_name": request.branch_name,
                 "repo_url": request.repo_url,
+                "parent_packet_id": request.parent_packet_id,  # For workspace lookup
                 "title": request.output or f"Agent completion: {request.packet_id}",
                 "body": f"Reviewed and approved by {request.agent_id}",
                 "files": request.files_modified + request.files_created,
