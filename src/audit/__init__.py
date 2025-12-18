@@ -1,5 +1,5 @@
 """
-Veris Audit Infrastructure - Phase 1: Append-Only Foundation
+Veris Audit Infrastructure - Phase 1: Append-Only Foundation 
 
 "Truth, remembered — especially when it wounds."
 
