@@ -144,6 +144,9 @@ class CompleteTaskRequest(BaseModel):
     test_results: Optional[Dict[str, Any]] = Field(
         default=None, description="Test results: {passed, total_tests, coverage_percent}"
     )
+    task_name: Optional[str] = Field(
+        default=None, description="Human-readable task name from product_spec.name (for PR title)"
+    )
 
 
 class CompleteTaskResponse(BaseModel):
@@ -567,6 +570,7 @@ async def complete_task(
             "branch_name": request.branch_name,
             "repo_url": request.repo_url,
             "parent_packet_id": request.parent_packet_id,
+            "task_name": request.task_name,  # For learning-friendly PR titles
             "timestamp": time.time(),
         }
 
@@ -603,6 +607,8 @@ async def complete_task(
                 "test_results": request.test_results,
                 "files_modified": request.files_modified,
                 "files_created": request.files_created,
+                # task_name for learning-friendly PR titles (from product_spec.name)
+                "task_name": request.task_name,
             }
             redis.lpush(approved_queue_key, json.dumps(publish_data))
             queued_for_publish = True
