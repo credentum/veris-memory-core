@@ -28,11 +28,13 @@ curl -X POST http://172.17.0.1:8000/tools/query_graph \
 
 | Date | Title | Status | Context ID | Recovery Query |
 |------|-------|--------|------------|----------------|
+| 2025-12-19 | VMC-ADR-011: Security Infrastructure | Implemented | `e20a97e7-2ec1-4266-9e6a-112a8a8397b5` | `VMC-ADR-011 security WAF RBAC secrets compliance` |
+| 2025-12-19 | VMC-ADR-010: Retrieval Enhancements | Implemented | `53ef660f-0707-46bb-a714-61123d547467` | `VMC-ADR-010 HyDE cross-encoder sparse embeddings hybrid search` |
 | 2025-12-19 | VMC-ADR-009: Audit Log HTTP Endpoints | Deferred | `d3c2dd9e-cfaf-4ef7-955e-11a769089545` | `VMC-ADR-009 audit log endpoints WAL verify hash chain` |
 | 2025-12-19 | VMC-ADR-008: Episodic Memory System | Deferred | `b05fed38-eb86-46b0-8731-e62dcfdc7fc8` | `VMC-ADR-008 episodic memory episode boundaries replay summarization deferred` |
 | 2025-12-19 | VMC-ADR-007: Vault HSM Integration | Deferred | `7f5c1c8d-e4af-46ed-b361-03a1c72ffa4d` | `VMC-ADR-007 Vault HSM signing Ed25519 compliance deferred` |
 | 2025-12-19 | VMC-ADR-006: Cold Storage Archival | Deferred | `4804c7dd-9281-4af7-9816-10805fb8610f` | `VMC-ADR-006 cold storage archival SCAR S3 deferred` |
-| 2025-12-19 | VMC-ADR-005: Covenant Conflict Resolution | Deferred | `8998e997-e185-4376-affe-bb2e5dd4dad0` | `ADR-005 conflict resolution deferred automation trigger threshold` |
+| 2025-12-19 | VMC-ADR-005: Conflict Resolution | Implemented | `8998e997-e185-4376-affe-bb2e5dd4dad0` | `ADR-005 conflict resolution list resolve MCP tools` |
 | 2025-12-19 | Phase 4: Covenant Mediator | Deployed | `93a0dfb7-50b8-45b0-8509-8bbe82452d3d` | `covenant mediator phase 4 memory gating` |
 | 2025-12-19 | System Architecture Map | Active | `2867afb3-aae2-4755-8540-cb0b90c75f37` | `veris system architecture map layers status what is built` |
 | 2025-12-18 | Veris Memory Two-Tier Pattern | Documented | `f1b0faf7-a310-47bb-bd36-1ef8a3d7ba68` | `veris memory two-tier pattern semantic operational` |
@@ -41,6 +43,139 @@ curl -X POST http://172.17.0.1:8000/tools/query_graph \
 ---
 
 ## Decision Details
+
+### 2025-12-19: VMC-ADR-011 - Security Infrastructure (Implemented)
+
+**Status:** Implemented
+**GitHub Issue:** [#74](https://github.com/credentum/veris-memory-core/issues/74)
+
+**Context:** Document the comprehensive security infrastructure that has been built but was not previously recorded as an ADR.
+
+**Components:**
+
+| Component | File | Purpose | Status |
+|-----------|------|---------|--------|
+| API Key Auth | `src/middleware/api_key_auth.py` | RBAC with human-only operations | ✅ Sprint 13 |
+| Scope Validator | `src/middleware/scope_validator.py` | Scope-based authorization | ✅ Complete |
+| WAF | `src/security/waf.py` | Web Application Firewall | ✅ Complete |
+| Secrets Manager | `src/security/secrets_manager.py` | Credential protection | ✅ Complete |
+| Compliance Reporter | `src/security/compliance_reporter.py` | Security scanning | ✅ Complete |
+| Cypher Validator | `src/security/cypher_validator.py` | Query injection prevention | ✅ Complete |
+| Fact Privacy | `src/security/fact_privacy.py` | Sensitive data masking | ✅ Complete |
+| Port Filter | `src/security/port_filter.py` | Network security | ✅ Complete |
+| Security Scanner | `src/security/security_scanner.py` | Vulnerability detection | ✅ Complete |
+
+**WAF Rules (16 default rules):**
+- SQL Injection detection
+- XSS prevention
+- Path traversal blocking
+- Command injection detection
+- LDAP injection prevention
+- XML/XXE attack blocking
+- And more...
+
+**RBAC Roles:**
+
+| Role | Permissions |
+|------|-------------|
+| `admin` | Full access |
+| `writer` | Create, update, delete |
+| `reader` | Read-only |
+| `guest` | Limited read |
+
+**Human-Only Operations (Sprint 13):**
+- `delete_context` - Hard delete
+- `forget_context` - Soft delete with retention
+
+**Environment Variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTH_REQUIRED` | false | Enable API key authentication |
+| `VERIS_API_KEY_*` | - | API keys with metadata |
+
+**Agent Instructions:**
+> Security is always on. WAF rules apply to all requests. Respect human-only operation restrictions.
+
+---
+
+### 2025-12-19: VMC-ADR-010 - Retrieval Enhancements (Implemented)
+
+**Status:** Implemented
+**GitHub Issue:** [#75](https://github.com/credentum/veris-memory-core/issues/75)
+
+**Context:** Document the advanced retrieval features that improve search quality beyond basic semantic search.
+
+**Components:**
+
+| Feature | File | Purpose | Default |
+|---------|------|---------|---------|
+| HyDE Generator | `src/core/hyde_generator.py` | Hypothetical Document Embeddings | Enabled |
+| Cross-Encoder Reranker | `src/core/retrieval_core.py` | Re-rank results for precision | Enabled |
+| Sparse Embeddings | `src/embedding/sparse_service.py` | BM25 hybrid search | Enabled |
+| Query Dispatcher | `src/core/query_dispatcher.py` | Multi-backend routing | Always |
+| Semantic Cache | `src/core/semantic_cache.py` | Cache with semantic keys | Enabled |
+| Query Normalizer | `src/core/query_normalizer.py` | Query optimization | Enabled |
+| Intent Classifier | `src/core/intent_classifier.py` | Query intent analysis | Always |
+
+**HyDE (Hypothetical Document Embeddings):**
+
+Generates hypothetical answer documents from queries for better semantic matching.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYDE_ENABLED` | true | Enable HyDE generation |
+| `HYDE_API_PROVIDER` | openrouter | LLM provider |
+| `HYDE_MODEL` | meta-llama/llama-2-7b | Model for generation |
+| `HYDE_BASE_URL` | https://openrouter.ai/api/v1 | API endpoint |
+| `HYDE_MAX_TOKENS` | 150 | Max tokens for hypothetical doc |
+| `HYDE_TEMPERATURE` | 0.7 | Generation temperature |
+| `HYDE_CACHE_ENABLED` | true | Cache hypothetical docs |
+| `HYDE_LLM_TIMEOUT` | 30.0 | Timeout in seconds |
+| `OPENROUTER_API_KEY` | - | Required for HyDE |
+
+**Cross-Encoder Reranker:**
+
+Re-ranks initial retrieval results using a cross-encoder model for better relevance.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CROSS_ENCODER_RERANKER_ENABLED` | true | Enable reranking |
+| `CROSS_ENCODER_TOP_K` | 50 | Candidates to re-rank |
+| `CROSS_ENCODER_RETURN_K` | 10 | Results to return |
+| `CROSS_ENCODER_FALLBACK_THRESHOLD` | -5.0 | Score threshold |
+
+**Sparse Embeddings (Hybrid Search):**
+
+Combines dense (semantic) with sparse (BM25) vectors for keyword matching.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SPARSE_EMBEDDINGS_ENABLED` | true | Enable sparse vectors |
+| `SPARSE_EMBEDDING_MODEL` | Qdrant/bm25 | Sparse model |
+
+**Search Enhancements:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MQE_ENABLED` | true | Multi-Query Expansion |
+| `MQE_NUM_PARAPHRASES` | 2 | Number of query variants |
+| `SEARCH_ENHANCEMENTS_ENABLED` | true | Enable all enhancements |
+| `QUERY_NORMALIZATION_ENABLED` | true | Normalize queries |
+
+**Retrieval Pipeline:**
+
+```
+Query → Intent Classifier → Query Normalizer → HyDE Generator
+    → Multi-Query Expander → Semantic Cache Check
+    → [Cache Miss] → Sparse + Dense Search → Cross-Encoder Rerank
+    → Results
+```
+
+**Agent Instructions:**
+> Retrieval enhancements are enabled by default. Disable only for debugging. HyDE requires OPENROUTER_API_KEY.
+
+---
 
 ### 2025-12-19: VMC-ADR-009 - Audit Log HTTP Endpoints (Deferred)
 
@@ -221,27 +356,45 @@ class Episode:
 
 ---
 
-### 2025-12-19: VMC-ADR-005 - Covenant Conflict Resolution (Deferred)
+### 2025-12-19: VMC-ADR-005 - Conflict Resolution (Implemented)
 
-**Status:** Deferred
+**Status:** Implemented
 **GitHub Issue:** [#66](https://github.com/credentum/veris-memory-core/issues/66)
 
-**Context:** Phase 4 (Covenant Mediator) identifies memory contradictions but lacks a protocol to resolve them autonomously.
+**Context:** Phase 4 (Covenant Mediator) identifies memory contradictions. This ADR documents the implemented resolution mechanism.
 
-**Decision:** `DEFER_IMPLEMENTATION`
+**Implementation:**
 
-**Rationale:** Adherence to "Just-in-Time" infrastructure. Manual overhead is currently < 5% of operational time.
+| Component | File | Status |
+|-----------|------|--------|
+| Conflict Store | `src/storage/conflict_store.py` | ✅ Complete |
+| List Conflicts | `POST /tools/list_conflicts` | ✅ Works |
+| Resolve Conflict | `POST /tools/resolve_conflict` | ✅ Works |
 
-**Activation Triggers:**
+**Resolution Modes:**
 
-| Condition | Metric | Threshold |
-|-----------|--------|-----------|
-| 1 | `blocking_packet_events` | 1 |
-| 2 | `unresolved_conflict_count` | 10 |
-| 3 | `pattern_emergence` | 3 repeats |
+| Mode | Behavior |
+|------|----------|
+| `accept_new` | Replace existing context with new conflicting content |
+| `keep_existing` | Discard the new content, keep existing |
+| `merge` | Combine both contexts (requires manual review) |
+
+**MCP Tools:**
+```python
+# List pending conflicts
+list_conflicts() -> List[CovenantConflict]
+
+# Resolve a specific conflict
+resolve_conflict(conflict_id: str, resolution: str, reason: Optional[str])
+```
+
+**What's NOT Automated (Future Work):**
+- Autonomous resolution without human/agent intervention
+- Pattern-based automatic resolution rules
+- Conflict prediction/prevention
 
 **Agent Instructions:**
-> Do not attempt to build or suggest resolution code until one of the activation_triggers is met.
+> Use `list_conflicts` to check for pending contradictions. Use `resolve_conflict` with explicit reasoning. Prefer `keep_existing` when uncertain.
 
 ---
 
@@ -350,13 +503,18 @@ Weight = Surprise × (Authority / 10) × (1 + 0.5 × Sparsity)
 
 ---
 
+## Implemented
+
+- [x] **VMC-ADR-011:** Security Infrastructure ([#74](https://github.com/credentum/veris-memory-core/issues/74)) - WAF, RBAC, Secrets
+- [x] **VMC-ADR-010:** Retrieval Enhancements ([#75](https://github.com/credentum/veris-memory-core/issues/75)) - HyDE, Cross-Encoder, Sparse
+- [x] **VMC-ADR-005:** Conflict Resolution ([#66](https://github.com/credentum/veris-memory-core/issues/66)) - MCP tools for list/resolve
+
 ## Deferred (With Activation Triggers)
 
 - [ ] **VMC-ADR-009:** Audit Log HTTP Endpoints ([#73](https://github.com/credentum/veris-memory-core/issues/73))
 - [ ] **VMC-ADR-008:** Episodic Memory System ([#72](https://github.com/credentum/veris-memory-core/issues/72)) - P3
 - [ ] **VMC-ADR-007:** Vault HSM Integration ([#71](https://github.com/credentum/veris-memory-core/issues/71))
 - [ ] **VMC-ADR-006:** Cold Storage Archival ([#70](https://github.com/credentum/veris-memory-core/issues/70))
-- [ ] **VMC-ADR-005:** Covenant Conflict Resolution Automation ([#66](https://github.com/credentum/veris-memory-core/issues/66))
 
 ## Not Yet Built (No ADR)
 
@@ -397,8 +555,10 @@ Weight = Surprise × (Authority / 10) × (1 + 0.5 × Sparsity)
 
 - [System Architecture Map (Issue #68)](https://github.com/credentum/veris-memory-core/issues/68)
 - [agent-dev Architecture Decisions](https://github.com/credentum/agent-dev/blob/main/docs/ARCHITECTURE_DECISIONS.md)
-- [VMC-ADR-005: Covenant Conflict Resolution (Issue #66)](https://github.com/credentum/veris-memory-core/issues/66)
+- [VMC-ADR-005: Conflict Resolution (Issue #66)](https://github.com/credentum/veris-memory-core/issues/66)
 - [VMC-ADR-006: Cold Storage Archival (Issue #70)](https://github.com/credentum/veris-memory-core/issues/70)
 - [VMC-ADR-007: Vault HSM Integration (Issue #71)](https://github.com/credentum/veris-memory-core/issues/71)
 - [VMC-ADR-008: Episodic Memory System (Issue #72)](https://github.com/credentum/veris-memory-core/issues/72)
 - [VMC-ADR-009: Audit Log HTTP Endpoints (Issue #73)](https://github.com/credentum/veris-memory-core/issues/73)
+- [VMC-ADR-010: Retrieval Enhancements (Issue #75)](https://github.com/credentum/veris-memory-core/issues/75)
+- [VMC-ADR-011: Security Infrastructure (Issue #74)](https://github.com/credentum/veris-memory-core/issues/74)
