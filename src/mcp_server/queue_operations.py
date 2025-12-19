@@ -1224,10 +1224,10 @@ async def get_stuck_packets(
 # =============================================================================
 
 # Redis key for coder WIP hash
+# Note: Uses Redis HASH for O(1) lookups. Cleanup relies on clear_coder_wip()
+# being called in finally blocks. If agents crash without cleanup, stale entries
+# can be detected via elapsed_seconds in get_all_coder_wip response.
 CODER_WIP_KEY = "coder_wip"
-
-# Default TTL for coder WIP entries (5 minutes - auto-cleanup if agent crashes)
-CODER_WIP_TTL = int(os.environ.get("CODER_WIP_TTL", "300"))
 
 
 class SetCoderWipRequest(BaseModel):
