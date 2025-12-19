@@ -2,7 +2,7 @@
 # SOTA Adaptive Review (Machine-Readable Edition)
 # Fixed: Variable namespace collision
 ###############################################################################
-name: Adaptive Code Review
+name: Adaptive Code Review 
 
 on:
   pull_request:
