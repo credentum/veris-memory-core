@@ -4,12 +4,13 @@ Tests for Queue Operations API.
 
 Tests cover:
 - Work packet submission (submit_work_packet)
-- Work packet retrieval (pop_work_packet)
+- Work packet retrieval (pop_work_packet) with active_work tracking
 - Queue depth monitoring (queue_depth)
-- Task completion (complete_task)
+- Task completion (complete_task) with active_work cleanup
 - Circuit breaker check/reset
 - Blocked packet management (blocked_packets, unblock_packet, block_packet)
 - Intervention escalation (escalate_intervention)
+- Pipeline observability (log_execution_event, get_packet_events, stuck_packets)
 """
 
 import json
@@ -87,6 +88,7 @@ class TestWorkQueueEndpoints:
         }
         mock_redis.brpop.return_value = ("test_team:queue:work_packets", json.dumps(packet_data))
         mock_redis.llen.return_value = 2
+        mock_redis.setex.return_value = True  # For active_work tracking
 
         request = queue_operations.PopWorkPacketRequest(user_id="test_team", timeout=5)
 
@@ -96,7 +98,47 @@ class TestWorkQueueEndpoints:
         assert result.packet is not None
         assert result.packet["packet_id"] == "pkt-002"
         assert result.queue_depth == 2
-        mock_redis.brpop.assert_called_once_with("test_team:queue:work_packets", timeout=5)
+        mock_redis.brpop.assert_called_once_with("test_team:queue:work_packets", 5)
+
+    @pytest.mark.asyncio
+    async def test_pop_work_packet_tracks_active_work(self):
+        """Test that pop_work_packet creates active_work tracking key."""
+        mock_redis = Mock()
+        packet_data = {
+            "packet_id": "pkt-tracked",
+            "task": {"type": "coding", "title": "Test Task"},
+            "meta": {"trace_id": "trace-abc", "parent_packet_id": "parent-001"},
+        }
+        mock_redis.brpop.return_value = ("test_team:queue:work_packets", json.dumps(packet_data))
+        mock_redis.llen.return_value = 0
+
+        request = queue_operations.PopWorkPacketRequest(
+            user_id="test_team", timeout=5, agent_id="agent-007"
+        )
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.pop_work_packet(request, redis=mock_redis)
+
+        assert result.packet is not None
+
+        # Verify setex was called to track active work
+        mock_redis.setex.assert_called_once()
+        call_args = mock_redis.setex.call_args[0]
+
+        # Check key format
+        assert call_args[0] == "test_team:active_work:pkt-tracked"
+
+        # Check TTL (should be ACTIVE_WORK_TTL, default 600)
+        assert call_args[1] == queue_operations.ACTIVE_WORK_TTL
+
+        # Check stored data
+        stored_data = json.loads(call_args[2])
+        assert stored_data["agent_id"] == "agent-007"
+        assert stored_data["packet_id"] == "pkt-tracked"
+        assert stored_data["trace_id"] == "trace-abc"
+        assert stored_data["parent_packet_id"] == "parent-001"
+        assert stored_data["user_id"] == "test_team"
+        assert "claimed_at" in stored_data
 
     @pytest.mark.asyncio
     async def test_pop_work_packet_timeout(self):
@@ -126,7 +168,7 @@ class TestWorkQueueEndpoints:
         with patch.object(queue_operations, "_redis_client", mock_redis):
             await queue_operations.pop_work_packet(request, redis=mock_redis)
 
-        mock_redis.brpop.assert_called_with("test:queue:work_packets", timeout=30)
+        mock_redis.brpop.assert_called_with("test:queue:work_packets", 30)
 
 
 class TestQueueDepthEndpoint:
@@ -154,6 +196,7 @@ class TestCompleteTaskEndpoint:
         mock_redis = Mock()
         mock_redis.setex.return_value = True
         mock_redis.publish.return_value = 1  # 1 subscriber
+        mock_redis.delete.return_value = 1  # Active work key deleted
 
         request = queue_operations.CompleteTaskRequest(
             user_id="test_team",
@@ -177,14 +220,14 @@ class TestCompleteTaskEndpoint:
         assert call_args[0] == "test_team:completions:pkt-003"
         assert call_args[1] == 86400  # 24h TTL
 
-        # Verify pub/sub notifications (2 calls: completion channel + publish_requests)
-        assert mock_redis.publish.call_count == 2
-        # First call: completion channel for orchestrator
-        first_call_channel = mock_redis.publish.call_args_list[0][0][0]
-        assert first_call_channel == "test_team:completion:pkt-003"
-        # Second call: publish_requests channel for Repo Manager
-        second_call_channel = mock_redis.publish.call_args_list[1][0][0]
-        assert second_call_channel == "test_team:publish_requests"
+        # Verify active_work tracking key is deleted
+        mock_redis.delete.assert_called_once_with("test_team:active_work:pkt-003")
+
+        # Verify pub/sub notification to completion channel
+        # Note: publish_requests is only used for APPROVED verdict via lpush
+        mock_redis.publish.assert_called_once()
+        call_channel = mock_redis.publish.call_args[0][0]
+        assert call_channel == "test_team:completion:pkt-003"
 
     @pytest.mark.asyncio
     async def test_complete_task_with_error(self):
@@ -495,6 +538,16 @@ class TestRedisKeyHelpers:
         key = queue_operations.get_intervention_queue_key("my_team")
         assert key == "my_team:queue:intervention"
 
+    def test_get_active_work_key(self):
+        """Test active work tracking key format."""
+        key = queue_operations.get_active_work_key("my_team", "pkt-123")
+        assert key == "my_team:active_work:pkt-123"
+
+    def test_get_packet_events_key(self):
+        """Test packet events sorted set key format."""
+        key = queue_operations.get_packet_events_key("pkt-456")
+        assert key == "pkt-456:events"
+
 
 class TestInterventionEndpoints:
     """Tests for intervention queue operations."""
@@ -565,6 +618,248 @@ class TestInterventionEndpoints:
         assert intervention_data["timestamp"] == "2025-01-15T12:00:00Z"
 
 
+class TestPipelineObservabilityEndpoints:
+    """Tests for pipeline observability endpoints."""
+
+    @pytest.mark.asyncio
+    async def test_log_execution_event_success(self):
+        """Test successful event logging."""
+        mock_redis = Mock()
+        mock_redis.zadd.return_value = 1
+        mock_redis.expire.return_value = True
+        mock_redis.zcard.return_value = 3
+
+        request = queue_operations.LogExecutionEventRequest(
+            packet_id="pkt-001",
+            event_type="work_started",
+            agent_id="agent-007",
+            trace_id="trace-abc",
+            metadata={"parent_packet_id": "parent-001"},
+        )
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.log_execution_event(request, redis=mock_redis)
+
+        assert result.success is True
+        assert result.event_count == 3
+
+        # Verify zadd was called with correct key
+        mock_redis.zadd.assert_called_once()
+        call_args = mock_redis.zadd.call_args
+        assert call_args[0][0] == "pkt-001:events"
+
+        # Verify event data
+        event_json = list(call_args[0][1].keys())[0]
+        event_data = json.loads(event_json)
+        assert event_data["event_type"] == "work_started"
+        assert event_data["agent_id"] == "agent-007"
+        assert event_data["trace_id"] == "trace-abc"
+        assert event_data["parent_packet_id"] == "parent-001"
+        assert "timestamp" in event_data
+
+        # Verify TTL was set
+        mock_redis.expire.assert_called_once_with(
+            "pkt-001:events", queue_operations.PACKET_EVENTS_TTL
+        )
+
+    @pytest.mark.asyncio
+    async def test_log_execution_event_ordering(self):
+        """Test that events are stored with timestamp scores for ordering."""
+        mock_redis = Mock()
+        mock_redis.zadd.return_value = 1
+        mock_redis.expire.return_value = True
+        mock_redis.zcard.return_value = 1
+
+        request = queue_operations.LogExecutionEventRequest(
+            packet_id="pkt-order",
+            event_type="coder_completed",
+            agent_id="agent-1",
+        )
+
+        with patch("time.time", return_value=1700000000.123):
+            with patch.object(queue_operations, "_redis_client", mock_redis):
+                await queue_operations.log_execution_event(request, redis=mock_redis)
+
+        # Verify score is the timestamp
+        call_args = mock_redis.zadd.call_args
+        event_dict = call_args[0][1]
+        score = list(event_dict.values())[0]
+        assert score == 1700000000.123
+
+    @pytest.mark.asyncio
+    async def test_get_packet_events_success(self):
+        """Test retrieving packet events."""
+        mock_redis = Mock()
+        events = [
+            (json.dumps({
+                "event_type": "work_started",
+                "agent_id": "agent-1",
+                "timestamp": "2025-01-01T10:00:00Z",
+                "trace_id": "trace-1",
+            }), 1700000000.0),
+            (json.dumps({
+                "event_type": "coder_completed",
+                "agent_id": "agent-1",
+                "timestamp": "2025-01-01T10:01:00Z",
+                "trace_id": "trace-1",
+                "status": "COMPLETE",
+            }), 1700000060.0),
+        ]
+        mock_redis.zrange.return_value = events
+        mock_redis.zcard.return_value = 2
+
+        request = queue_operations.GetPacketEventsRequest(packet_id="pkt-events", limit=10)
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.get_packet_events(request, redis=mock_redis)
+
+        assert result.packet_id == "pkt-events"
+        assert result.total == 2
+        assert len(result.events) == 2
+
+        # Check first event
+        assert result.events[0].event_type == "work_started"
+        assert result.events[0].agent_id == "agent-1"
+        assert result.events[0].score == 1700000000.0
+
+        # Check second event with extra metadata
+        assert result.events[1].event_type == "coder_completed"
+        assert result.events[1].metadata["status"] == "COMPLETE"
+
+    @pytest.mark.asyncio
+    async def test_get_packet_events_empty(self):
+        """Test retrieving events for packet with no events."""
+        mock_redis = Mock()
+        mock_redis.zrange.return_value = []
+        mock_redis.zcard.return_value = 0
+
+        request = queue_operations.GetPacketEventsRequest(packet_id="pkt-no-events")
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.get_packet_events(request, redis=mock_redis)
+
+        assert result.packet_id == "pkt-no-events"
+        assert result.total == 0
+        assert len(result.events) == 0
+
+    @pytest.mark.asyncio
+    async def test_get_packet_events_respects_limit(self):
+        """Test that limit parameter is respected."""
+        mock_redis = Mock()
+        mock_redis.zrange.return_value = []
+        mock_redis.zcard.return_value = 0
+
+        request = queue_operations.GetPacketEventsRequest(packet_id="pkt-limit", limit=5)
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            await queue_operations.get_packet_events(request, redis=mock_redis)
+
+        # Verify zrange was called with correct limit (0 to limit-1)
+        mock_redis.zrange.assert_called_once_with("pkt-limit:events", 0, 4, withscores=True)
+
+    @pytest.mark.asyncio
+    async def test_get_stuck_packets_success(self):
+        """Test retrieving stuck packets."""
+        mock_redis = Mock()
+
+        # Simulate two active_work keys, one older than threshold
+        old_data = json.dumps({
+            "agent_id": "agent-old",
+            "packet_id": "pkt-stuck",
+            "claimed_at": "2025-01-01T09:00:00+00:00",  # Old
+            "trace_id": "trace-old",
+            "parent_packet_id": "parent-old",
+            "user_id": "test_team",
+            "task_title": "Stuck Task",
+        })
+        new_data = json.dumps({
+            "agent_id": "agent-new",
+            "packet_id": "pkt-active",
+            "claimed_at": "2025-01-01T10:59:00+00:00",  # Recent
+            "trace_id": "trace-new",
+            "user_id": "test_team",
+        })
+
+        mock_redis.scan.return_value = (0, [
+            "test_team:active_work:pkt-stuck",
+            "test_team:active_work:pkt-active",
+        ])
+        mock_redis.get.side_effect = [old_data, new_data]
+
+        # Mock datetime to make pkt-stuck appear old (> 300s)
+        from datetime import datetime, timezone
+        fixed_time = datetime(2025, 1, 1, 11, 0, 0, tzinfo=timezone.utc)
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            with patch("src.mcp_server.queue_operations.datetime") as mock_dt:
+                mock_dt.now.return_value = fixed_time
+                mock_dt.fromisoformat = datetime.fromisoformat
+
+                result = await queue_operations.get_stuck_packets(
+                    user_id="test_team", threshold=300, redis=mock_redis
+                )
+
+        assert result.count == 1
+        assert result.threshold_seconds == 300
+        assert len(result.stuck_packets) == 1
+
+        stuck = result.stuck_packets[0]
+        assert stuck.packet_id == "pkt-stuck"
+        assert stuck.agent_id == "agent-old"
+        assert stuck.trace_id == "trace-old"
+        assert stuck.age_seconds > 300
+
+    @pytest.mark.asyncio
+    async def test_get_stuck_packets_empty(self):
+        """Test stuck packets with no stuck work."""
+        mock_redis = Mock()
+        mock_redis.scan.return_value = (0, [])  # No active work keys
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.get_stuck_packets(
+                user_id="empty_team", threshold=300, redis=mock_redis
+            )
+
+        assert result.count == 0
+        assert len(result.stuck_packets) == 0
+
+    @pytest.mark.asyncio
+    async def test_get_stuck_packets_threshold_filtering(self):
+        """Test that threshold properly filters stuck packets."""
+        mock_redis = Mock()
+
+        # Create packet claimed 200 seconds ago
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        claimed_200s_ago = (now - timedelta(seconds=200)).isoformat()
+
+        active_data = json.dumps({
+            "agent_id": "agent-1",
+            "packet_id": "pkt-recent",
+            "claimed_at": claimed_200s_ago,
+            "user_id": "test_team",
+        })
+
+        mock_redis.scan.return_value = (0, ["test_team:active_work:pkt-recent"])
+        mock_redis.get.return_value = active_data
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            # With 300s threshold, 200s old packet should NOT be stuck
+            result = await queue_operations.get_stuck_packets(
+                user_id="test_team", threshold=300, redis=mock_redis
+            )
+
+        assert result.count == 0  # Not stuck yet
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            # With 100s threshold, 200s old packet SHOULD be stuck
+            result = await queue_operations.get_stuck_packets(
+                user_id="test_team", threshold=100, redis=mock_redis
+            )
+
+        assert result.count == 1  # Now stuck
+
+
 class TestRouteRegistration:
     """Tests for route registration."""
 
@@ -589,6 +884,10 @@ class TestRouteRegistration:
         assert "/tools/unblock_packet" in routes
         assert "/tools/block_packet" in routes
         assert "/tools/escalate_intervention" in routes
+        # Pipeline observability endpoints
+        assert "/tools/log_execution_event" in routes
+        assert "/tools/get_packet_events" in routes
+        assert "/tools/stuck_packets" in routes
 
     def test_get_redis_raises_when_not_initialized(self):
         """Test that get_redis raises 503 when Redis not initialized."""
