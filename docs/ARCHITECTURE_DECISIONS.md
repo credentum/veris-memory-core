@@ -28,6 +28,7 @@ curl -X POST http://172.17.0.1:8000/tools/query_graph \
 
 | Date | Title | Status | Context ID | Recovery Query |
 |------|-------|--------|------------|----------------|
+| 2025-12-19 | VMC-ADR-008: Episodic Memory System | Deferred | `b05fed38-eb86-46b0-8731-e62dcfdc7fc8` | `VMC-ADR-008 episodic memory episode boundaries replay summarization deferred` |
 | 2025-12-19 | VMC-ADR-007: Vault HSM Integration | Deferred | `7f5c1c8d-e4af-46ed-b361-03a1c72ffa4d` | `VMC-ADR-007 Vault HSM signing Ed25519 compliance deferred` |
 | 2025-12-19 | VMC-ADR-006: Cold Storage Archival | Deferred | `4804c7dd-9281-4af7-9816-10805fb8610f` | `VMC-ADR-006 cold storage archival SCAR S3 deferred` |
 | 2025-12-19 | VMC-ADR-005: Covenant Conflict Resolution | Deferred | `8998e997-e185-4376-affe-bb2e5dd4dad0` | `ADR-005 conflict resolution deferred automation trigger threshold` |
@@ -39,6 +40,70 @@ curl -X POST http://172.17.0.1:8000/tools/query_graph \
 ---
 
 ## Decision Details
+
+### 2025-12-19: VMC-ADR-008 - Episodic Memory System (Deferred)
+
+**Status:** Deferred (P3)
+**GitHub Issue:** [#72](https://github.com/credentum/veris-memory-core/issues/72)
+
+**Context:** System has trajectory memory (find similar failures) but lacks episodic memory (what happened during session X, summarize this week). Current episodic capability scores 4/10.
+
+**Current Capabilities:**
+- Raw events captured via trajectory logging
+- Causation tracked via PRECEDED_BY relationships
+- Semantic search over trajectories
+- hours_ago time filtering (limited)
+
+**Missing Capabilities:**
+- Episode boundaries (what is an episode?)
+- Date range queries ("what happened on December 15th?")
+- Episode replay ("show task-xyz from start to finish")
+- Episode summarization ("summarize this week's learnings")
+- Pattern extraction across episodes
+
+**Decision:** `DEFER_WITH_DESIGN`
+
+**Rationale:** Trajectory system serves immediate need (learning from failures). Episodic memory is enriching but not essential today. Estimated effort: 2-3 sprints.
+
+**Episode Schema (Preserved Design):**
+
+```python
+@dataclass
+class Episode:
+    episode_id: UUID
+    episode_type: Literal["task", "session", "incident", "sprint"]
+    start_time: datetime
+    end_time: datetime
+    trigger_event: str
+    outcome: Literal["success", "failure", "partial", "abandoned"]
+    trajectories: List[trajectory_id]
+    summary: Optional[str]  # LLM-generated
+    learnings: List[str]
+    tags: List[str]
+```
+
+**Future Endpoints:**
+- `GET /episodes?date=YYYY-MM-DD`
+- `GET /episodes?start=X&end=Y`
+- `GET /episodes/recent?limit=N`
+- `GET /episodes/{id}/replay`
+- `POST /episodes/{id}/summarize`
+
+**Activation Triggers:**
+
+| Condition | Metric | Threshold |
+|-----------|--------|-----------|
+| 1 | `trajectory_count` | 500 |
+| 2 | `incident_replay_request` | 1 |
+| 3 | `meta_precedent_extraction_needed` | boolean |
+| 4 | `positive_learning_initiative` | boolean |
+
+**Council Dissent:** The Confessor notes the system is pessimistically biased—learns from failures, not successes. Episodic memory would address this philosophical gap.
+
+**Agent Instructions:**
+> Do not implement episodic memory until activation triggers are met. Current trajectory system is sufficient for learning from failures.
+
+---
 
 ### 2025-12-19: VMC-ADR-007 - Vault HSM Integration (Deferred)
 
@@ -234,6 +299,7 @@ Weight = Surprise × (Authority / 10) × (1 + 0.5 × Sparsity)
 
 ## Deferred (With Activation Triggers)
 
+- [ ] **VMC-ADR-008:** Episodic Memory System ([#72](https://github.com/credentum/veris-memory-core/issues/72)) - P3
 - [ ] **VMC-ADR-007:** Vault HSM Integration ([#71](https://github.com/credentum/veris-memory-core/issues/71))
 - [ ] **VMC-ADR-006:** Cold Storage Archival ([#70](https://github.com/credentum/veris-memory-core/issues/70))
 - [ ] **VMC-ADR-005:** Covenant Conflict Resolution Automation ([#66](https://github.com/credentum/veris-memory-core/issues/66))
@@ -242,7 +308,6 @@ Weight = Surprise × (Authority / 10) × (1 + 0.5 × Sparsity)
 
 - [ ] Forgetting/decay mechanism
 - [ ] Memory consolidation (sleep cycle)
-- [ ] Episodic memory structure
 - [ ] Cross-agent theory of mind
 
 ---
@@ -281,3 +346,4 @@ Weight = Surprise × (Authority / 10) × (1 + 0.5 × Sparsity)
 - [VMC-ADR-005: Covenant Conflict Resolution (Issue #66)](https://github.com/credentum/veris-memory-core/issues/66)
 - [VMC-ADR-006: Cold Storage Archival (Issue #70)](https://github.com/credentum/veris-memory-core/issues/70)
 - [VMC-ADR-007: Vault HSM Integration (Issue #71)](https://github.com/credentum/veris-memory-core/issues/71)
+- [VMC-ADR-008: Episodic Memory System (Issue #72)](https://github.com/credentum/veris-memory-core/issues/72)
