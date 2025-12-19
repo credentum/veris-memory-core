@@ -18,10 +18,17 @@ Endpoints:
 - POST /tools/get_packet_events - Query packet event timeline
 - GET /tools/stuck_packets - Find abandoned/stuck work packets
 
+Coder Work-In-Progress (WIP) Observability:
+- POST /tools/set_coder_wip - Set coder WIP entry when claiming packet
+- POST /tools/clear_coder_wip - Clear coder WIP entry when done
+- POST /tools/update_coder_heartbeat - Update progress (turn, files, tool calls)
+- GET /tools/get_all_coder_wip - Get all active coders with their status
+
 Pipeline Observability (added for debugging silent failures):
 - Active work tracking: When agent pops packet, SETEX creates tracking key with TTL
 - Event stream: Sorted set per packet records lifecycle events
 - Stuck detection: Scan for active_work keys older than threshold
+- Coder WIP: Hash with real-time coder status for debugging
 """
 
 import asyncio
@@ -1210,6 +1217,252 @@ async def get_stuck_packets(
     except Exception as e:
         logger.error(f"Failed to get stuck packets: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get stuck packets: {e}")
+
+
+# =============================================================================
+# Coder Work-In-Progress (WIP) Endpoints
+# =============================================================================
+
+# Redis key for coder WIP hash
+CODER_WIP_KEY = "coder_wip"
+
+# Default TTL for coder WIP entries (5 minutes - auto-cleanup if agent crashes)
+CODER_WIP_TTL = int(os.environ.get("CODER_WIP_TTL", "300"))
+
+
+class SetCoderWipRequest(BaseModel):
+    """Request to set coder work-in-progress entry."""
+
+    agent_id: str = Field(..., description="Coder agent ID")
+    packet_id: str = Field(..., description="Work packet being processed")
+    started_at: Optional[str] = Field(
+        default=None, description="ISO timestamp when work started (auto-set if not provided)"
+    )
+
+
+class SetCoderWipResponse(BaseModel):
+    """Response after setting coder WIP."""
+
+    success: bool
+    message: str = ""
+
+
+class ClearCoderWipRequest(BaseModel):
+    """Request to clear coder work-in-progress entry."""
+
+    agent_id: str = Field(..., description="Coder agent ID to clear")
+
+
+class ClearCoderWipResponse(BaseModel):
+    """Response after clearing coder WIP."""
+
+    success: bool
+    was_present: bool = Field(..., description="Whether the entry existed before clearing")
+
+
+class UpdateCoderHeartbeatRequest(BaseModel):
+    """Request to update coder heartbeat with progress info."""
+
+    agent_id: str = Field(..., description="Coder agent ID")
+    turn: int = Field(..., ge=1, description="Current turn number")
+    files_written: List[str] = Field(default_factory=list, description="Files written so far")
+    tool_calls_made: int = Field(default=0, ge=0, description="Total tool calls made")
+
+
+class UpdateCoderHeartbeatResponse(BaseModel):
+    """Response after updating coder heartbeat."""
+
+    success: bool
+    message: str = ""
+
+
+class CoderWipInfo(BaseModel):
+    """Information about an active coder."""
+
+    agent_id: str
+    packet_id: str
+    started_at: str
+    last_heartbeat: str
+    current_turn: int = Field(default=0)
+    files_written: List[str] = Field(default_factory=list)
+    tool_calls_made: int = Field(default=0)
+    elapsed_seconds: int = Field(default=0, description="Seconds since started")
+
+
+class GetAllCoderWipResponse(BaseModel):
+    """Response with all active coders."""
+
+    coders: Dict[str, CoderWipInfo]
+    count: int
+
+
+@router.post("/tools/set_coder_wip", response_model=SetCoderWipResponse)
+async def set_coder_wip(
+    request: SetCoderWipRequest, redis=Depends(get_redis)
+) -> SetCoderWipResponse:
+    """
+    Set coder work-in-progress entry when an agent claims a packet.
+
+    Stores WIP data in a Redis hash for O(1) lookups.
+    Enables real-time visibility into what coders are working on.
+    """
+    try:
+        started_at = request.started_at or datetime.now(timezone.utc).isoformat()
+
+        wip_data = {
+            "packet_id": request.packet_id,
+            "started_at": started_at,
+            "last_heartbeat": started_at,
+            "current_turn": 0,
+            "files_written": [],
+            "tool_calls_made": 0,
+        }
+
+        # Store in hash (HSET)
+        redis.hset(CODER_WIP_KEY, request.agent_id, json.dumps(wip_data))
+
+        logger.info(
+            f"Coder WIP set: agent={request.agent_id}, packet={request.packet_id}"
+        )
+
+        return SetCoderWipResponse(
+            success=True,
+            message=f"WIP set for {request.agent_id} on packet {request.packet_id}",
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to set coder WIP: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to set coder WIP: {e}")
+
+
+@router.post("/tools/clear_coder_wip", response_model=ClearCoderWipResponse)
+async def clear_coder_wip(
+    request: ClearCoderWipRequest, redis=Depends(get_redis)
+) -> ClearCoderWipResponse:
+    """
+    Clear coder work-in-progress entry when agent completes or fails.
+
+    Should be called in finally block to ensure cleanup even on errors.
+    """
+    try:
+        # HDEL returns number of fields removed
+        removed = redis.hdel(CODER_WIP_KEY, request.agent_id)
+
+        logger.info(f"Coder WIP cleared: agent={request.agent_id}, was_present={removed > 0}")
+
+        return ClearCoderWipResponse(success=True, was_present=removed > 0)
+
+    except Exception as e:
+        logger.error(f"Failed to clear coder WIP: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to clear coder WIP: {e}")
+
+
+@router.post("/tools/update_coder_heartbeat", response_model=UpdateCoderHeartbeatResponse)
+async def update_coder_heartbeat(
+    request: UpdateCoderHeartbeatRequest, redis=Depends(get_redis)
+) -> UpdateCoderHeartbeatResponse:
+    """
+    Update coder heartbeat with current progress.
+
+    Called after each turn to show real-time progress:
+    - Current turn number
+    - Files written so far
+    - Tool calls made
+
+    If the coder WIP entry doesn't exist (e.g., race condition),
+    this will log a warning but not fail.
+    """
+    try:
+        # Get existing WIP data
+        raw_data = redis.hget(CODER_WIP_KEY, request.agent_id)
+
+        if not raw_data:
+            logger.warning(
+                f"Heartbeat for unknown coder: agent={request.agent_id}, "
+                f"turn={request.turn} (WIP entry may have been cleared)"
+            )
+            return UpdateCoderHeartbeatResponse(
+                success=False,
+                message=f"No WIP entry for agent {request.agent_id}",
+            )
+
+        # Update with new progress
+        wip_data = json.loads(raw_data)
+        wip_data["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
+        wip_data["current_turn"] = request.turn
+        wip_data["files_written"] = request.files_written
+        wip_data["tool_calls_made"] = request.tool_calls_made
+
+        # Store updated data
+        redis.hset(CODER_WIP_KEY, request.agent_id, json.dumps(wip_data))
+
+        logger.debug(
+            f"Coder heartbeat: agent={request.agent_id}, turn={request.turn}, "
+            f"files={len(request.files_written)}, tool_calls={request.tool_calls_made}"
+        )
+
+        return UpdateCoderHeartbeatResponse(
+            success=True,
+            message=f"Heartbeat updated for {request.agent_id}",
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to update coder heartbeat: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to update coder heartbeat: {e}"
+        )
+
+
+@router.get("/tools/get_all_coder_wip", response_model=GetAllCoderWipResponse)
+async def get_all_coder_wip(redis=Depends(get_redis)) -> GetAllCoderWipResponse:
+    """
+    Get all active coder work-in-progress entries.
+
+    Returns a dict of agent_id -> CoderWipInfo for all active coders.
+    Use this to see what all coders are working on in real-time.
+    """
+    try:
+        # HGETALL returns dict of field -> value
+        raw_data = redis.hgetall(CODER_WIP_KEY)
+
+        coders = {}
+        now = datetime.now(timezone.utc)
+
+        for agent_id, raw_wip in raw_data.items():
+            try:
+                # Handle bytes if returned
+                if isinstance(agent_id, bytes):
+                    agent_id = agent_id.decode("utf-8")
+                if isinstance(raw_wip, bytes):
+                    raw_wip = raw_wip.decode("utf-8")
+
+                wip_data = json.loads(raw_wip)
+
+                # Calculate elapsed time
+                started_at = datetime.fromisoformat(wip_data["started_at"])
+                elapsed_seconds = int((now - started_at).total_seconds())
+
+                coders[agent_id] = CoderWipInfo(
+                    agent_id=agent_id,
+                    packet_id=wip_data.get("packet_id", "unknown"),
+                    started_at=wip_data.get("started_at", ""),
+                    last_heartbeat=wip_data.get("last_heartbeat", ""),
+                    current_turn=wip_data.get("current_turn", 0),
+                    files_written=wip_data.get("files_written", []),
+                    tool_calls_made=wip_data.get("tool_calls_made", 0),
+                    elapsed_seconds=elapsed_seconds,
+                )
+
+            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                logger.warning(f"Invalid WIP data for {agent_id}: {e}")
+
+        logger.debug(f"Retrieved {len(coders)} active coder WIP entries")
+
+        return GetAllCoderWipResponse(coders=coders, count=len(coders))
+
+    except Exception as e:
+        logger.error(f"Failed to get coder WIP: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get coder WIP: {e}")
 
 
 # =============================================================================
