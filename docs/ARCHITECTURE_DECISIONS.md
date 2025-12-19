@@ -28,6 +28,7 @@ curl -X POST http://172.17.0.1:8000/tools/query_graph \
 
 | Date | Title | Status | Context ID | Recovery Query |
 |------|-------|--------|------------|----------------|
+| 2025-12-19 | VMC-ADR-009: Audit Log HTTP Endpoints | Deferred | `d3c2dd9e-cfaf-4ef7-955e-11a769089545` | `VMC-ADR-009 audit log endpoints WAL verify hash chain` |
 | 2025-12-19 | VMC-ADR-008: Episodic Memory System | Deferred | `b05fed38-eb86-46b0-8731-e62dcfdc7fc8` | `VMC-ADR-008 episodic memory episode boundaries replay summarization deferred` |
 | 2025-12-19 | VMC-ADR-007: Vault HSM Integration | Deferred | `7f5c1c8d-e4af-46ed-b361-03a1c72ffa4d` | `VMC-ADR-007 Vault HSM signing Ed25519 compliance deferred` |
 | 2025-12-19 | VMC-ADR-006: Cold Storage Archival | Deferred | `4804c7dd-9281-4af7-9816-10805fb8610f` | `VMC-ADR-006 cold storage archival SCAR S3 deferred` |
@@ -40,6 +41,58 @@ curl -X POST http://172.17.0.1:8000/tools/query_graph \
 ---
 
 ## Decision Details
+
+### 2025-12-19: VMC-ADR-009 - Audit Log HTTP Endpoints (Deferred)
+
+**Status:** Deferred
+**GitHub Issue:** [#73](https://github.com/credentum/veris-memory-core/issues/73)
+
+**Context:** Audit infrastructure code is built (WAL, crypto, provenance) but some HTTP endpoints are not exposed. The code works internally but lacks direct API access.
+
+**Current State:**
+
+| Phase | Code | Endpoints |
+|-------|------|-----------|
+| Phase 1: Audit Log | ✅ Built | ❌ Not exposed |
+| Phase 2: Provenance | ✅ Built | ⚠️ Partial |
+| Phase 3: Retention | ✅ Built | ✅ Complete |
+
+**Missing Endpoints:**
+
+| Endpoint | Purpose | File |
+|----------|---------|------|
+| `POST /audit/log` | Write audit entries directly | `src/audit/wal.py` |
+| `GET /audit/log/{id}` | Retrieve specific audit entry | `src/audit/wal.py` |
+| `POST /audit/verify` | Verify hash chain integrity | `src/audit/crypto.py` |
+| `POST /audit/provenance/link` | Explicitly link artifacts | `src/audit/provenance.py` |
+
+**Working Endpoints:**
+
+| Endpoint | Status |
+|----------|--------|
+| `POST /audit/trace/{id}` | ✅ Works |
+| `POST /audit/descendants/{id}` | ✅ Works |
+| `POST /audit/retention/process` | ✅ Works |
+| `POST /learning/precedents/store` | ✅ Works |
+| `POST /learning/precedents/query` | ✅ Works |
+| `GET /learning/stats` | ✅ Works |
+
+**Decision:** `DEFER_IMPLEMENTATION`
+
+**Rationale:** Internal usage is sufficient for now. Endpoints would be needed for external audit tools or compliance dashboards.
+
+**Activation Triggers:**
+
+| Condition | Metric | Threshold |
+|-----------|--------|-----------|
+| 1 | `external_audit_tool_integration` | 1 |
+| 2 | `compliance_dashboard_request` | 1 |
+| 3 | `hash_chain_verification_needed` | 1 |
+
+**Agent Instructions:**
+> Do not expose audit log endpoints until activation triggers are met. Internal audit functionality works via other operations.
+
+---
 
 ### 2025-12-19: VMC-ADR-008 - Episodic Memory System (Deferred)
 
@@ -299,6 +352,7 @@ Weight = Surprise × (Authority / 10) × (1 + 0.5 × Sparsity)
 
 ## Deferred (With Activation Triggers)
 
+- [ ] **VMC-ADR-009:** Audit Log HTTP Endpoints ([#73](https://github.com/credentum/veris-memory-core/issues/73))
 - [ ] **VMC-ADR-008:** Episodic Memory System ([#72](https://github.com/credentum/veris-memory-core/issues/72)) - P3
 - [ ] **VMC-ADR-007:** Vault HSM Integration ([#71](https://github.com/credentum/veris-memory-core/issues/71))
 - [ ] **VMC-ADR-006:** Cold Storage Archival ([#70](https://github.com/credentum/veris-memory-core/issues/70))
@@ -347,3 +401,4 @@ Weight = Surprise × (Authority / 10) × (1 + 0.5 × Sparsity)
 - [VMC-ADR-006: Cold Storage Archival (Issue #70)](https://github.com/credentum/veris-memory-core/issues/70)
 - [VMC-ADR-007: Vault HSM Integration (Issue #71)](https://github.com/credentum/veris-memory-core/issues/71)
 - [VMC-ADR-008: Episodic Memory System (Issue #72)](https://github.com/credentum/veris-memory-core/issues/72)
+- [VMC-ADR-009: Audit Log HTTP Endpoints (Issue #73)](https://github.com/credentum/veris-memory-core/issues/73)
