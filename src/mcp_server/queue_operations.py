@@ -6,14 +6,22 @@ abstracting Redis operations so agents don't need raw Redis credentials.
 
 Endpoints:
 - POST /tools/submit_work_packet - Push work to queue
-- POST /tools/pop_work_packet - Pop work from queue (blocking)
+- POST /tools/pop_work_packet - Pop work from queue (blocking, tracks active work)
 - GET /tools/queue_depth - Check queue length
-- POST /tools/complete_task - Store completion and notify
+- POST /tools/complete_task - Store completion and notify (clears active work)
 - POST /tools/circuit_breaker/check - Increment hop counter
 - POST /tools/circuit_breaker/reset - Reset hop counter
 - GET /tools/blocked_packets - List blocked packets
 - POST /tools/unblock_packet - Move packet from blocked to main queue
 - POST /tools/escalate_intervention - Escalate to intervention queue
+- POST /tools/log_execution_event - Log packet lifecycle event
+- POST /tools/get_packet_events - Query packet event timeline
+- GET /tools/stuck_packets - Find abandoned/stuck work packets
+
+Pipeline Observability (added for debugging silent failures):
+- Active work tracking: When agent pops packet, SETEX creates tracking key with TTL
+- Event stream: Sorted set per packet records lifecycle events
+- Stuck detection: Scan for active_work keys older than threshold
 """
 
 import asyncio
@@ -21,6 +29,8 @@ import json
 import logging
 import os
 import time
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -94,6 +104,7 @@ class PopWorkPacketRequest(BaseModel):
 
     user_id: str = Field(..., description="Team/user ID for queue isolation")
     timeout: int = Field(default=5, description="Blocking timeout in seconds (0-30)")
+    agent_id: str = Field(default="unknown", description="Agent claiming the work packet")
 
 
 class PopWorkPacketResponse(BaseModel):
@@ -239,6 +250,70 @@ class EscalateInterventionResponse(BaseModel):
     message: str = ""
 
 
+class LogExecutionEventRequest(BaseModel):
+    """Request to log an execution event for a packet."""
+
+    packet_id: str = Field(..., description="Packet ID this event belongs to")
+    event_type: str = Field(..., description="Event type (e.g., work_started, coder_completed, error)")
+    agent_id: str = Field(default="unknown", description="Agent that generated the event")
+    trace_id: Optional[str] = Field(default=None, description="Trace ID for correlation")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional event metadata")
+
+
+class LogExecutionEventResponse(BaseModel):
+    """Response after logging execution event."""
+
+    success: bool
+    event_count: int = Field(..., description="Total events for this packet after logging")
+
+
+class GetPacketEventsRequest(BaseModel):
+    """Request to get events for a packet."""
+
+    packet_id: str = Field(..., description="Packet ID to get events for")
+    limit: int = Field(default=100, ge=1, le=1000, description="Max events to return")
+
+
+class PacketEvent(BaseModel):
+    """A single packet event."""
+
+    event_type: str
+    agent_id: str
+    timestamp: str
+    trace_id: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    score: float = Field(..., description="Unix timestamp score from sorted set")
+
+
+class GetPacketEventsResponse(BaseModel):
+    """Response with packet events."""
+
+    packet_id: str
+    events: List[PacketEvent]
+    total: int
+
+
+class ActiveWorkInfo(BaseModel):
+    """Information about active work tracking."""
+
+    agent_id: str
+    packet_id: str
+    claimed_at: str
+    trace_id: Optional[str] = None
+    parent_packet_id: Optional[str] = None
+    user_id: str
+    task_title: Optional[str] = None
+    age_seconds: int = Field(..., description="Seconds since work was claimed")
+
+
+class StuckPacketsResponse(BaseModel):
+    """Response with stuck packets."""
+
+    stuck_packets: List[ActiveWorkInfo]
+    count: int
+    threshold_seconds: int
+
+
 # =============================================================================
 # Redis Client Dependency
 # =============================================================================
@@ -382,6 +457,20 @@ def get_intervention_queue_key(user_id: str) -> str:
     return f"{user_id}:queue:intervention"
 
 
+def get_active_work_key(user_id: str, packet_id: str) -> str:
+    """Get the active work tracking key."""
+    return f"{user_id}:active_work:{packet_id}"
+
+
+def get_packet_events_key(packet_id: str) -> str:
+    """Get the packet events sorted set key."""
+    return f"{packet_id}:events"
+
+
+# Default TTL for active work tracking (10 minutes)
+ACTIVE_WORK_TTL = int(os.environ.get("ACTIVE_WORK_TTL", "600"))
+
+
 # =============================================================================
 # Work Queue Endpoints
 # =============================================================================
@@ -489,9 +578,25 @@ async def pop_work_packet(
             packet_json = result[1]
             packet = json.loads(packet_json)
             queue_depth = redis.llen(queue_key)
+            packet_id = packet.get("packet_id", "unknown")
+
+            # Track active work - this enables detection of stuck/crashed agents
+            active_work_key = get_active_work_key(request.user_id, packet_id)
+            active_work_data = {
+                "agent_id": request.agent_id,
+                "packet_id": packet_id,
+                "claimed_at": datetime.now(timezone.utc).isoformat(),
+                "trace_id": packet.get("meta", {}).get("trace_id", ""),
+                "parent_packet_id": packet.get("meta", {}).get("parent_packet_id"),
+                "user_id": request.user_id,
+                "task_title": packet.get("task", {}).get("title", "")[:100],
+            }
+            redis.setex(active_work_key, ACTIVE_WORK_TTL, json.dumps(active_work_data))
 
             logger.info(
-                f"Popped packet {packet.get('packet_id')} from {queue_key}, remaining={queue_depth}"
+                f"Popped packet {packet_id} from {queue_key}, "
+                f"agent={request.agent_id}, remaining={queue_depth}, "
+                f"active_work_ttl={ACTIVE_WORK_TTL}s"
             )
 
             return PopWorkPacketResponse(packet=packet, queue_depth=queue_depth)
@@ -577,6 +682,12 @@ async def complete_task(
         # Store completion record (with TTL for cleanup)
         completion_key = f"{request.user_id}:completions:{request.packet_id}"
         redis.setex(completion_key, 86400, json.dumps(completion_event))  # 24h TTL
+
+        # Clear active work tracking - packet is no longer in-flight
+        active_work_key = get_active_work_key(request.user_id, request.packet_id)
+        deleted = redis.delete(active_work_key)
+        if deleted:
+            logger.debug(f"Cleared active_work tracking for {request.packet_id}")
 
         # Publish to completion channel (per-packet for monitoring)
         channel = get_completion_channel(request.user_id, request.packet_id)
@@ -874,7 +985,6 @@ async def escalate_intervention(
         # Build intervention entry with timestamp if not provided
         intervention_data = request.intervention.model_dump()
         if not intervention_data.get("timestamp"):
-            from datetime import datetime, timezone
             intervention_data["timestamp"] = datetime.now(timezone.utc).isoformat()
 
         intervention_entry = json.dumps(intervention_data)
@@ -899,6 +1009,169 @@ async def escalate_intervention(
         raise HTTPException(
             status_code=500, detail=f"Failed to escalate to intervention: {e}"
         )
+
+
+# =============================================================================
+# Pipeline Observability Endpoints
+# =============================================================================
+
+# Default TTL for packet events (24 hours)
+PACKET_EVENTS_TTL = int(os.environ.get("PACKET_EVENTS_TTL", "86400"))
+
+
+@router.post("/tools/log_execution_event", response_model=LogExecutionEventResponse)
+async def log_execution_event(
+    request: LogExecutionEventRequest, redis=Depends(get_redis)
+) -> LogExecutionEventResponse:
+    """
+    Log an execution event for a packet.
+
+    Events are stored in a Redis sorted set keyed by packet_id,
+    with timestamps as scores for ordered retrieval.
+    This creates a queryable timeline of packet lifecycle.
+    """
+    try:
+        events_key = get_packet_events_key(request.packet_id)
+
+        event = {
+            "event_type": request.event_type,
+            "agent_id": request.agent_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "trace_id": request.trace_id,
+            **request.metadata,
+        }
+
+        # Use current timestamp as score for ordering
+        score = time.time()
+        redis.zadd(events_key, {json.dumps(event): score})
+
+        # Set/refresh TTL
+        redis.expire(events_key, PACKET_EVENTS_TTL)
+
+        # Get total event count
+        event_count = redis.zcard(events_key)
+
+        logger.debug(
+            f"Logged event {request.event_type} for packet {request.packet_id}, "
+            f"agent={request.agent_id}, total_events={event_count}"
+        )
+
+        return LogExecutionEventResponse(success=True, event_count=event_count)
+
+    except Exception as e:
+        logger.error(f"Failed to log execution event: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to log execution event: {e}")
+
+
+@router.post("/tools/get_packet_events", response_model=GetPacketEventsResponse)
+async def get_packet_events(
+    request: GetPacketEventsRequest, redis=Depends(get_redis)
+) -> GetPacketEventsResponse:
+    """
+    Get execution events for a packet.
+
+    Returns events in chronological order (oldest first).
+    Use this to debug packet lifecycle and find where processing failed.
+    """
+    try:
+        events_key = get_packet_events_key(request.packet_id)
+
+        # Get events with scores (timestamps)
+        raw_events = redis.zrange(events_key, 0, request.limit - 1, withscores=True)
+
+        events = []
+        for event_json, score in raw_events:
+            try:
+                event_data = json.loads(event_json)
+                events.append(
+                    PacketEvent(
+                        event_type=event_data.get("event_type", "unknown"),
+                        agent_id=event_data.get("agent_id", "unknown"),
+                        timestamp=event_data.get("timestamp", ""),
+                        trace_id=event_data.get("trace_id"),
+                        metadata={
+                            k: v
+                            for k, v in event_data.items()
+                            if k not in ("event_type", "agent_id", "timestamp", "trace_id")
+                        },
+                        score=score,
+                    )
+                )
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid JSON in events: {event_json[:100]}")
+
+        total = redis.zcard(events_key)
+
+        return GetPacketEventsResponse(
+            packet_id=request.packet_id, events=events, total=total
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to get packet events: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get packet events: {e}")
+
+
+@router.get("/tools/stuck_packets", response_model=StuckPacketsResponse)
+async def get_stuck_packets(
+    user_id: str = Query(..., description="Team/user ID"),
+    threshold: int = Query(default=300, ge=60, le=3600, description="Age threshold in seconds"),
+    redis=Depends(get_redis),
+) -> StuckPacketsResponse:
+    """
+    Get packets that appear stuck (claimed but not completed).
+
+    Scans active_work keys and returns those older than threshold.
+    Use this to identify crashed agents or hung processing.
+    """
+    try:
+        pattern = f"{user_id}:active_work:*"
+        stuck = []
+        cursor = 0
+
+        while True:
+            cursor, keys = redis.scan(cursor, match=pattern, count=100)
+
+            for key in keys:
+                try:
+                    raw_data = redis.get(key)
+                    if not raw_data:
+                        continue
+
+                    data = json.loads(raw_data)
+                    claimed_at = datetime.fromisoformat(data["claimed_at"])
+                    age_seconds = int(
+                        (datetime.now(timezone.utc) - claimed_at).total_seconds()
+                    )
+
+                    if age_seconds > threshold:
+                        stuck.append(
+                            ActiveWorkInfo(
+                                agent_id=data.get("agent_id", "unknown"),
+                                packet_id=data.get("packet_id", "unknown"),
+                                claimed_at=data.get("claimed_at", ""),
+                                trace_id=data.get("trace_id"),
+                                parent_packet_id=data.get("parent_packet_id"),
+                                user_id=data.get("user_id", user_id),
+                                task_title=data.get("task_title"),
+                                age_seconds=age_seconds,
+                            )
+                        )
+                except (json.JSONDecodeError, KeyError, ValueError) as e:
+                    logger.warning(f"Invalid active_work data for {key}: {e}")
+
+            if cursor == 0:
+                break
+
+        # Sort by age (oldest first)
+        stuck.sort(key=lambda x: x.age_seconds, reverse=True)
+
+        return StuckPacketsResponse(
+            stuck_packets=stuck, count=len(stuck), threshold_seconds=threshold
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to get stuck packets: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get stuck packets: {e}")
 
 
 # =============================================================================
