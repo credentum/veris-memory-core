@@ -647,6 +647,16 @@ def get_approved_completions_key(user_id: str) -> str:
     return f"{user_id}:queue:approved_completions"
 
 
+def get_rejected_completions_key(user_id: str) -> str:
+    """Get the rejected completions queue key for a user/team.
+
+    This queue is used to notify the orchestrator when work packets
+    are rejected after max retries, so the saga can be properly closed.
+    Added as part of ADR-007: Pipeline Observability.
+    """
+    return f"{user_id}:queue:rejected_completions"
+
+
 @router.post("/tools/complete_task", response_model=CompleteTaskResponse)
 async def complete_task(
     request: CompleteTaskRequest, redis=Depends(get_redis)
@@ -726,6 +736,33 @@ async def complete_task(
                 f"Task {request.packet_id} APPROVED - queued for publish to {approved_queue_key}"
             )
 
+        # If review_verdict is REJECT, push to rejected_completions queue
+        # so orchestrator can close the saga properly (ADR-007)
+        queued_for_rejection = False
+        if request.review_verdict == "REJECT":
+            rejected_queue_key = get_rejected_completions_key(request.user_id)
+            rejection_data = {
+                "packet_id": request.packet_id,
+                "agent_id": request.agent_id,
+                "user_id": request.user_id,
+                "parent_packet_id": request.parent_packet_id,
+                "workspace_path": request.workspace_path,
+                "timestamp": time.time(),
+                # Rejection details for debugging
+                "verdict": request.review_verdict,
+                "confidence": request.review_confidence,
+                "issues_count": request.review_issues_count,
+                "top_issues": request.review_top_issues,
+                "files_modified": request.files_modified,
+                "error": request.error,
+                "task_name": request.task_name,
+            }
+            redis.lpush(rejected_queue_key, json.dumps(rejection_data))
+            queued_for_rejection = True
+            logger.warning(
+                f"Task {request.packet_id} REJECTED - queued for saga closure to {rejected_queue_key}"
+            )
+
         logger.info(
             f"Task {request.packet_id} completed by {request.agent_id}, "
             f"status={request.status}, verdict={request.review_verdict}, "
@@ -735,6 +772,8 @@ async def complete_task(
         message = f"Completion recorded, {subscribers} subscriber(s) notified"
         if queued_for_publish:
             message += ", queued for PR creation"
+        if queued_for_rejection:
+            message += ", queued for saga closure"
 
         return CompleteTaskResponse(success=True, message=message)
 
