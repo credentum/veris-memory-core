@@ -54,4 +54,8 @@ __all__ = [
     "validate_cache_key",
     "validate_cache_value",
     "validate_ttl",
+    # Phase 4: Covenant Mediator
+    "CovenantValidator",
+    "is_covenant_enabled",
+    "validate_covenant",
 ]

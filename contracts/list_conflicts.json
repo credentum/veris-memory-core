@@ -1,0 +1,148 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "schema_version": "1.0",
+  "name": "list_conflicts",
+  "description": "List Covenant conflicts awaiting resolution (Phase 4: Covenant Mediator)",
+  "version": "1.0.0",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "status": {
+        "type": "string",
+        "enum": ["pending", "resolved", "rejected"],
+        "default": "pending",
+        "description": "Filter by conflict resolution status"
+      },
+      "limit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 50,
+        "default": 10,
+        "description": "Maximum number of conflicts to return"
+      },
+      "severity": {
+        "type": "string",
+        "enum": ["soft", "hard"],
+        "description": "Optional filter by conflict severity"
+      }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["success", "conflicts", "count"],
+    "properties": {
+      "success": {
+        "type": "boolean",
+        "description": "Whether the query was successful"
+      },
+      "conflicts": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "conflict_id": {
+              "type": "string",
+              "description": "Unique identifier for the conflict"
+            },
+            "old_claim_summary": {
+              "type": "string",
+              "description": "Summary of the existing claim being contradicted"
+            },
+            "new_claim_summary": {
+              "type": "string",
+              "description": "Summary of the new claim causing the conflict"
+            },
+            "existing_title": {
+              "type": "string",
+              "description": "Title of the existing context"
+            },
+            "proposed_content": {
+              "type": "object",
+              "description": "The proposed new content"
+            },
+            "severity": {
+              "type": "string",
+              "enum": ["soft", "hard"],
+              "description": "Severity of the conflict"
+            },
+            "suggested_resolution": {
+              "type": "string",
+              "enum": ["accept_new", "keep_existing", "merge"],
+              "description": "System-suggested resolution based on authority comparison"
+            },
+            "detected_at": {
+              "type": "string",
+              "format": "date-time",
+              "description": "When the conflict was detected"
+            },
+            "authority_delta": {
+              "type": "number",
+              "description": "Difference between new authority and existing confidence (positive = new is more authoritative)"
+            }
+          }
+        },
+        "description": "List of conflicts matching the filter criteria"
+      },
+      "count": {
+        "type": "integer",
+        "description": "Number of conflicts returned"
+      },
+      "status_filter": {
+        "type": "string",
+        "description": "The status filter that was applied"
+      },
+      "severity_filter": {
+        "type": "string",
+        "description": "The severity filter that was applied (if any)"
+      },
+      "covenant_enabled": {
+        "type": "boolean",
+        "description": "Whether the Covenant Mediator is enabled"
+      },
+      "error": {
+        "type": "string",
+        "description": "Error message if the query failed"
+      }
+    }
+  },
+  "examples": [
+    {
+      "input": {
+        "status": "pending",
+        "limit": 5
+      },
+      "output": {
+        "success": true,
+        "conflicts": [
+          {
+            "conflict_id": "conflict-abc123",
+            "old_claim_summary": "API uses REST",
+            "new_claim_summary": "API uses GraphQL",
+            "existing_title": "API Design Decision",
+            "severity": "soft",
+            "suggested_resolution": "merge",
+            "detected_at": "2024-01-15T10:30:00Z",
+            "authority_delta": -1.0
+          }
+        ],
+        "count": 1,
+        "status_filter": "pending",
+        "covenant_enabled": true
+      }
+    },
+    {
+      "input": {
+        "status": "pending",
+        "severity": "hard"
+      },
+      "output": {
+        "success": true,
+        "conflicts": [],
+        "count": 0,
+        "status_filter": "pending",
+        "severity_filter": "hard",
+        "covenant_enabled": true
+      }
+    }
+  ]
+}
