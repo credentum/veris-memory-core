@@ -11,6 +11,7 @@ Tests cover:
 - Blocked packet management (blocked_packets, unblock_packet, block_packet)
 - Intervention escalation (escalate_intervention)
 - Pipeline observability (log_execution_event, get_packet_events, stuck_packets)
+- Coder WIP tracking (set_coder_wip, clear_coder_wip, update_coder_heartbeat, get_all_coder_wip)
 """
 
 import json
@@ -860,6 +861,210 @@ class TestPipelineObservabilityEndpoints:
         assert result.count == 1  # Now stuck
 
 
+class TestCoderWipEndpoints:
+    """Tests for coder work-in-progress tracking endpoints."""
+
+    @pytest.mark.asyncio
+    async def test_set_coder_wip_success(self):
+        """Test successful WIP entry creation."""
+        mock_redis = Mock()
+        mock_redis.hset.return_value = 1
+
+        request = queue_operations.SetCoderWipRequest(
+            agent_id="coder-1",
+            packet_id="wp-001",
+        )
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.set_coder_wip(request, redis=mock_redis)
+
+        assert result.success is True
+        assert "coder-1" in result.message
+        assert "wp-001" in result.message
+
+        # Verify Redis HSET call
+        mock_redis.hset.assert_called_once()
+        call_args = mock_redis.hset.call_args
+        assert call_args[0][0] == "coder_wip"
+        assert call_args[0][1] == "coder-1"
+        # Verify stored data contains packet_id
+        stored_data = json.loads(call_args[0][2])
+        assert stored_data["packet_id"] == "wp-001"
+        assert "started_at" in stored_data
+        assert stored_data["current_turn"] == 0
+
+    @pytest.mark.asyncio
+    async def test_set_coder_wip_with_custom_started_at(self):
+        """Test WIP entry with custom start time."""
+        mock_redis = Mock()
+        mock_redis.hset.return_value = 1
+
+        request = queue_operations.SetCoderWipRequest(
+            agent_id="coder-2",
+            packet_id="wp-002",
+            started_at="2025-12-19T10:00:00+00:00",
+        )
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.set_coder_wip(request, redis=mock_redis)
+
+        assert result.success is True
+        stored_data = json.loads(mock_redis.hset.call_args[0][2])
+        assert stored_data["started_at"] == "2025-12-19T10:00:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_clear_coder_wip_success(self):
+        """Test successful WIP entry removal."""
+        mock_redis = Mock()
+        mock_redis.hdel.return_value = 1  # Entry existed and was deleted
+
+        request = queue_operations.ClearCoderWipRequest(agent_id="coder-1")
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.clear_coder_wip(request, redis=mock_redis)
+
+        assert result.success is True
+        assert result.was_present is True
+        mock_redis.hdel.assert_called_once_with("coder_wip", "coder-1")
+
+    @pytest.mark.asyncio
+    async def test_clear_coder_wip_not_present(self):
+        """Test clearing non-existent WIP entry."""
+        mock_redis = Mock()
+        mock_redis.hdel.return_value = 0  # Entry didn't exist
+
+        request = queue_operations.ClearCoderWipRequest(agent_id="unknown-coder")
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.clear_coder_wip(request, redis=mock_redis)
+
+        assert result.success is True
+        assert result.was_present is False
+
+    @pytest.mark.asyncio
+    async def test_update_coder_heartbeat_success(self):
+        """Test successful heartbeat update."""
+        mock_redis = Mock()
+        existing_data = {
+            "packet_id": "wp-001",
+            "started_at": "2025-12-19T10:00:00+00:00",
+            "last_heartbeat": "2025-12-19T10:00:00+00:00",
+            "current_turn": 1,
+            "files_written": [],
+            "tool_calls_made": 2,
+        }
+        mock_redis.hget.return_value = json.dumps(existing_data)
+        mock_redis.hset.return_value = 1
+
+        request = queue_operations.UpdateCoderHeartbeatRequest(
+            agent_id="coder-1",
+            turn=3,
+            files_written=["src/main.py", "src/utils.py"],
+            tool_calls_made=8,
+        )
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.update_coder_heartbeat(request, redis=mock_redis)
+
+        assert result.success is True
+        mock_redis.hget.assert_called_once_with("coder_wip", "coder-1")
+        mock_redis.hset.assert_called_once()
+
+        # Verify updated data
+        updated_data = json.loads(mock_redis.hset.call_args[0][2])
+        assert updated_data["current_turn"] == 3
+        assert updated_data["files_written"] == ["src/main.py", "src/utils.py"]
+        assert updated_data["tool_calls_made"] == 8
+        assert updated_data["packet_id"] == "wp-001"  # Preserved
+
+    @pytest.mark.asyncio
+    async def test_update_coder_heartbeat_not_found(self):
+        """Test heartbeat update for non-existent agent."""
+        mock_redis = Mock()
+        mock_redis.hget.return_value = None  # No existing entry
+
+        request = queue_operations.UpdateCoderHeartbeatRequest(
+            agent_id="unknown-coder",
+            turn=1,
+            files_written=[],
+            tool_calls_made=0,
+        )
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.update_coder_heartbeat(request, redis=mock_redis)
+
+        assert result.success is False
+        assert "No WIP entry" in result.message
+        mock_redis.hset.assert_not_called()  # Should not write
+
+    @pytest.mark.asyncio
+    async def test_get_all_coder_wip_success(self):
+        """Test getting all active coders."""
+        mock_redis = Mock()
+        mock_redis.hgetall.return_value = {
+            "coder-1": json.dumps({
+                "packet_id": "wp-001",
+                "started_at": "2025-12-19T10:00:00+00:00",
+                "last_heartbeat": "2025-12-19T10:01:00+00:00",
+                "current_turn": 3,
+                "files_written": ["src/main.py"],
+                "tool_calls_made": 5,
+            }),
+            "coder-2": json.dumps({
+                "packet_id": "wp-002",
+                "started_at": "2025-12-19T10:02:00+00:00",
+                "last_heartbeat": "2025-12-19T10:02:30+00:00",
+                "current_turn": 1,
+                "files_written": [],
+                "tool_calls_made": 2,
+            }),
+        }
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.get_all_coder_wip(redis=mock_redis)
+
+        assert result.count == 2
+        assert "coder-1" in result.coders
+        assert "coder-2" in result.coders
+        assert result.coders["coder-1"].packet_id == "wp-001"
+        assert result.coders["coder-1"].current_turn == 3
+        assert result.coders["coder-2"].packet_id == "wp-002"
+        assert result.coders["coder-2"].files_written == []
+
+    @pytest.mark.asyncio
+    async def test_get_all_coder_wip_empty(self):
+        """Test getting all coders when none active."""
+        mock_redis = Mock()
+        mock_redis.hgetall.return_value = {}
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.get_all_coder_wip(redis=mock_redis)
+
+        assert result.count == 0
+        assert result.coders == {}
+
+    @pytest.mark.asyncio
+    async def test_get_all_coder_wip_handles_bytes(self):
+        """Test that get_all_coder_wip handles bytes from Redis."""
+        mock_redis = Mock()
+        mock_redis.hgetall.return_value = {
+            b"coder-1": json.dumps({
+                "packet_id": "wp-001",
+                "started_at": "2025-12-19T10:00:00+00:00",
+                "last_heartbeat": "2025-12-19T10:00:00+00:00",
+                "current_turn": 1,
+                "files_written": [],
+                "tool_calls_made": 1,
+            }).encode("utf-8"),
+        }
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.get_all_coder_wip(redis=mock_redis)
+
+        assert result.count == 1
+        assert "coder-1" in result.coders
+
+
 class TestRouteRegistration:
     """Tests for route registration."""
 
@@ -888,6 +1093,11 @@ class TestRouteRegistration:
         assert "/tools/log_execution_event" in routes
         assert "/tools/get_packet_events" in routes
         assert "/tools/stuck_packets" in routes
+        # Coder WIP endpoints
+        assert "/tools/set_coder_wip" in routes
+        assert "/tools/clear_coder_wip" in routes
+        assert "/tools/update_coder_heartbeat" in routes
+        assert "/tools/get_all_coder_wip" in routes
 
     def test_get_redis_raises_when_not_initialized(self):
         """Test that get_redis raises 503 when Redis not initialized."""
