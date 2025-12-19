@@ -109,6 +109,32 @@ except ImportError as e:
     SPARSE_EMBEDDINGS_ENABLED = False
     get_sparse_embedding_service = None
 
+# Phase 4: Covenant Mediator for intelligent memory gating
+# Based on Titans paper (arXiv:2412.00341) - Surprise and Weight principles
+COVENANT_MEDIATOR_ENABLED = os.environ.get("COVENANT_MEDIATOR_ENABLED", "false").lower() == "true"
+HIGH_AUTHORITY_BYPASS = int(os.environ.get("HIGH_AUTHORITY_BYPASS", "8"))
+
+try:
+    from ..validators.covenant_validator import (
+        CovenantValidator,
+        is_covenant_enabled,
+        validate_covenant,
+    )
+    from ..storage.conflict_store import ConflictStore, create_conflict_store
+    from ..models.evaluation import EvaluationAction
+
+    COVENANT_VALIDATOR_AVAILABLE = True
+    logger.info(f"Covenant validator available (COVENANT_MEDIATOR_ENABLED={COVENANT_MEDIATOR_ENABLED})")
+except ImportError as e:
+    logger.warning(f"Covenant validator not available: {e}")
+    COVENANT_VALIDATOR_AVAILABLE = False
+    CovenantValidator = None
+    ConflictStore = None
+    create_conflict_store = None
+    EvaluationAction = None
+    is_covenant_enabled = lambda: False
+    validate_covenant = None
+
 # Health check constants
 HEALTH_CHECK_GRACE_PERIOD_DEFAULT = 60
 HEALTH_CHECK_MAX_RETRIES_DEFAULT = 3
@@ -695,6 +721,13 @@ class StoreContextRequest(BaseModel):
     parent_id: Optional[str] = Field(
         None,
         description="ID of parent context for lineage tracking. Creates DERIVED_FROM relationship.",
+    )
+    # Phase 4: Covenant Mediator - Source authority for memory gating
+    authority: int = Field(
+        default=5,
+        ge=1,
+        le=10,
+        description="Source authority (1-10). Higher authority = more trusted. Authority >= 8 bypasses evaluation.",
     )
 
 
@@ -2509,6 +2542,88 @@ async def store_context(
                                         )
                         except Exception as sparse_err:
                             logger.warning(f"Sparse embedding generation failed (continuing without): {sparse_err}")
+
+                    # Phase 4: Covenant Mediator - Memory gating based on Titans paper
+                    # Evaluate memory worthiness before storage (unless high-authority bypass)
+                    if (
+                        COVENANT_MEDIATOR_ENABLED
+                        and COVENANT_VALIDATOR_AVAILABLE
+                        and request.authority < HIGH_AUTHORITY_BYPASS
+                    ):
+                        try:
+                            logger.info(
+                                f"Covenant evaluation: authority={request.authority}, type={request.type}"
+                            )
+                            evaluation = await validate_covenant(
+                                content=request.content,
+                                embedding=embedding,
+                                authority=request.authority,
+                                context_type=request.type,
+                                qdrant_client=qdrant_client,
+                                neo4j_client=neo4j_client,
+                                sparse_vector=sparse_vector,
+                            )
+
+                            logger.info(
+                                f"Covenant result: action={evaluation.action.value}, "
+                                f"weight={evaluation.weight:.3f}, reason={evaluation.reason}"
+                            )
+
+                            # Handle evaluation result
+                            if evaluation.action == EvaluationAction.REJECT:
+                                logger.info(f"Memory rejected by Covenant: {evaluation.reason}")
+                                return {
+                                    "status": "rejected",
+                                    "reason": evaluation.reason,
+                                    "weight": evaluation.weight,
+                                    "threshold": evaluation.threshold_used,
+                                    "surprise_score": evaluation.surprise_score,
+                                    "context_type": request.type,
+                                    "authority": request.authority,
+                                }
+
+                            elif evaluation.action == EvaluationAction.CONFLICT:
+                                # Create conflict node for contradictions
+                                logger.info(f"Memory conflict detected: {evaluation.reason}")
+                                conflict_store = create_conflict_store(neo4j_client)
+                                from ..models.evaluation import GraphConflict, ConflictSeverity
+
+                                # Build GraphConflict from evaluation
+                                graph_conflict = GraphConflict(
+                                    severity=ConflictSeverity.SOFT,  # Default, can be refined
+                                    existing_claim=evaluation.reason,
+                                    existing_confidence=0.5,
+                                )
+
+                                conflict_id = await conflict_store.create_conflict(
+                                    new_content=request.content,
+                                    existing_context_id=context_id,  # Will be linked when found
+                                    conflict=graph_conflict,
+                                    new_authority=request.authority,
+                                    new_context_id=context_id,
+                                )
+
+                                return {
+                                    "status": "conflict",
+                                    "conflict_id": conflict_id,
+                                    "reason": evaluation.reason,
+                                    "weight": evaluation.weight,
+                                    "context_type": request.type,
+                                    "authority": request.authority,
+                                    "message": "Memory conflicts with existing context. Use list_conflicts and resolve_conflict tools to manage.",
+                                }
+
+                            # EvaluationAction.PROMOTE - continue with normal storage
+                            logger.info(f"Memory promoted for storage: weight={evaluation.weight:.3f}")
+
+                        except Exception as covenant_err:
+                            # Log error but continue with storage (fail-open)
+                            logger.error(f"Covenant evaluation failed (continuing with storage): {covenant_err}")
+
+                    elif request.authority >= HIGH_AUTHORITY_BYPASS:
+                        logger.info(
+                            f"High-authority bypass: authority={request.authority} >= {HIGH_AUTHORITY_BYPASS}"
+                        )
 
                     # Run synchronous Qdrant call in thread pool to avoid blocking event loop
                     vector_id = await asyncio.to_thread(
@@ -4723,6 +4838,215 @@ async def get_user_facts_endpoint(
             "error": str(e),
             "operation": "get_user_facts",
             "user_id": request.user_id,
+        }
+
+
+# ============================================================================
+# Phase 4: Covenant Mediator - Conflict Management Endpoints
+# ============================================================================
+
+
+class ListConflictsRequest(BaseModel):
+    """Request model for list_conflicts tool."""
+
+    status: str = Field(
+        default="pending",
+        pattern="^(pending|resolved|rejected)$",
+        description="Filter by conflict resolution status.",
+    )
+    limit: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="Maximum number of conflicts to return.",
+    )
+    severity: Optional[str] = Field(
+        None,
+        pattern="^(soft|hard)$",
+        description="Optional filter by conflict severity.",
+    )
+
+
+class ResolveConflictRequest(BaseModel):
+    """Request model for resolve_conflict tool."""
+
+    conflict_id: str = Field(..., description="ID of the conflict to resolve.")
+    resolution: str = Field(
+        ...,
+        pattern="^(accept_new|keep_existing|merge)$",
+        description="Resolution type: accept_new (promote new memory), keep_existing (reject new), merge (combine).",
+    )
+    merged_content: Optional[str] = Field(
+        None,
+        description="Required when resolution is 'merge'. JSON string of merged content.",
+    )
+    resolver_id: Optional[str] = Field(
+        None,
+        description="ID of the agent or user resolving the conflict. Auto-populated from API key.",
+    )
+
+
+@app.post("/tools/list_conflicts")
+async def list_conflicts(
+    request: ListConflictsRequest,
+    api_key_info: Optional[APIKeyInfo] = (
+        Depends(verify_api_key) if API_KEY_AUTH_AVAILABLE else None
+    ),
+) -> Dict[str, Any]:
+    """
+    List Covenant conflicts awaiting resolution.
+
+    Phase 4: Covenant Mediator - When memories contradict existing high-confidence
+    knowledge, conflicts are created instead of overwriting. This endpoint lists
+    pending conflicts for review and resolution.
+    """
+    # Check if covenant mediator is available
+    if not COVENANT_VALIDATOR_AVAILABLE:
+        return {
+            "success": False,
+            "error": "Covenant Mediator not available",
+            "conflicts": [],
+            "count": 0,
+        }
+
+    if not neo4j_client:
+        return {
+            "success": False,
+            "error": "Neo4j client not available",
+            "conflicts": [],
+            "count": 0,
+        }
+
+    try:
+        logger.info(f"Listing conflicts: status={request.status}, limit={request.limit}")
+
+        conflict_store = create_conflict_store(neo4j_client)
+        conflicts = await conflict_store.list_conflicts(
+            status=request.status,
+            limit=request.limit,
+            severity=request.severity,
+        )
+
+        # Convert to serializable format
+        conflict_list = []
+        for conflict in conflicts:
+            conflict_list.append({
+                "conflict_id": conflict.conflict_id,
+                "old_claim_summary": conflict.old_claim_summary,
+                "new_claim_summary": conflict.new_claim_summary,
+                "existing_title": conflict.existing_title,
+                "proposed_content": conflict.proposed_content,
+                "severity": conflict.severity.value,
+                "suggested_resolution": conflict.suggested_resolution.value,
+                "detected_at": conflict.detected_at.isoformat() if conflict.detected_at else None,
+                "authority_delta": conflict.authority_delta,
+            })
+
+        logger.info(f"Found {len(conflict_list)} conflicts with status '{request.status}'")
+
+        return {
+            "success": True,
+            "conflicts": conflict_list,
+            "count": len(conflict_list),
+            "status_filter": request.status,
+            "severity_filter": request.severity,
+            "covenant_enabled": COVENANT_MEDIATOR_ENABLED,
+        }
+
+    except Exception as e:
+        logger.error(f"List conflicts failed: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "conflicts": [],
+            "count": 0,
+        }
+
+
+@app.post("/tools/resolve_conflict")
+async def resolve_conflict(
+    request: ResolveConflictRequest,
+    api_key_info: Optional[APIKeyInfo] = (
+        Depends(verify_api_key) if API_KEY_AUTH_AVAILABLE else None
+    ),
+) -> Dict[str, Any]:
+    """
+    Resolve a Covenant conflict.
+
+    Phase 4: Covenant Mediator - Resolves a conflict between new and existing
+    memories. Options:
+    - accept_new: Promote the new memory, potentially deprecating the old
+    - keep_existing: Reject the new memory, keeping current truth
+    - merge: Create a merged context combining both perspectives
+
+    Requires human authorization (authority >= 8) for final resolution.
+    """
+    # Check if covenant mediator is available
+    if not COVENANT_VALIDATOR_AVAILABLE:
+        return {
+            "success": False,
+            "error": "Covenant Mediator not available",
+        }
+
+    if not neo4j_client:
+        return {
+            "success": False,
+            "error": "Neo4j client not available",
+        }
+
+    try:
+        # Validate merge requires merged_content
+        if request.resolution == "merge" and not request.merged_content:
+            return {
+                "success": False,
+                "error": "merged_content is required when resolution is 'merge'",
+                "conflict_id": request.conflict_id,
+            }
+
+        # Get resolver ID from request or API key
+        resolver_id = request.resolver_id
+        if api_key_info and not resolver_id:
+            resolver_id = api_key_info.user_id
+
+        logger.info(
+            f"Resolving conflict {request.conflict_id}: resolution={request.resolution}, "
+            f"resolver={resolver_id}"
+        )
+
+        conflict_store = create_conflict_store(neo4j_client)
+
+        # Import resolution type
+        from ..models.evaluation import ResolutionType
+
+        resolution_type = ResolutionType(request.resolution)
+
+        result = await conflict_store.resolve_conflict(
+            conflict_id=request.conflict_id,
+            resolution=resolution_type,
+            merged_content=request.merged_content,
+            resolver_id=resolver_id,
+        )
+
+        logger.info(
+            f"Conflict {request.conflict_id} resolved: success={result.success}, "
+            f"promoted_context_id={result.promoted_context_id}"
+        )
+
+        return {
+            "success": result.success,
+            "conflict_id": result.conflict_id,
+            "resolution": result.resolution.value,
+            "promoted_context_id": result.promoted_context_id,
+            "message": result.message,
+            "resolver_id": resolver_id,
+        }
+
+    except Exception as e:
+        logger.error(f"Resolve conflict failed: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "conflict_id": request.conflict_id,
         }
 
 

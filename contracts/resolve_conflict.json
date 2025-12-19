@@ -1,0 +1,133 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "schema_version": "1.0",
+  "name": "resolve_conflict",
+  "description": "Resolve a Covenant conflict between new and existing memories (Phase 4: Covenant Mediator)",
+  "version": "1.0.0",
+  "inputSchema": {
+    "type": "object",
+    "required": ["conflict_id", "resolution"],
+    "properties": {
+      "conflict_id": {
+        "type": "string",
+        "description": "ID of the conflict to resolve"
+      },
+      "resolution": {
+        "type": "string",
+        "enum": ["accept_new", "keep_existing", "merge"],
+        "description": "Resolution type: accept_new (promote new memory), keep_existing (reject new), merge (combine both)"
+      },
+      "merged_content": {
+        "type": "string",
+        "description": "Required when resolution is 'merge'. JSON string of merged content combining both perspectives"
+      },
+      "resolver_id": {
+        "type": "string",
+        "description": "ID of the agent or user resolving the conflict. Auto-populated from API key if not provided"
+      }
+    },
+    "if": {
+      "properties": {
+        "resolution": { "const": "merge" }
+      }
+    },
+    "then": {
+      "required": ["merged_content"]
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["success", "conflict_id", "resolution"],
+    "properties": {
+      "success": {
+        "type": "boolean",
+        "description": "Whether the resolution was successful"
+      },
+      "conflict_id": {
+        "type": "string",
+        "description": "ID of the resolved conflict"
+      },
+      "resolution": {
+        "type": "string",
+        "enum": ["accept_new", "keep_existing", "merge"],
+        "description": "The resolution type that was applied"
+      },
+      "promoted_context_id": {
+        "type": "string",
+        "description": "ID of the newly created context (for accept_new or merge resolutions)"
+      },
+      "message": {
+        "type": "string",
+        "description": "Human-readable result message"
+      },
+      "resolver_id": {
+        "type": "string",
+        "description": "ID of the resolver (from request or API key)"
+      },
+      "error": {
+        "type": "string",
+        "description": "Error message if resolution failed"
+      }
+    }
+  },
+  "examples": [
+    {
+      "description": "Accept the new memory, replacing the old claim",
+      "input": {
+        "conflict_id": "conflict-abc123",
+        "resolution": "accept_new"
+      },
+      "output": {
+        "success": true,
+        "conflict_id": "conflict-abc123",
+        "resolution": "accept_new",
+        "promoted_context_id": "ctx-new-789",
+        "message": "Accepted new claim. Created context ctx-new-789",
+        "resolver_id": "agent-1"
+      }
+    },
+    {
+      "description": "Keep the existing memory, rejecting the new one",
+      "input": {
+        "conflict_id": "conflict-def456",
+        "resolution": "keep_existing"
+      },
+      "output": {
+        "success": true,
+        "conflict_id": "conflict-def456",
+        "resolution": "keep_existing",
+        "message": "Kept existing claim. Rejected new memory.",
+        "resolver_id": "human-reviewer"
+      }
+    },
+    {
+      "description": "Merge both perspectives into a new combined context",
+      "input": {
+        "conflict_id": "conflict-ghi789",
+        "resolution": "merge",
+        "merged_content": "{\"title\": \"API supports both REST and GraphQL\", \"type\": \"decision\", \"rationale\": \"REST for legacy clients, GraphQL for new features\"}"
+      },
+      "output": {
+        "success": true,
+        "conflict_id": "conflict-ghi789",
+        "resolution": "merge",
+        "promoted_context_id": "ctx-merged-456",
+        "message": "Merged claims. Created context ctx-merged-456",
+        "resolver_id": "architect-1"
+      }
+    },
+    {
+      "description": "Error when merge is missing merged_content",
+      "input": {
+        "conflict_id": "conflict-jkl012",
+        "resolution": "merge"
+      },
+      "output": {
+        "success": false,
+        "conflict_id": "conflict-jkl012",
+        "resolution": "merge",
+        "error": "merged_content is required when resolution is 'merge'"
+      }
+    }
+  ]
+}
