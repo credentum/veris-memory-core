@@ -13,7 +13,18 @@ Components:
 """
 
 from .agent_namespace import AgentNamespace, AgentSession, NamespaceError
-from .mediator import CovenantMediator, get_covenant_mediator
+
+# Phase 4: Covenant Mediator - lazy import to avoid breaking legacy test imports
+# Some tests import from 'core.xxx' without 'src.' prefix, which causes
+# relative imports in mediator.py to fail. Use direct import when needed:
+#   from src.core.mediator import CovenantMediator, get_covenant_mediator
+try:
+    from .mediator import CovenantMediator, get_covenant_mediator
+    _MEDIATOR_AVAILABLE = True
+except ImportError:
+    CovenantMediator = None  # type: ignore
+    get_covenant_mediator = None  # type: ignore
+    _MEDIATOR_AVAILABLE = False
 
 __all__ = [
     "AgentNamespace",
