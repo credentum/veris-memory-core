@@ -28,6 +28,8 @@ curl -X POST http://172.17.0.1:8000/tools/query_graph \
 
 | Date | Title | Status | Context ID | Recovery Query |
 |------|-------|--------|------------|----------------|
+| 2025-12-19 | VMC-ADR-007: Vault HSM Integration | Deferred | `7f5c1c8d-e4af-46ed-b361-03a1c72ffa4d` | `VMC-ADR-007 Vault HSM signing Ed25519 compliance deferred` |
+| 2025-12-19 | VMC-ADR-006: Cold Storage Archival | Deferred | `4804c7dd-9281-4af7-9816-10805fb8610f` | `VMC-ADR-006 cold storage archival SCAR S3 deferred` |
 | 2025-12-19 | VMC-ADR-005: Covenant Conflict Resolution | Deferred | `8998e997-e185-4376-affe-bb2e5dd4dad0` | `ADR-005 conflict resolution deferred automation trigger threshold` |
 | 2025-12-19 | Phase 4: Covenant Mediator | Deployed | `93a0dfb7-50b8-45b0-8509-8bbe82452d3d` | `covenant mediator phase 4 memory gating` |
 | 2025-12-19 | System Architecture Map | Active | `2867afb3-aae2-4755-8540-cb0b90c75f37` | `veris system architecture map layers status what is built` |
@@ -37,6 +39,69 @@ curl -X POST http://172.17.0.1:8000/tools/query_graph \
 ---
 
 ## Decision Details
+
+### 2025-12-19: VMC-ADR-007 - Vault HSM Integration (Deferred)
+
+**Status:** Deferred
+**GitHub Issue:** [#71](https://github.com/credentum/veris-memory-core/issues/71)
+
+**Context:** Audit entries are signed with Ed25519 but keys are in stub mode (in-memory). No HSM protection.
+
+**Current State:** `crypto.py` has Vault path designed but uses stub signer. Keys generated at startup, lost on restart.
+
+**Decision:** `DEFER_IMPLEMENTATION`
+
+**Rationale:** No compliance requirement yet. Stub mode sufficient for development and testing.
+
+**Future Interface:**
+- Provider: HashiCorp Vault Transit Secrets Engine
+- Key Type: ed25519
+- Operations: sign, verify
+- Rotation: Automatic via Vault policies
+
+**Activation Triggers:**
+
+| Condition | Metric | Threshold |
+|-----------|--------|-----------|
+| 1 | `compliance_requirement` | SOC2 or equivalent |
+| 2 | `production_deployment` | customer_facing |
+| 3 | `audit_tampering_attempt` | 1 |
+
+**Agent Instructions:**
+> Do not implement Vault integration until activation triggers are met. Stub mode is acceptable for internal use.
+
+---
+
+### 2025-12-19: VMC-ADR-006 - Cold Storage Archival (Deferred)
+
+**Status:** Deferred
+**GitHub Issue:** [#70](https://github.com/credentum/veris-memory-core/issues/70)
+
+**Context:** SCAR retention entries are marked for archival after 90 days but remain in Qdrant indefinitely. No cold storage tier exists.
+
+**Current State:** `retention.py` marks SCAR entries as 'archived' but doesn't move them anywhere.
+
+**Decision:** `DEFER_IMPLEMENTATION`
+
+**Rationale:** Storage costs are negligible at current scale. Premature optimization.
+
+**Future Interface:**
+- Destination: S3 or similar object storage
+- Format: Parquet or JSON-LD for queryability
+- Retrieval: On-demand rehydration to Qdrant
+
+**Activation Triggers:**
+
+| Condition | Metric | Threshold |
+|-----------|--------|-----------|
+| 1 | `qdrant_storage_gb` | 50 |
+| 2 | `monthly_storage_cost_usd` | $100 |
+| 3 | `scar_entry_count` | 100,000 |
+
+**Agent Instructions:**
+> Do not implement cold storage until activation triggers are met. Current archival marking is sufficient.
+
+---
 
 ### 2025-12-19: VMC-ADR-005 - Covenant Conflict Resolution (Deferred)
 
@@ -116,9 +181,9 @@ Weight = Surprise × (Authority / 10) × (1 + 0.5 × Sparsity)
 | Layer | Name | Status | Repo |
 |-------|------|--------|------|
 | 1 | Covenant Mediator (Gating) | Implemented | veris-memory-core |
-| 2 | Audit Log | Partial | veris-memory-core |
+| 2 | Audit Log (WAL + Crypto) | Implemented | veris-memory-core |
 | 3 | Provenance Graph | Implemented | veris-memory-core |
-| 4 | Retention & Learning | Designed | agent-dev |
+| 4 | Retention & Learning | Implemented | veris-memory-core |
 | 5 | Storage Layer | Implemented | veris-memory-core |
 | 6 | Hybrid Retrieval | Implemented | veris-memory-core |
 | 7 | Safety Valve | Implemented | agent-dev |
@@ -167,13 +232,18 @@ Weight = Surprise × (Authority / 10) × (1 + 0.5 × Sparsity)
 
 ---
 
-## Not Yet Built
+## Deferred (With Activation Triggers)
+
+- [ ] **VMC-ADR-007:** Vault HSM Integration ([#71](https://github.com/credentum/veris-memory-core/issues/71))
+- [ ] **VMC-ADR-006:** Cold Storage Archival ([#70](https://github.com/credentum/veris-memory-core/issues/70))
+- [ ] **VMC-ADR-005:** Covenant Conflict Resolution Automation ([#66](https://github.com/credentum/veris-memory-core/issues/66))
+
+## Not Yet Built (No ADR)
 
 - [ ] Forgetting/decay mechanism
 - [ ] Memory consolidation (sleep cycle)
 - [ ] Episodic memory structure
 - [ ] Cross-agent theory of mind
-- [ ] SHA-256 hash chain audit log
 
 ---
 
@@ -208,4 +278,6 @@ Weight = Surprise × (Authority / 10) × (1 + 0.5 × Sparsity)
 
 - [System Architecture Map (Issue #68)](https://github.com/credentum/veris-memory-core/issues/68)
 - [agent-dev Architecture Decisions](https://github.com/credentum/agent-dev/blob/main/docs/ARCHITECTURE_DECISIONS.md)
-- [Covenant Mediator Deferral (Issue #66)](https://github.com/credentum/veris-memory-core/issues/66)
+- [VMC-ADR-005: Covenant Conflict Resolution (Issue #66)](https://github.com/credentum/veris-memory-core/issues/66)
+- [VMC-ADR-006: Cold Storage Archival (Issue #70)](https://github.com/credentum/veris-memory-core/issues/70)
+- [VMC-ADR-007: Vault HSM Integration (Issue #71)](https://github.com/credentum/veris-memory-core/issues/71)
