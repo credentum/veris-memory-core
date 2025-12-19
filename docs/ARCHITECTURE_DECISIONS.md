@@ -28,6 +28,10 @@ curl -X POST http://172.17.0.1:8000/tools/query_graph \
 
 | Date | Title | Status | Context ID | Recovery Query |
 |------|-------|--------|------------|----------------|
+| 2025-12-19 | VMC-ADR-015: Saga Failure Recovery | Proposed | `30d134cc-e2d0-44f7-b63b-9138ef93202e` | `VMC-ADR-015 saga failure recovery compensation pattern` |
+| 2025-12-19 | VMC-ADR-014: Cross-Agent Trust Protocol | Proposed | `b4954378-ba21-4680-927e-0adb2d217fcb` | `VMC-ADR-014 cross-agent trust protocol attestation` |
+| 2025-12-19 | VMC-ADR-013: Success Pattern Learning | Proposed | `6ede8763-1870-49a7-bcc2-ee2aad35a064` | `VMC-ADR-013 success pattern learning positive precedents` |
+| 2025-12-19 | VMC-ADR-012: Forgetting/Decay Mechanism | Proposed | `ebdac157-7938-4301-b580-900b00c0882e` | `VMC-ADR-012 forgetting decay mechanism memory pruning` |
 | 2025-12-19 | VMC-ADR-011: Security Infrastructure | Implemented | `e20a97e7-2ec1-4266-9e6a-112a8a8397b5` | `VMC-ADR-011 security WAF RBAC secrets compliance` |
 | 2025-12-19 | VMC-ADR-010: Retrieval Enhancements | Implemented | `53ef660f-0707-46bb-a714-61123d547467` | `VMC-ADR-010 HyDE cross-encoder sparse embeddings hybrid search` |
 | 2025-12-19 | VMC-ADR-009: Audit Log HTTP Endpoints | Deferred | `d3c2dd9e-cfaf-4ef7-955e-11a769089545` | `VMC-ADR-009 audit log endpoints WAL verify hash chain` |
@@ -43,6 +47,174 @@ curl -X POST http://172.17.0.1:8000/tools/query_graph \
 ---
 
 ## Decision Details
+
+### 2025-12-19: VMC-ADR-015 - Saga Failure Recovery (Proposed)
+
+**Status:** Proposed (P2)
+**Target:** Q2 2026
+**GitHub Issue:** [#79](https://github.com/credentum/veris-memory-core/issues/79)
+
+**Problem:** When multi-step agent workflow fails at step 7 of 12, no compensation pattern exists. The system cannot recover gracefully.
+
+**Proposed Solution:** Saga pattern with compensation actions for complex agent workflows.
+
+**Design Considerations:**
+
+| Aspect | Approach |
+|--------|----------|
+| Checkpoint Storage | Persist saga state at each step |
+| Compensation Registry | Define rollback action per step type |
+| Rollback Strategy | Partial vs full rollback based on failure type |
+| Dead Letter Queue | Unrecoverable sagas for manual review |
+
+**Integration Points:**
+- Trajectory logging (capture saga state)
+- Agent-dev pipeline (workflow orchestration)
+- Audit trail (compensation actions logged)
+
+**Activation Triggers:**
+
+| Condition | Metric | Threshold |
+|-----------|--------|-----------|
+| 1 | `multi_step_task_count` | 100 |
+| 2 | `mid_saga_failure_rate` | 5% |
+| 3 | `manual_recovery_requests` | 10 |
+
+**Council Rationale:** "What happens when this fails halfway through the saga?" - The Orchestrator
+
+---
+
+### 2025-12-19: VMC-ADR-014 - Cross-Agent Trust Protocol (Proposed)
+
+**Status:** Proposed (P2)
+**Target:** Q2 2026
+**GitHub Issue:** [#78](https://github.com/credentum/veris-memory-core/issues/78)
+
+**Problem:** When Agent A tells Agent B a fact, B cannot verify chain of custody. Multi-agent systems need trust protocols.
+
+**Proposed Solution:** Attestation chain for multi-agent fact passing with cryptographic verification.
+
+**Design Considerations:**
+
+| Aspect | Approach |
+|--------|----------|
+| Attestation Format | Signed claims with provenance chain |
+| Trust Levels | verified, attested, unverified |
+| Propagation Rules | Trust decay across hops (e.g., -10% per hop) |
+| Conflict Resolution | Weighted voting based on trust level |
+
+**Integration Points:**
+- `store_context` authority field
+- Provenance graph (ATTESTED_BY relationships)
+- Conflict resolution (trust-weighted decisions)
+
+**Activation Triggers:**
+
+| Condition | Metric | Threshold |
+|-----------|--------|-----------|
+| 1 | `multi_agent_task_count` | 50 |
+| 2 | `cross_agent_fact_transfers` | 100 |
+| 3 | `fact_conflict_rate` | 3% |
+
+**Council Rationale:** "Multi-agent systems in 2026 will need trust protocols we haven't built." - The Auditor
+
+---
+
+### 2025-12-19: VMC-ADR-013 - Success Pattern Learning (Proposed)
+
+**Status:** Proposed (P1)
+**Target:** Q1 2026
+**GitHub Issue:** [#77](https://github.com/credentum/veris-memory-core/issues/77)
+
+**Problem:** Current system only learns from failures (pessimistic bias). Missing patterns from successful trajectories leads to incomplete learning.
+
+**Proposed Solution:** Extract SUCCESS precedents from completed tasks, not just FAILURE precedents.
+
+**Design Considerations:**
+
+| Aspect | Approach |
+|--------|----------|
+| Success Criteria | Define per task type (e.g., tests pass, PR merged) |
+| Confidence Scoring | Higher confidence for repeated success patterns |
+| Overfitting Prevention | Require N occurrences before extracting pattern |
+| Balance | Weight success vs failure precedents (e.g., 40/60) |
+
+**New Precedent Types:**
+
+| Type | Description |
+|------|-------------|
+| `SUCCESS` | Task completed successfully |
+| `SKILL` | Learned capability (e.g., "knows how to deploy") |
+| `OPTIMIZATION` | Efficiency improvement pattern |
+
+**Current vs Proposed:**
+
+```
+Current:  FAILURE → Extract → Precedent → Avoid
+Proposed: SUCCESS → Extract → Precedent → Replicate
+          FAILURE → Extract → Precedent → Avoid
+```
+
+**Activation Triggers:**
+
+| Condition | Metric | Threshold |
+|-----------|--------|-----------|
+| 1 | `trajectory_count` | 200 |
+| 2 | `success_trajectory_count` | 50 |
+| 3 | `learning_request_for_success` | 1 |
+
+**Council Rationale:** "An immune system that only remembers diseases, never health, will be outcompeted." - The Immune System Designer
+
+---
+
+### 2025-12-19: VMC-ADR-012 - Forgetting/Decay Mechanism (Proposed)
+
+**Status:** Proposed (P1)
+**Target:** Q1 2026
+**GitHub Issue:** [#76](https://github.com/credentum/veris-memory-core/issues/76)
+
+**Problem:** Memory without forgetting degrades retrieval quality at scale. Vector spaces get noisy, graph queries slow. At 100,000 entries, the system will struggle.
+
+**Proposed Solution:** Time-weighted relevance decay with configurable half-life per context type.
+
+**Decay Function Options:**
+
+| Function | Formula | Use Case |
+|----------|---------|----------|
+| Exponential | `score × e^(-λt)` | Natural memory decay |
+| Linear | `score × (1 - t/T)` | Predictable deprecation |
+| Step | `score if t < T else 0` | Hard expiration |
+
+**Type-Specific Half-Lives (Proposed):**
+
+| Context Type | Half-Life | Rationale |
+|--------------|-----------|-----------|
+| decision | 365 days | Architectural decisions persist |
+| design | 180 days | Designs evolve |
+| precedent | 90 days | Patterns may become stale |
+| log | 30 days | Operational data expires |
+| trace | 14 days | Debug data short-lived |
+
+**Consolidation Strategy:**
+- When similar memories decay, merge into single consolidated memory
+- Preserve highest-authority version
+- Link to original sources in provenance
+
+**Resurrection:**
+- If decayed memory is accessed, boost relevance
+- "Use it or lose it" principle
+
+**Activation Triggers:**
+
+| Condition | Metric | Threshold |
+|-----------|--------|-----------|
+| 1 | `qdrant_entry_count` | 50,000 |
+| 2 | `retrieval_precision_drop` | 10% |
+| 3 | `graph_query_latency_p99_ms` | 500 |
+
+**Council Rationale:** "Without forgetting, memory degrades at scale. Every memory system in nature prunes." - The Archivist
+
+---
 
 ### 2025-12-19: VMC-ADR-011 - Security Infrastructure (Implemented)
 
@@ -503,6 +675,44 @@ Weight = Surprise × (Authority / 10) × (1 + 0.5 × Sparsity)
 
 ---
 
+## 2026 Roadmap (Covenant Council Review)
+
+**Review Date:** 2025-12-19
+**Verdict:** REQUIRES AMENDMENT
+**Context ID:** `d5e1f35b-43ee-4a09-8fab-40e97399731e`
+
+### Q1 2026 (P1 - Critical)
+
+| Priority | ADR | Title | Rationale |
+|----------|-----|-------|-----------|
+| 1 | VMC-ADR-012 | Forgetting/Decay Mechanism | Without it, memory degrades at scale |
+| 2 | VMC-ADR-013 | Success Pattern Learning | Breaks pessimistic bias |
+| 3 | - | Metrics/Validation Dashboard | Must prove value before scaling |
+| 4 | VMC-ADR-008 | Episodic Memory (Activate) | Temporal queries are table stakes |
+
+### Q2 2026 (P2 - Important)
+
+| Priority | ADR | Title | Rationale |
+|----------|-----|-------|-----------|
+| 5 | - | Real Production Workload | Validate with agent-dev at scale |
+| 6 | VMC-ADR-014 | Cross-Agent Trust Protocol | Required for multi-agent future |
+| 7 | VMC-ADR-015 | Saga Failure Recovery | Multi-step tasks need compensation |
+
+### Q3 2026 (P3 - When Ready)
+
+| Priority | ADR | Title | Rationale |
+|----------|-----|-------|-----------|
+| 8 | VMC-ADR-007 | HSM Integration (Activate) | Before external deployment |
+
+---
+
+## Proposed (2026)
+
+- [ ] **VMC-ADR-012:** Forgetting/Decay Mechanism ([#76](https://github.com/credentum/veris-memory-core/issues/76)) - Q1 P1
+- [ ] **VMC-ADR-013:** Success Pattern Learning ([#77](https://github.com/credentum/veris-memory-core/issues/77)) - Q1 P1
+- [ ] **VMC-ADR-014:** Cross-Agent Trust Protocol ([#78](https://github.com/credentum/veris-memory-core/issues/78)) - Q2 P2
+- [ ] **VMC-ADR-015:** Saga Failure Recovery ([#79](https://github.com/credentum/veris-memory-core/issues/79)) - Q2 P2
+
 ## Implemented
 
 - [x] **VMC-ADR-011:** Security Infrastructure ([#74](https://github.com/credentum/veris-memory-core/issues/74)) - WAF, RBAC, Secrets
@@ -512,13 +722,12 @@ Weight = Surprise × (Authority / 10) × (1 + 0.5 × Sparsity)
 ## Deferred (With Activation Triggers)
 
 - [ ] **VMC-ADR-009:** Audit Log HTTP Endpoints ([#73](https://github.com/credentum/veris-memory-core/issues/73))
-- [ ] **VMC-ADR-008:** Episodic Memory System ([#72](https://github.com/credentum/veris-memory-core/issues/72)) - P3
-- [ ] **VMC-ADR-007:** Vault HSM Integration ([#71](https://github.com/credentum/veris-memory-core/issues/71))
+- [ ] **VMC-ADR-008:** Episodic Memory System ([#72](https://github.com/credentum/veris-memory-core/issues/72)) - **Activate Q1 2026**
+- [ ] **VMC-ADR-007:** Vault HSM Integration ([#71](https://github.com/credentum/veris-memory-core/issues/71)) - **Activate Q3 2026**
 - [ ] **VMC-ADR-006:** Cold Storage Archival ([#70](https://github.com/credentum/veris-memory-core/issues/70))
 
 ## Not Yet Built (No ADR)
 
-- [ ] Forgetting/decay mechanism
 - [ ] Memory consolidation (sleep cycle)
 - [ ] Cross-agent theory of mind
 
@@ -562,3 +771,7 @@ Weight = Surprise × (Authority / 10) × (1 + 0.5 × Sparsity)
 - [VMC-ADR-009: Audit Log HTTP Endpoints (Issue #73)](https://github.com/credentum/veris-memory-core/issues/73)
 - [VMC-ADR-010: Retrieval Enhancements (Issue #75)](https://github.com/credentum/veris-memory-core/issues/75)
 - [VMC-ADR-011: Security Infrastructure (Issue #74)](https://github.com/credentum/veris-memory-core/issues/74)
+- [VMC-ADR-012: Forgetting/Decay Mechanism (Issue #76)](https://github.com/credentum/veris-memory-core/issues/76)
+- [VMC-ADR-013: Success Pattern Learning (Issue #77)](https://github.com/credentum/veris-memory-core/issues/77)
+- [VMC-ADR-014: Cross-Agent Trust Protocol (Issue #78)](https://github.com/credentum/veris-memory-core/issues/78)
+- [VMC-ADR-015: Saga Failure Recovery (Issue #79)](https://github.com/credentum/veris-memory-core/issues/79)
