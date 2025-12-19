@@ -198,6 +198,9 @@ class Neo4jInitializer:
             # Audit provenance (Phase 2)
             ("Artifact", "id"),
             ("AuditEntry", "id"),
+            # Covenant Mediator (Phase 4)
+            ("CovenantConflict", "id"),
+            ("PendingMemory", "id"),
         ]
 
         try:
@@ -232,6 +235,10 @@ class Neo4jInitializer:
             # Full-text search
             ("Document", ["title"], "fulltext"),
             ("Document", ["description"], "fulltext"),
+            # Covenant Mediator indexes (Phase 4)
+            ("CovenantConflict", ["resolution_status"]),
+            ("CovenantConflict", ["detected_at"]),
+            ("CovenantConflict", ["severity"]),
         ]
 
         try:

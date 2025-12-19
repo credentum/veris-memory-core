@@ -13,9 +13,12 @@ Components:
 """
 
 from .agent_namespace import AgentNamespace, AgentSession, NamespaceError
+from .mediator import CovenantMediator, get_covenant_mediator
 
 __all__ = [
     "AgentNamespace",
     "AgentSession",
     "NamespaceError",
+    "CovenantMediator",
+    "get_covenant_mediator",
 ]

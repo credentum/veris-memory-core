@@ -33,6 +33,11 @@ from .kv_validators import (
     validate_redis_key,
     validate_time_range,
 )
+from .covenant_validator import (
+    CovenantValidator,
+    is_covenant_enabled,
+    validate_covenant,
+)
 
 __all__ = [
     "ConfigValidator",
