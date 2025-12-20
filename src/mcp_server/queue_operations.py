@@ -1296,6 +1296,21 @@ class GetAllCoderWipResponse(BaseModel):
     count: int
 
 
+class CleanupStaleWipRequest(BaseModel):
+    """Request to cleanup stale WIP entries from crashed coders."""
+
+    threshold_seconds: int = 600  # Default 10 minutes
+
+
+class CleanupStaleWipResponse(BaseModel):
+    """Response from cleanup operation."""
+
+    success: bool
+    cleaned_agents: List[str]
+    count: int
+    message: str
+
+
 @router.post("/tools/set_coder_wip", response_model=SetCoderWipResponse)
 async def set_coder_wip(
     request: SetCoderWipRequest, redis=Depends(get_redis)
@@ -1463,6 +1478,79 @@ async def get_all_coder_wip(redis=Depends(get_redis)) -> GetAllCoderWipResponse:
     except Exception as e:
         logger.error(f"Failed to get coder WIP: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get coder WIP: {e}")
+
+
+@router.post("/tools/cleanup_stale_wip", response_model=CleanupStaleWipResponse)
+async def cleanup_stale_wip(
+    request: CleanupStaleWipRequest, redis=Depends(get_redis)
+) -> CleanupStaleWipResponse:
+    """
+    Cleanup stale WIP entries from crashed coders.
+
+    Finds entries where last_heartbeat is older than threshold_seconds
+    and removes them. This handles the case where a coder container
+    crashes without calling clear_coder_wip().
+
+    Use case: Run periodically (e.g., every 5 minutes) to detect
+    and cleanup orphaned entries from crashed coders.
+    """
+    try:
+        raw_data = redis.hgetall(CODER_WIP_KEY)
+        now = datetime.now(timezone.utc)
+        cleaned_agents = []
+
+        for agent_id, raw_wip in raw_data.items():
+            try:
+                # Handle bytes if returned
+                if isinstance(agent_id, bytes):
+                    agent_id = agent_id.decode("utf-8")
+                if isinstance(raw_wip, bytes):
+                    raw_wip = raw_wip.decode("utf-8")
+
+                wip_data = json.loads(raw_wip)
+
+                # Check if heartbeat is stale
+                last_heartbeat = datetime.fromisoformat(
+                    wip_data.get("last_heartbeat", wip_data["started_at"])
+                )
+                elapsed = (now - last_heartbeat).total_seconds()
+
+                if elapsed > request.threshold_seconds:
+                    # Remove stale entry
+                    redis.hdel(CODER_WIP_KEY, agent_id)
+                    cleaned_agents.append(agent_id)
+
+                    logger.warning(
+                        f"Cleaned stale WIP: agent={agent_id}, "
+                        f"packet={wip_data.get('packet_id')}, "
+                        f"stale_seconds={int(elapsed)}"
+                    )
+
+            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                logger.warning(f"Invalid WIP data for {agent_id}, removing: {e}")
+                redis.hdel(CODER_WIP_KEY, agent_id)
+                cleaned_agents.append(agent_id)
+
+        message = (
+            f"Cleaned {len(cleaned_agents)} stale WIP entries"
+            if cleaned_agents
+            else "No stale WIP entries found"
+        )
+
+        logger.info(f"WIP cleanup: {message}")
+
+        return CleanupStaleWipResponse(
+            success=True,
+            cleaned_agents=cleaned_agents,
+            count=len(cleaned_agents),
+            message=message,
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to cleanup stale WIP: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to cleanup stale WIP: {e}"
+        )
 
 
 # =============================================================================
