@@ -1064,6 +1064,83 @@ class TestCoderWipEndpoints:
         assert result.count == 1
         assert "coder-1" in result.coders
 
+    @pytest.mark.asyncio
+    async def test_cleanup_stale_wip_removes_stale_entries(self):
+        """Test that cleanup removes entries with stale heartbeats."""
+        mock_redis = Mock()
+
+        # Create entries: one fresh (10s old), one stale (700s old)
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        fresh_time = (now - timedelta(seconds=10)).isoformat()
+        stale_time = (now - timedelta(seconds=700)).isoformat()
+
+        mock_redis.hgetall.return_value = {
+            "fresh-coder": json.dumps({
+                "packet_id": "wp-001",
+                "started_at": fresh_time,
+                "last_heartbeat": fresh_time,
+                "current_turn": 1,
+                "files_written": [],
+                "tool_calls_made": 1,
+            }),
+            "stale-coder": json.dumps({
+                "packet_id": "wp-002",
+                "started_at": stale_time,
+                "last_heartbeat": stale_time,
+                "current_turn": 5,
+                "files_written": ["file.py"],
+                "tool_calls_made": 10,
+            }),
+        }
+        mock_redis.hdel.return_value = 1
+
+        request = queue_operations.CleanupStaleWipRequest(threshold_seconds=600)
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.cleanup_stale_wip(request, redis=mock_redis)
+
+        assert result.success is True
+        assert result.count == 1
+        assert "stale-coder" in result.cleaned_agents
+        assert "fresh-coder" not in result.cleaned_agents
+        mock_redis.hdel.assert_called_once_with("coder_wip", "stale-coder")
+
+    @pytest.mark.asyncio
+    async def test_cleanup_stale_wip_empty_hash(self):
+        """Test cleanup when no WIP entries exist."""
+        mock_redis = Mock()
+        mock_redis.hgetall.return_value = {}
+
+        request = queue_operations.CleanupStaleWipRequest(threshold_seconds=600)
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.cleanup_stale_wip(request, redis=mock_redis)
+
+        assert result.success is True
+        assert result.count == 0
+        assert result.cleaned_agents == []
+        mock_redis.hdel.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_stale_wip_handles_invalid_json(self):
+        """Test cleanup handles and removes entries with invalid JSON."""
+        mock_redis = Mock()
+        mock_redis.hgetall.return_value = {
+            "corrupt-coder": "not valid json",
+        }
+        mock_redis.hdel.return_value = 1
+
+        request = queue_operations.CleanupStaleWipRequest(threshold_seconds=600)
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.cleanup_stale_wip(request, redis=mock_redis)
+
+        assert result.success is True
+        assert result.count == 1
+        assert "corrupt-coder" in result.cleaned_agents
+        mock_redis.hdel.assert_called_once()
+
 
 class TestRouteRegistration:
     """Tests for route registration."""
@@ -1098,6 +1175,7 @@ class TestRouteRegistration:
         assert "/tools/clear_coder_wip" in routes
         assert "/tools/update_coder_heartbeat" in routes
         assert "/tools/get_all_coder_wip" in routes
+        assert "/tools/cleanup_stale_wip" in routes
 
     def test_get_redis_raises_when_not_initialized(self):
         """Test that get_redis raises 503 when Redis not initialized."""
