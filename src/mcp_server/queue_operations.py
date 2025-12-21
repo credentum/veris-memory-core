@@ -7,6 +7,7 @@ abstracting Redis operations so agents don't need raw Redis credentials.
 Endpoints:
 - POST /tools/submit_work_packet - Push work to queue
 - POST /tools/pop_work_packet - Pop work from queue (blocking, tracks active work)
+- POST /tools/claim_work_packet - Claim packet (ADR-009: updates saga to in_flight)
 - GET /tools/queue_depth - Check queue length
 - POST /tools/complete_task - Store completion and notify (clears active work)
 - POST /tools/circuit_breaker/check - Increment hop counter
@@ -118,6 +119,23 @@ class PopWorkPacketResponse(BaseModel):
 
     packet: Optional[Dict[str, Any]] = None
     queue_depth: int = 0
+
+
+class ClaimWorkPacketRequest(BaseModel):
+    """Request to claim a work packet (ADR-009 Phase 3)."""
+
+    user_id: str = Field(..., description="Team/user ID for queue isolation")
+    packet_id: str = Field(..., description="Work packet ID to claim")
+    parent_packet_id: str = Field(..., description="Parent/saga packet ID")
+    agent_id: str = Field(..., description="Agent claiming the packet")
+
+
+class ClaimWorkPacketResponse(BaseModel):
+    """Response for work packet claim."""
+
+    success: bool = Field(..., description="Whether claim succeeded")
+    status: Optional[str] = Field(default=None, description="New status if successful")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
 
 
 class QueueDepthResponse(BaseModel):
@@ -614,6 +632,81 @@ async def pop_work_packet(
     except Exception as e:
         logger.error(f"Failed to pop work packet: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to pop packet: {e}")
+
+
+def get_saga_key(user_id: str, parent_packet_id: str) -> str:
+    """Get the saga state key for a parent packet."""
+    return f"{user_id}:saga:{parent_packet_id}"
+
+
+@router.post("/tools/claim_work_packet", response_model=ClaimWorkPacketResponse)
+async def claim_work_packet(
+    request: ClaimWorkPacketRequest, redis=Depends(get_redis)
+) -> ClaimWorkPacketResponse:
+    """
+    Claim a work packet, updating saga state to in_flight.
+
+    Part of ADR-009 Phase 3: Pull-based dispatch with explicit ACK.
+    Agent calls this after popping from queue to confirm receipt.
+    Orchestrator sets packets to 'pending_claim' status; this endpoint
+    transitions them to 'in_flight' with claim metadata.
+
+    Returns success=False if:
+    - Saga not found
+    - Packet not in saga
+    - Packet not in pending_claim status
+    """
+    try:
+        saga_key = get_saga_key(request.user_id, request.parent_packet_id)
+        saga_data = redis.get(saga_key)
+
+        if not saga_data:
+            logger.warning(
+                f"Claim failed: saga not found for {request.parent_packet_id}"
+            )
+            return ClaimWorkPacketResponse(
+                success=False, error="Saga not found"
+            )
+
+        dag = json.loads(saga_data)
+
+        if request.packet_id not in dag:
+            logger.warning(
+                f"Claim failed: packet {request.packet_id} not in saga "
+                f"{request.parent_packet_id}"
+            )
+            return ClaimWorkPacketResponse(
+                success=False, error="Packet not in saga"
+            )
+
+        current_status = dag[request.packet_id].get("status")
+        if current_status != "pending_claim":
+            logger.warning(
+                f"Claim failed: packet {request.packet_id} has status "
+                f"'{current_status}', expected 'pending_claim'"
+            )
+            return ClaimWorkPacketResponse(
+                success=False, error=f"Invalid status: {current_status}"
+            )
+
+        # Update to in_flight with claim metadata
+        dag[request.packet_id]["status"] = "in_flight"
+        dag[request.packet_id]["claimed_at"] = datetime.now(timezone.utc).isoformat()
+        dag[request.packet_id]["claimed_by"] = request.agent_id
+
+        redis.set(saga_key, json.dumps(dag))
+        redis.expire(saga_key, 86400)  # 24h TTL
+
+        logger.info(
+            f"Packet {request.packet_id} claimed by {request.agent_id} "
+            f"in saga {request.parent_packet_id}"
+        )
+
+        return ClaimWorkPacketResponse(success=True, status="in_flight")
+
+    except Exception as e:
+        logger.error(f"Failed to claim work packet: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to claim packet: {e}")
 
 
 @router.get("/tools/queue_depth", response_model=QueueDepthResponse)
