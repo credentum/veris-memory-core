@@ -549,6 +549,11 @@ class TestRedisKeyHelpers:
         key = queue_operations.get_packet_events_key("pkt-456")
         assert key == "pkt-456:events"
 
+    def test_get_saga_key(self):
+        """Test saga state key format."""
+        key = queue_operations.get_saga_key("my_team", "pp-123")
+        assert key == "my_team:saga:pp-123"
+
 
 class TestInterventionEndpoints:
     """Tests for intervention queue operations."""
@@ -1161,6 +1166,7 @@ class TestRouteRegistration:
         assert "/tools/queue_depth" in routes
         assert "/tools/complete_task" in routes
         assert "/tools/circuit_breaker/check" in routes
+        assert "/tools/claim_work_packet" in routes
         assert "/tools/circuit_breaker/reset" in routes
         assert "/tools/blocked_packets" in routes
         assert "/tools/unblock_packet" in routes
@@ -1191,3 +1197,133 @@ class TestRouteRegistration:
             assert exc_info.value.status_code == 503
         finally:
             queue_operations._redis_client = original
+
+
+class TestClaimWorkPacketEndpoint:
+    """Tests for ADR-009 Phase 3 claim_work_packet endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_claim_work_packet_success(self):
+        """Test successful claim of a pending_claim packet."""
+        mock_redis = Mock()
+        saga_data = {
+            "wp-001": {
+                "packet": {"packet_id": "wp-001"},
+                "status": "pending_claim",
+                "dispatched_at": "2025-01-01T00:00:00+00:00",
+            }
+        }
+        mock_redis.get.return_value = json.dumps(saga_data)
+        mock_redis.set.return_value = True
+        mock_redis.expire.return_value = True
+
+        request = queue_operations.ClaimWorkPacketRequest(
+            user_id="test_team",
+            packet_id="wp-001",
+            parent_packet_id="pp-001",
+            agent_id="coder-001",
+        )
+
+        response = await queue_operations.claim_work_packet(request, mock_redis)
+
+        assert response.success is True
+        assert response.status == "in_flight"
+
+        # Verify saga was updated
+        mock_redis.set.assert_called_once()
+        call_args = mock_redis.set.call_args
+        updated_saga = json.loads(call_args[0][1])
+        assert updated_saga["wp-001"]["status"] == "in_flight"
+        assert "claimed_at" in updated_saga["wp-001"]
+        assert updated_saga["wp-001"]["claimed_by"] == "coder-001"
+
+    @pytest.mark.asyncio
+    async def test_claim_work_packet_saga_not_found(self):
+        """Test claim fails when saga doesn't exist."""
+        mock_redis = Mock()
+        mock_redis.get.return_value = None
+
+        request = queue_operations.ClaimWorkPacketRequest(
+            user_id="test_team",
+            packet_id="wp-001",
+            parent_packet_id="pp-missing",
+            agent_id="coder-001",
+        )
+
+        response = await queue_operations.claim_work_packet(request, mock_redis)
+
+        assert response.success is False
+        assert response.error == "Saga not found"
+
+    @pytest.mark.asyncio
+    async def test_claim_work_packet_not_in_saga(self):
+        """Test claim fails when packet_id not in saga."""
+        mock_redis = Mock()
+        saga_data = {
+            "wp-other": {
+                "packet": {"packet_id": "wp-other"},
+                "status": "pending_claim",
+            }
+        }
+        mock_redis.get.return_value = json.dumps(saga_data)
+
+        request = queue_operations.ClaimWorkPacketRequest(
+            user_id="test_team",
+            packet_id="wp-missing",
+            parent_packet_id="pp-001",
+            agent_id="coder-001",
+        )
+
+        response = await queue_operations.claim_work_packet(request, mock_redis)
+
+        assert response.success is False
+        assert response.error == "Packet not in saga"
+
+    @pytest.mark.asyncio
+    async def test_claim_work_packet_invalid_status(self):
+        """Test claim fails when packet is not pending_claim."""
+        mock_redis = Mock()
+        saga_data = {
+            "wp-001": {
+                "packet": {"packet_id": "wp-001"},
+                "status": "completed",  # Already completed
+            }
+        }
+        mock_redis.get.return_value = json.dumps(saga_data)
+
+        request = queue_operations.ClaimWorkPacketRequest(
+            user_id="test_team",
+            packet_id="wp-001",
+            parent_packet_id="pp-001",
+            agent_id="coder-001",
+        )
+
+        response = await queue_operations.claim_work_packet(request, mock_redis)
+
+        assert response.success is False
+        assert "Invalid status" in response.error
+
+    @pytest.mark.asyncio
+    async def test_claim_work_packet_already_in_flight(self):
+        """Test claim fails when packet is already in_flight."""
+        mock_redis = Mock()
+        saga_data = {
+            "wp-001": {
+                "packet": {"packet_id": "wp-001"},
+                "status": "in_flight",
+                "claimed_by": "coder-other",
+            }
+        }
+        mock_redis.get.return_value = json.dumps(saga_data)
+
+        request = queue_operations.ClaimWorkPacketRequest(
+            user_id="test_team",
+            packet_id="wp-001",
+            parent_packet_id="pp-001",
+            agent_id="coder-001",
+        )
+
+        response = await queue_operations.claim_work_packet(request, mock_redis)
+
+        assert response.success is False
+        assert "Invalid status" in response.error
