@@ -74,6 +74,46 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # Warning for production deployments with in-memory storage
         self._check_production_deployment()
 
+        # Cache agent API keys at startup (env vars don't change at runtime)
+        # This avoids scanning environment variables on every request
+        self._agent_keys = self._build_agent_key_set()
+        if self._agent_keys:
+            api_logger.info(
+                f"Rate limit middleware: {len(self._agent_keys)} agent API keys exempt from rate limiting"
+            )
+
+    def _build_agent_key_set(self) -> set:
+        """Build set of agent API keys from environment variables.
+
+        Called once at startup. Environment variables are immutable during
+        process lifetime, so caching is safe and efficient.
+
+        Scans for keys in format: VERIS_API_KEY_{NAME}=key:user_id:role:is_agent
+        where is_agent=true indicates an AI agent that should be exempt.
+
+        Returns:
+            Set of API key prefixes that belong to agents
+        """
+        agent_keys = set()
+
+        for env_var, value in os.environ.items():
+            # Check both VERIS_API_KEY_* (preferred) and API_KEY_* (legacy)
+            if not (env_var.startswith("VERIS_API_KEY_") or env_var.startswith("API_KEY_")):
+                continue
+
+            if not value:
+                continue
+
+            parts = value.split(":")
+            # Format: key:user_id:role:is_agent
+            if len(parts) >= 4:
+                key_prefix = parts[0]
+                is_agent = parts[3].lower() == "true"
+                if is_agent and key_prefix:
+                    agent_keys.add(key_prefix)
+
+        return agent_keys
+
     def _parse_limit(self, limit: str) -> None:
         """Parse limit string into rate and period."""
         try:
@@ -183,16 +223,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         auth_header = request.headers.get("X-API-Key", "")
         sentinel_key = os.getenv("SENTINEL_API_KEY", "")
         voicebot_key_full = os.getenv("API_KEY_VOICEBOT", "")
-        agent_key_full = os.getenv("VERIS_API_KEY_AGENT", "")
-        # Extract just the key prefix (before first colon) since API keys may use
-        # format: key:user_id:role:is_agent but clients send just the key
         voicebot_key = voicebot_key_full.split(":")[0] if voicebot_key_full else ""
-        agent_key = agent_key_full.split(":")[0] if agent_key_full else ""
 
         # Exempt authenticated internal services from rate limiting
         # - Sentinel: Monitoring service that makes 22+ queries per cycle
         # - VoiceBot: Voice interface that may burst requests during conversations
-        # - Agent: Agent orchestrator containers polling for work packets
+        # - All API keys with is_agent=true: Coding agents, orchestrator, etc.
         if client_ip in sentinel_ips:
             return await call_next(request)
 
@@ -202,7 +238,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if auth_header and voicebot_key and auth_header == voicebot_key:
             return await call_next(request)
 
-        if auth_header and agent_key and auth_header == agent_key:
+        # Exempt all agent API keys from rate limiting (using cached set from startup)
+        if auth_header and auth_header in self._agent_keys:
             return await call_next(request)
 
         # Get current time window

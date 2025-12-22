@@ -482,3 +482,124 @@ class TestRateLimitHeaders:
         # Retry-After should be reasonable (less than period)
         retry_after = int(response.headers["Retry-After"])
         assert 0 < retry_after <= middleware.period_seconds
+
+
+class TestAgentKeyExemption:
+    """Tests for agent API key exemption from rate limiting."""
+
+    @pytest.fixture
+    def limiter(self):
+        """Create a Limiter instance."""
+        return Limiter(key_func=get_remote_address)
+
+    def test_build_agent_key_set_with_agent_keys(self, limiter):
+        """Test that agent keys are correctly detected from environment."""
+        app = MagicMock()
+
+        with patch.dict('os.environ', {
+            'VERIS_API_KEY_CODER': 'vmk_coder_abc123:coder:writer:true',
+            'VERIS_API_KEY_REVIEWER': 'vmk_reviewer_xyz789:reviewer:writer:true',
+            'VERIS_API_KEY_HUMAN': 'vmk_human_def456:human:writer:false',
+        }, clear=False):
+            middleware = RateLimitMiddleware(app, limiter, limit="20/minute")
+
+            # Agent keys should be in the set
+            assert 'vmk_coder_abc123' in middleware._agent_keys
+            assert 'vmk_reviewer_xyz789' in middleware._agent_keys
+            # Non-agent key should NOT be in the set
+            assert 'vmk_human_def456' not in middleware._agent_keys
+
+    def test_build_agent_key_set_with_legacy_format(self, limiter):
+        """Test that legacy API_KEY_* format is also supported."""
+        app = MagicMock()
+
+        with patch.dict('os.environ', {
+            'API_KEY_AGENT': 'legacy_key_123:agent:writer:true',
+        }, clear=False):
+            middleware = RateLimitMiddleware(app, limiter, limit="20/minute")
+
+            assert 'legacy_key_123' in middleware._agent_keys
+
+    def test_build_agent_key_set_empty_when_no_agents(self, limiter):
+        """Test that agent key set is empty when no agent keys configured."""
+        app = MagicMock()
+
+        with patch.dict('os.environ', {
+            'VERIS_API_KEY_HUMAN': 'vmk_human_xyz:human:reader:false',
+        }, clear=False):
+            middleware = RateLimitMiddleware(app, limiter, limit="20/minute")
+
+            # Human key should not be in agent set
+            assert 'vmk_human_xyz' not in middleware._agent_keys
+
+    def test_build_agent_key_set_handles_malformed_keys(self, limiter):
+        """Test that malformed API keys are ignored gracefully."""
+        app = MagicMock()
+
+        with patch.dict('os.environ', {
+            'VERIS_API_KEY_BAD1': 'only_key',  # Missing parts
+            'VERIS_API_KEY_BAD2': 'key:user:role',  # Missing is_agent
+            'VERIS_API_KEY_GOOD': 'vmk_good:user:writer:true',
+        }, clear=False):
+            middleware = RateLimitMiddleware(app, limiter, limit="20/minute")
+
+            # Only well-formed agent key should be in set
+            assert 'vmk_good' in middleware._agent_keys
+            assert 'only_key' not in middleware._agent_keys
+            assert 'key' not in middleware._agent_keys
+
+    @pytest.mark.asyncio
+    async def test_agent_key_exempt_from_rate_limiting(self, limiter):
+        """Test that requests with agent API keys are not rate limited."""
+        app = MagicMock()
+
+        with patch.dict('os.environ', {
+            'VERIS_API_KEY_CODER': 'vmk_coder_abc123:coder:writer:true',
+        }, clear=False):
+            middleware = RateLimitMiddleware(app, limiter, limit="5/minute")
+
+            # Create mock request with agent API key
+            request = MagicMock(spec=Request)
+            request.client = MagicMock()
+            request.client.host = "192.168.1.100"
+            request.url = MagicMock()
+            request.url.path = "/api/store_context"
+            request.headers = {"X-API-Key": "vmk_coder_abc123"}
+
+            async def call_next(req):
+                return Response(content="OK", status_code=200)
+
+            # Should be able to make many requests without rate limiting
+            for i in range(10):
+                response = await middleware.dispatch(request, call_next)
+                assert response.status_code == 200, f"Request {i+1} should succeed for agent"
+
+    @pytest.mark.asyncio
+    async def test_non_agent_key_is_rate_limited(self, limiter):
+        """Test that requests with non-agent API keys are rate limited."""
+        app = MagicMock()
+
+        with patch.dict('os.environ', {
+            'VERIS_API_KEY_HUMAN': 'vmk_human_xyz:human:reader:false',
+        }, clear=False):
+            middleware = RateLimitMiddleware(app, limiter, limit="5/minute")
+
+            # Create mock request with non-agent API key
+            request = MagicMock(spec=Request)
+            request.client = MagicMock()
+            request.client.host = "192.168.1.200"
+            request.url = MagicMock()
+            request.url.path = "/api/store_context"
+            request.headers = {"X-API-Key": "vmk_human_xyz"}
+
+            async def call_next(req):
+                return Response(content="OK", status_code=200)
+
+            # First 5 requests should succeed
+            for i in range(5):
+                response = await middleware.dispatch(request, call_next)
+                assert response.status_code == 200
+
+            # 6th request should be rate limited
+            response = await middleware.dispatch(request, call_next)
+            assert response.status_code == 429
