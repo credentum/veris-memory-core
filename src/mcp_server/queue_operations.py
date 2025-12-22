@@ -182,6 +182,30 @@ class CompleteTaskRequest(BaseModel):
     task_name: Optional[str] = Field(
         default=None, description="Human-readable task name from product_spec.name (for PR title)"
     )
+    # Phase 1.3: Duration tracking for observability
+    duration_seconds: Optional[float] = Field(
+        default=None, ge=0, description="Total task duration in seconds (from claim to completion)"
+    )
+    # Phase 2.1: Token usage tracking for learning and cost optimization
+    tokens_input: Optional[int] = Field(
+        default=None, ge=0, description="Total input tokens used"
+    )
+    tokens_output: Optional[int] = Field(
+        default=None, ge=0, description="Total output tokens used"
+    )
+    tokens_total: Optional[int] = Field(
+        default=None, ge=0, description="Total tokens used (input + output)"
+    )
+    model_used: Optional[str] = Field(
+        default=None, description="Primary model used for task (e.g., sonnet, opus)"
+    )
+    # Phase 2.2: Phase timing breakdown for performance analysis
+    coder_duration_ms: Optional[int] = Field(
+        default=None, ge=0, description="Time spent in coder phase (milliseconds)"
+    )
+    reviewer_duration_ms: Optional[int] = Field(
+        default=None, ge=0, description="Time spent in reviewer phase (milliseconds)"
+    )
 
 
 class CompleteTaskResponse(BaseModel):
@@ -798,6 +822,15 @@ async def complete_task(
             "parent_packet_id": request.parent_packet_id,
             "task_name": request.task_name,  # For learning-friendly PR titles
             "timestamp": time.time(),
+            "duration_seconds": request.duration_seconds,  # Phase 1.3: Task duration
+            # Phase 2.1: Token usage tracking
+            "tokens_input": request.tokens_input,
+            "tokens_output": request.tokens_output,
+            "tokens_total": request.tokens_total,
+            "model_used": request.model_used,
+            # Phase 2.2: Phase timing breakdown
+            "coder_duration_ms": request.coder_duration_ms,
+            "reviewer_duration_ms": request.reviewer_duration_ms,
         }
 
         # Store completion record (with TTL for cleanup)
@@ -841,6 +874,16 @@ async def complete_task(
                 "files_created": request.files_created,
                 # task_name for learning-friendly PR titles (from product_spec.name)
                 "task_name": request.task_name,
+                # Phase 1.3: Duration tracking for observability
+                "duration_seconds": request.duration_seconds,
+                # Phase 2.1: Token usage tracking
+                "tokens_input": request.tokens_input,
+                "tokens_output": request.tokens_output,
+                "tokens_total": request.tokens_total,
+                "model_used": request.model_used,
+                # Phase 2.2: Phase timing breakdown
+                "coder_duration_ms": request.coder_duration_ms,
+                "reviewer_duration_ms": request.reviewer_duration_ms,
             }
             redis.lpush(approved_queue_key, json.dumps(publish_data))
             queued_for_publish = True
