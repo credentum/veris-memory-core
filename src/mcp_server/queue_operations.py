@@ -836,10 +836,11 @@ async def complete_task(
                 f"Task {request.packet_id} APPROVED - queued for publish to {approved_queue_key}"
             )
 
-        # If review_verdict is REJECT, push to rejected_completions queue
+        # If review_verdict is REJECTED or ESCALATED, push to rejected_completions queue
         # so orchestrator can close the saga properly (ADR-007)
+        # Note: ESCALATED is treated as rejection for saga purposes (needs human review)
         queued_for_rejection = False
-        if request.review_verdict == "REJECT":
+        if request.review_verdict in ("REJECTED", "ESCALATED"):
             rejected_queue_key = get_rejected_completions_key(request.user_id)
             rejection_data = {
                 "packet_id": request.packet_id,
@@ -860,7 +861,7 @@ async def complete_task(
             redis.lpush(rejected_queue_key, json.dumps(rejection_data))
             queued_for_rejection = True
             logger.warning(
-                f"Task {request.packet_id} REJECTED - queued for saga closure to {rejected_queue_key}"
+                f"Task {request.packet_id} {request.review_verdict} - queued for saga closure to {rejected_queue_key}"
             )
 
         logger.info(

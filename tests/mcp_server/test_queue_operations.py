@@ -358,6 +358,78 @@ class TestCompleteTaskEndpoint:
                 review_confidence=-0.1,
             )
 
+    @pytest.mark.asyncio
+    async def test_complete_task_rejected_queued_for_saga_closure(self):
+        """Test REJECTED completion is queued for saga closure (not REJECT)."""
+        mock_redis = Mock()
+        mock_redis.setex.return_value = True
+        mock_redis.publish.return_value = 1
+        mock_redis.lpush.return_value = 1
+        mock_redis.delete.return_value = 1
+
+        request = queue_operations.CompleteTaskRequest(
+            user_id="test_team",
+            packet_id="pkt-rejected",
+            agent_id="coding_agent",
+            status="failure",
+            review_verdict="REJECTED",  # Agent sends REJECTED (with ED)
+            parent_packet_id="parent-rejected-001",
+            error="Failed review after 3 attempts",
+        )
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.complete_task(request, redis=mock_redis)
+
+        assert result.success is True
+        assert "saga closure" in result.message
+
+        # Verify lpush was called to rejected_completions queue
+        mock_redis.lpush.assert_called_once()
+        queue_key = mock_redis.lpush.call_args[0][0]
+        assert queue_key == "test_team:queue:rejected_completions"
+
+        # Verify rejection data
+        rejection_json = mock_redis.lpush.call_args[0][1]
+        rejection_data = json.loads(rejection_json)
+        assert rejection_data["verdict"] == "REJECTED"
+        assert rejection_data["parent_packet_id"] == "parent-rejected-001"
+
+    @pytest.mark.asyncio
+    async def test_complete_task_escalated_queued_for_saga_closure(self):
+        """Test ESCALATED completion is queued for saga closure (treated like rejection)."""
+        mock_redis = Mock()
+        mock_redis.setex.return_value = True
+        mock_redis.publish.return_value = 1
+        mock_redis.lpush.return_value = 1
+        mock_redis.delete.return_value = 1
+
+        request = queue_operations.CompleteTaskRequest(
+            user_id="test_team",
+            packet_id="pkt-escalated",
+            agent_id="coding_agent",
+            status="failure",
+            review_verdict="ESCALATED",  # Agent sends ESCALATED for human review
+            parent_packet_id="parent-escalated-001",
+            error="Needs human review - test file missing",
+        )
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.complete_task(request, redis=mock_redis)
+
+        assert result.success is True
+        assert "saga closure" in result.message
+
+        # Verify lpush was called to rejected_completions queue
+        mock_redis.lpush.assert_called_once()
+        queue_key = mock_redis.lpush.call_args[0][0]
+        assert queue_key == "test_team:queue:rejected_completions"
+
+        # Verify escalation data
+        escalation_json = mock_redis.lpush.call_args[0][1]
+        escalation_data = json.loads(escalation_json)
+        assert escalation_data["verdict"] == "ESCALATED"
+        assert escalation_data["parent_packet_id"] == "parent-escalated-001"
+
 
 class TestCircuitBreakerEndpoints:
     """Tests for circuit breaker functionality."""
