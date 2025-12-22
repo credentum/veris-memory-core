@@ -495,6 +495,18 @@ def get_packet_events_key(packet_id: str) -> str:
 ACTIVE_WORK_TTL = int(os.environ.get("ACTIVE_WORK_TTL", "600"))
 
 
+def _ensure_utc(dt: datetime) -> datetime:
+    """Ensure datetime is timezone-aware (UTC).
+
+    If the datetime is naive (no timezone info), assume it's UTC.
+    This handles backwards compatibility with timestamps stored
+    without timezone info.
+    """
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 # =============================================================================
 # Work Queue Endpoints
 # =============================================================================
@@ -1277,7 +1289,7 @@ async def get_stuck_packets(
                         continue
 
                     data = json.loads(raw_data)
-                    claimed_at = datetime.fromisoformat(data["claimed_at"])
+                    claimed_at = _ensure_utc(datetime.fromisoformat(data["claimed_at"]))
                     age_seconds = int(
                         (datetime.now(timezone.utc) - claimed_at).total_seconds()
                     )
@@ -1547,8 +1559,8 @@ async def get_all_coder_wip(redis=Depends(get_redis)) -> GetAllCoderWipResponse:
 
                 wip_data = json.loads(raw_wip)
 
-                # Calculate elapsed time
-                started_at = datetime.fromisoformat(wip_data["started_at"])
+                # Calculate elapsed time (handle naive datetimes for backwards compat)
+                started_at = _ensure_utc(datetime.fromisoformat(wip_data["started_at"]))
                 elapsed_seconds = int((now - started_at).total_seconds())
 
                 coders[agent_id] = CoderWipInfo(
@@ -1603,10 +1615,10 @@ async def cleanup_stale_wip(
 
                 wip_data = json.loads(raw_wip)
 
-                # Check if heartbeat is stale
-                last_heartbeat = datetime.fromisoformat(
+                # Check if heartbeat is stale (handle naive datetimes)
+                last_heartbeat = _ensure_utc(datetime.fromisoformat(
                     wip_data.get("last_heartbeat", wip_data["started_at"])
-                )
+                ))
                 elapsed = (now - last_heartbeat).total_seconds()
 
                 if elapsed > request.threshold_seconds:
