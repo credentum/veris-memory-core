@@ -418,16 +418,31 @@ def get_rate_limiter() -> MCPRateLimiter:
     return _rate_limiter
 
 
-async def rate_limit_check(endpoint: str, request_info: Dict = None) -> Tuple[bool, Optional[str]]:
+async def rate_limit_check(
+    endpoint: str,
+    request_info: Dict = None,
+    is_agent: bool = False
+) -> Tuple[bool, Optional[str]]:
     """Convenience function to check rate limits.
 
     Args:
         endpoint: MCP endpoint name
         request_info: Request information for client identification
+        is_agent: If True, skip rate limiting (agents are exempt)
 
     Returns:
         Tuple of (allowed, error_message)
     """
+    # Agents are exempt from rate limiting - they need high-frequency access
+    # for operations like check_precedent, discover_skills, etc.
+    # This can be controlled via RATE_LIMIT_EXEMPT_AGENTS env var
+    import os
+    exempt_agents = os.getenv("RATE_LIMIT_EXEMPT_AGENTS", "true").lower() == "true"
+
+    if is_agent and exempt_agents:
+        logger.debug(f"Rate limit skipped for agent on endpoint {endpoint}")
+        return True, None
+
     if request_info is None:
         request_info = {}
 

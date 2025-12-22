@@ -583,10 +583,49 @@ class TestGlobalFunctions:
         if hasattr(limiter, '_burst_limiters') and client_id in limiter._burst_limiters:
             limiter._burst_limiters[client_id].can_proceed = MagicMock(return_value=False)
             limiter._burst_limiters[client_id].get_reset_time = MagicMock(return_value=5.0)
-            
+
             allowed, message = await rate_limit_check("store_context", request_info)
             assert allowed is False
             assert "Burst protection triggered" in message
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_check_agent_exempt(self):
+        """Test that agents are exempt from rate limiting when is_agent=True."""
+        # Reset global instance
+        import src.core.rate_limiter
+        src.core.rate_limiter._rate_limiter = None
+
+        # With is_agent=True, should always be allowed (default RATE_LIMIT_EXEMPT_AGENTS=true)
+        with patch.dict('os.environ', {'RATE_LIMIT_EXEMPT_AGENTS': 'true'}):
+            allowed, message = await rate_limit_check("store_context", is_agent=True)
+            assert allowed is True
+            assert message is None
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_check_agent_not_exempt_when_disabled(self):
+        """Test that agent exemption can be disabled via env var."""
+        # Reset global instance
+        import src.core.rate_limiter
+        src.core.rate_limiter._rate_limiter = None
+
+        # With RATE_LIMIT_EXEMPT_AGENTS=false, agents should be rate limited
+        with patch.dict('os.environ', {'RATE_LIMIT_EXEMPT_AGENTS': 'false'}):
+            request_info = {"client_id": "agent_client"}
+            allowed, message = await rate_limit_check("store_context", request_info, is_agent=True)
+            # Should go through normal rate limiting (allowed on first request)
+            assert allowed is True
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_check_non_agent_rate_limited(self):
+        """Test that non-agents (is_agent=False) are subject to rate limiting."""
+        # Reset global instance
+        import src.core.rate_limiter
+        src.core.rate_limiter._rate_limiter = None
+
+        request_info = {"client_id": "human_client"}
+        # First request should succeed
+        allowed, message = await rate_limit_check("store_context", request_info, is_agent=False)
+        assert allowed is True
 
 
 class TestTimingBehavior:
