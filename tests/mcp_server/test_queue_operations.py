@@ -359,6 +359,111 @@ class TestCompleteTaskEndpoint:
             )
 
     @pytest.mark.asyncio
+    async def test_complete_task_with_observability_fields(self):
+        """Test observability fields (duration, tokens, phase timing) are stored and propagated."""
+        mock_redis = Mock()
+        mock_redis.setex.return_value = True
+        mock_redis.publish.return_value = 1
+        mock_redis.lpush.return_value = 1
+        mock_redis.delete.return_value = 1
+
+        request = queue_operations.CompleteTaskRequest(
+            user_id="test_team",
+            packet_id="pkt-observability",
+            agent_id="coding_agent",
+            status="SUCCESS",
+            review_verdict="APPROVED",
+            workspace_path="/veris_storage/workspaces/test-obs",
+            branch_name="task/test-obs",
+            parent_packet_id="parent-obs-001",
+            # Phase 1.3: Duration tracking
+            duration_seconds=45.5,
+            # Phase 2.1: Token usage tracking
+            tokens_input=1500,
+            tokens_output=800,
+            tokens_total=2300,
+            model_used="sonnet",
+            # Phase 2.2: Phase timing breakdown
+            coder_duration_ms=30000,
+            reviewer_duration_ms=15000,
+        )
+
+        with patch.object(queue_operations, "_redis_client", mock_redis):
+            result = await queue_operations.complete_task(request, redis=mock_redis)
+
+        assert result.success is True
+
+        # Verify completion_event stored with observability fields
+        stored_json = mock_redis.setex.call_args[0][2]
+        stored_data = json.loads(stored_json)
+        assert stored_data["duration_seconds"] == 45.5
+        assert stored_data["tokens_input"] == 1500
+        assert stored_data["tokens_output"] == 800
+        assert stored_data["tokens_total"] == 2300
+        assert stored_data["model_used"] == "sonnet"
+        assert stored_data["coder_duration_ms"] == 30000
+        assert stored_data["reviewer_duration_ms"] == 15000
+
+        # Verify approved_completions queue includes observability fields
+        publish_json = mock_redis.lpush.call_args[0][1]
+        publish_data = json.loads(publish_json)
+        assert publish_data["duration_seconds"] == 45.5
+        assert publish_data["tokens_input"] == 1500
+        assert publish_data["tokens_output"] == 800
+        assert publish_data["tokens_total"] == 2300
+        assert publish_data["model_used"] == "sonnet"
+        assert publish_data["coder_duration_ms"] == 30000
+        assert publish_data["reviewer_duration_ms"] == 15000
+
+    def test_observability_field_validation(self):
+        """Test observability field constraints (ge=0 for numeric fields)."""
+        # Valid: all positive values
+        valid_request = queue_operations.CompleteTaskRequest(
+            user_id="test_team",
+            packet_id="pkt-valid-obs",
+            agent_id="agent-1",
+            status="SUCCESS",
+            duration_seconds=0.0,  # Zero is valid
+            tokens_input=0,
+            tokens_output=0,
+            tokens_total=0,
+            coder_duration_ms=0,
+            reviewer_duration_ms=0,
+        )
+        assert valid_request.duration_seconds == 0.0
+        assert valid_request.tokens_input == 0
+
+        # Invalid: negative duration_seconds
+        with pytest.raises(Exception):  # Pydantic ValidationError
+            queue_operations.CompleteTaskRequest(
+                user_id="test_team",
+                packet_id="pkt-invalid",
+                agent_id="agent-1",
+                status="SUCCESS",
+                duration_seconds=-1.0,
+            )
+
+        # Invalid: negative tokens_input
+        with pytest.raises(Exception):  # Pydantic ValidationError
+            queue_operations.CompleteTaskRequest(
+                user_id="test_team",
+                packet_id="pkt-invalid",
+                agent_id="agent-1",
+                status="SUCCESS",
+                tokens_input=-100,
+            )
+
+        # Invalid: negative coder_duration_ms
+        with pytest.raises(Exception):  # Pydantic ValidationError
+            queue_operations.CompleteTaskRequest(
+                user_id="test_team",
+                packet_id="pkt-invalid",
+                agent_id="agent-1",
+                status="SUCCESS",
+                coder_duration_ms=-1000,
+            )
+
+    @pytest.mark.asyncio
     async def test_complete_task_rejected_queued_for_saga_closure(self):
         """Test REJECTED completion is queued for saga closure (not REJECT)."""
         mock_redis = Mock()
