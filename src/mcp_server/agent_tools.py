@@ -146,7 +146,7 @@ class Skill(BaseModel):
     skill_id: str
     title: str
     domain: str
-    trigger: List[str] = Field(default_factory=list)
+    triggers: List[str] = Field(default_factory=list, description="Semantic trigger examples")
     content: str
     file_path: str = ""
     relevance_score: float = 0.0
@@ -166,7 +166,12 @@ class StoreSkillRequest(BaseModel):
     title: str = Field(..., description="Skill title", min_length=1)
     domain: str = Field(..., description="Skill domain (e.g., 'api', 'database', 'testing')")
     trigger: List[str] = Field(
-        default_factory=list, description="Keywords that trigger this skill"
+        default_factory=list,
+        description="Keywords that trigger this skill (deprecated, use trigger_examples)",
+    )
+    trigger_examples: List[str] = Field(
+        default_factory=list,
+        description="Semantic example queries that trigger this skill",
     )
     tech_stack: List[str] = Field(
         default_factory=list, description="Technologies this skill applies to"
@@ -467,17 +472,29 @@ async def discover_skills(
         # Generate embedding
         vector = await get_embedding(query)
 
-        # Build filter if domain specified
-        search_filter = None
+        # Build filter - domain and/or tech_stack
+        filter_conditions = []
+
         if request.domain:
-            search_filter = qdrant_models.Filter(
-                must=[
-                    qdrant_models.FieldCondition(
-                        key="domain",
-                        match=qdrant_models.MatchValue(value=request.domain),
-                    )
-                ]
+            filter_conditions.append(
+                qdrant_models.FieldCondition(
+                    key="domain",
+                    match=qdrant_models.MatchValue(value=request.domain),
+                )
             )
+
+        if request.tech_stack:
+            # MatchAny: skill matches if ANY of its tech_stack overlaps with requested
+            filter_conditions.append(
+                qdrant_models.FieldCondition(
+                    key="tech_stack",
+                    match=qdrant_models.MatchAny(any=request.tech_stack),
+                )
+            )
+
+        search_filter = (
+            qdrant_models.Filter(must=filter_conditions) if filter_conditions else None
+        )
 
         # Search Qdrant using query_points (qdrant-client v1.7+)
         # Note: score_threshold=0.5 is appropriate for all-MiniLM-L6-v2 embeddings.
@@ -495,12 +512,13 @@ async def discover_skills(
         results = response.points
 
         # Convert to Skill models
+        # Note: payload field is "triggers" (plural), fallback to "trigger" for backward compat
         skills = [
             Skill(
                 skill_id=hit.payload.get("skill_id", "unknown"),
                 title=hit.payload.get("title", "Untitled Skill"),
                 domain=hit.payload.get("domain", "general"),
-                trigger=hit.payload.get("trigger", []),
+                triggers=hit.payload.get("triggers") or hit.payload.get("trigger", []),
                 content=hit.payload.get("content", ""),
                 file_path=hit.payload.get("file_path", ""),
                 relevance_score=hit.score,
@@ -549,20 +567,34 @@ async def store_skill(
         # Generate idempotent skill_id from title using MD5
         skill_id = hashlib.md5(request.title.encode()).hexdigest()
 
-        # Build embedding text: title + domain + triggers + content[:500]
-        triggers_text = " ".join(request.trigger) if request.trigger else ""
-        content_preview = request.content[:500] if len(request.content) > 500 else request.content
-        embedding_text = f"{request.title} {request.domain} {triggers_text} {content_preview}"
+        # Merge triggers: prefer trigger_examples, fall back to trigger (deprecated)
+        triggers = request.trigger_examples or request.trigger or []
+        if request.trigger and not request.trigger_examples:
+            logger.warning(
+                f"Skill '{request.title}' uses deprecated 'trigger' field. "
+                "Please migrate to 'trigger_examples'."
+            )
+
+        # Build embedding text: triggers first (semantic queries), then title and domain
+        # Skip content preview - triggers carry the semantic intent
+        triggers_text = " ".join(triggers)
+        parts = []
+        if triggers_text.strip():
+            parts.append(triggers_text)
+        parts.append(request.title)
+        parts.append(request.domain)
+        embedding_text = " | ".join(parts)
+        logger.debug(f"Embedding skill '{request.title}': '{embedding_text[:100]}...'")
 
         # Generate embedding
         vector = await get_embedding(embedding_text)
 
-        # Build payload
+        # Build payload with merged triggers field
         payload = {
             "skill_id": skill_id,
             "title": request.title,
             "domain": request.domain,
-            "trigger": request.trigger,
+            "triggers": triggers,  # Merged field for retrieval
             "tech_stack": request.tech_stack,
             "content": request.content,
             "file_path": request.file_path or "",
@@ -669,6 +701,38 @@ def ensure_collections(qdrant_client: QdrantClient) -> None:
                 raise
             else:
                 logger.warning(f"Could not verify collection '{collection_name}': {e}")
+
+    # Ensure payload indexes for skills collection (idempotent)
+    _ensure_skills_payload_indexes(qdrant_client)
+
+
+def _ensure_skills_payload_indexes(qdrant_client: QdrantClient) -> None:
+    """
+    Ensure payload indexes exist for the skills collection.
+
+    Creates KEYWORD indexes on tech_stack and domain fields for filtering.
+    Handles "already exists" errors gracefully (idempotent).
+    """
+    indexes_to_create = [
+        ("tech_stack", qdrant_models.PayloadSchemaType.KEYWORD),
+        ("domain", qdrant_models.PayloadSchemaType.KEYWORD),
+    ]
+
+    for field_name, field_type in indexes_to_create:
+        try:
+            qdrant_client.create_payload_index(
+                collection_name=SKILLS_COLLECTION,
+                field_name=field_name,
+                field_schema=field_type,
+            )
+            logger.info(f"✓ Created payload index on '{field_name}' for {SKILLS_COLLECTION}")
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "already exists" in error_msg or "index already" in error_msg:
+                logger.debug(f"Payload index on '{field_name}' already exists (OK)")
+            else:
+                # Log but don't fail - index is optional for functionality
+                logger.warning(f"Could not create payload index on '{field_name}': {e}")
 
 
 # =============================================================================
