@@ -871,16 +871,20 @@ class TestStoreSkillEndpoint:
 
                     await store_skill(request, mock_qdrant, None)
 
-        # Verify embedding text contains all components
+        # Verify embedding text contains triggers, title, domain (no content)
+        # New format: "triggers | title | domain"
         assert "FastAPI Endpoints" in captured_text
         assert "api" in captured_text
         assert "create endpoint" in captured_text
         assert "add route" in captured_text
-        assert "skill content" in captured_text
+        # Content is NOT included in embedding (per design)
+        assert "skill content" not in captured_text
+        # Should use pipe separator
+        assert "|" in captured_text
 
     @pytest.mark.asyncio
-    async def test_store_skill_truncates_long_content(self):
-        """Test that content is truncated to 500 chars for embedding."""
+    async def test_store_skill_embedding_excludes_content(self):
+        """Test that content is NOT included in embedding (triggers-first design)."""
         mock_qdrant = MagicMock()
         captured_text = None
 
@@ -889,7 +893,7 @@ class TestStoreSkillEndpoint:
             captured_text = text
             return [0.1] * 384
 
-        long_content = "A" * 1000  # 1000 chars
+        long_content = "A" * 1000  # 1000 chars of content
 
         request = StoreSkillRequest(
             title="Long Content Skill",
@@ -905,9 +909,10 @@ class TestStoreSkillEndpoint:
 
                     await store_skill(request, mock_qdrant, None)
 
-        # Content in embedding should be truncated
-        # Full text = title + domain + content[:500]
-        assert captured_text.count("A") == 500  # Only 500 A's, not 1000
+        # Content should NOT be in embedding (triggers-first design)
+        assert "A" not in captured_text  # No content characters
+        assert "Long Content Skill" in captured_text  # Title is included
+        assert "test" in captured_text  # Domain is included
 
     @pytest.mark.asyncio
     async def test_store_skill_upserts_to_correct_collection(self):
@@ -967,7 +972,8 @@ class TestStoreSkillEndpoint:
 
         assert captured_payload["title"] == "Payload Test"
         assert captured_payload["domain"] == "testing"
-        assert captured_payload["trigger"] == ["test trigger"]
+        # Note: payload uses "triggers" (plural, merged from trigger/trigger_examples)
+        assert captured_payload["triggers"] == ["test trigger"]
         assert captured_payload["tech_stack"] == ["python"]
         assert captured_payload["content"] == "Test content"
         assert captured_payload["file_path"] == "/test/path.md"
