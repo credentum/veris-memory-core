@@ -449,29 +449,21 @@ async def discover_skills(
     ),
 ) -> DiscoverSkillsResponse:
     """
-    Semantic search over veris_skills Qdrant collection.
+    Discover skills from veris_skills Qdrant collection.
 
-    Skills are procedural knowledge documents (Markdown) that provide
-    domain-specific instructions for agents.
+    Two modes of operation:
+    1. **Semantic search** (query provided): Vector similarity search with optional
+       tech_stack/domain filters. Uses score_threshold=0.5.
+    2. **Catalog lookup** (no query, only filters): Returns all skills matching
+       the tech_stack/domain filter. No vector search, no score threshold.
+
+    This two-mode approach ensures that filter-only queries (e.g., "give me all
+    Lua skills") return results even when synthetic queries like "Skills for
+    working with: lua" have low semantic similarity with skill content.
 
     Requires valid API key authentication.
     """
     try:
-        # Build search query
-        if request.query:
-            query = request.query
-        elif request.tech_stack:
-            query = f"Skills for working with: {', '.join(request.tech_stack)}"
-        else:
-            return DiscoverSkillsResponse(
-                skills=[],
-                total_found=0,
-                query="",
-            )
-
-        # Generate embedding
-        vector = await get_embedding(query)
-
         # Build filter - domain and/or tech_stack
         filter_conditions = []
 
@@ -496,23 +488,56 @@ async def discover_skills(
             qdrant_models.Filter(must=filter_conditions) if filter_conditions else None
         )
 
-        # Search Qdrant using query_points (qdrant-client v1.7+)
-        # Note: score_threshold=0.5 is appropriate for all-MiniLM-L6-v2 embeddings.
-        # Higher thresholds (0.75+) filter out most semantic matches since cosine
-        # similarity with this model typically ranges 0.4-0.7 for related content.
-        # Run in thread pool to avoid blocking event loop
-        response = await asyncio.to_thread(
-            qdrant.query_points,
-            collection_name=SKILLS_COLLECTION,
-            query=vector,
-            query_filter=search_filter,
-            limit=request.limit,
-            score_threshold=0.5,
-        )
-        results = response.points
+        # Two-mode discovery based on whether explicit query is provided
+        if request.query:
+            # MODE 1: Semantic search with optional filter
+            # Use vector similarity to find relevant skills
+            query = request.query
+            vector = await get_embedding(query)
+
+            # Search Qdrant using query_points (qdrant-client v1.7+)
+            # Note: score_threshold=0.5 is appropriate for all-MiniLM-L6-v2 embeddings.
+            response = await asyncio.to_thread(
+                qdrant.query_points,
+                collection_name=SKILLS_COLLECTION,
+                query=vector,
+                query_filter=search_filter,
+                limit=request.limit,
+                score_threshold=0.5,
+            )
+            results = response.points
+            mode = "semantic"
+
+        elif search_filter:
+            # MODE 2: Catalog lookup - filter only, no vector search
+            # When only tech_stack/domain is provided, return all matching skills
+            # This avoids the problem where synthetic queries like "Skills for
+            # working with: ao" have low similarity with actual skill content
+            query = f"[catalog] tech_stack={request.tech_stack}, domain={request.domain}"
+
+            scroll_response = await asyncio.to_thread(
+                qdrant.scroll,
+                collection_name=SKILLS_COLLECTION,
+                scroll_filter=search_filter,
+                limit=request.limit,
+                with_payload=True,
+                with_vectors=False,
+            )
+            # scroll returns (points, next_offset) tuple
+            results = scroll_response[0]
+            mode = "catalog"
+
+        else:
+            # No query and no filters - return empty
+            return DiscoverSkillsResponse(
+                skills=[],
+                total_found=0,
+                query="",
+            )
 
         # Convert to Skill models
-        # Note: payload field is "triggers" (plural), fallback to "trigger" for backward compat
+        # Note: For catalog mode, there's no score, so use 1.0 as default
+        # payload field is "triggers" (plural), fallback to "trigger" for backward compat
         skills = [
             Skill(
                 skill_id=hit.payload.get("skill_id", "unknown"),
@@ -521,12 +546,14 @@ async def discover_skills(
                 triggers=hit.payload.get("triggers") or hit.payload.get("trigger", []),
                 content=hit.payload.get("content", ""),
                 file_path=hit.payload.get("file_path", ""),
-                relevance_score=hit.score,
+                relevance_score=getattr(hit, "score", 1.0) or 1.0,
             )
             for hit in results
         ]
 
-        logger.info(f"Skill discovery: query='{query[:50]}...', found={len(skills)}")
+        logger.info(
+            f"Skill discovery: mode={mode}, query='{query[:50]}...', found={len(skills)}"
+        )
 
         return DiscoverSkillsResponse(
             skills=skills,
