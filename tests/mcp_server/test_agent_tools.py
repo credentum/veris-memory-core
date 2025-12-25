@@ -56,6 +56,18 @@ def mock_qdrant_client():
     """Create a mock Qdrant client."""
     client = MagicMock()
     client.upsert = MagicMock()
+
+    # Mock query_points (v1.7+ API used by implementation)
+    # Returns a response object with .points attribute
+    mock_response = MagicMock()
+    mock_response.points = []
+    client.query_points = MagicMock(return_value=mock_response)
+
+    # Mock scroll for catalog mode in discover_skills
+    # Returns tuple of (points_list, next_page_offset)
+    client.scroll = MagicMock(return_value=([], None))
+
+    # Legacy search mock (for backward compatibility)
     client.search = MagicMock(return_value=[])
 
     # Mock get_collection to return collection info with correct dimensions
@@ -77,8 +89,29 @@ def mock_embedding_service():
 @pytest.fixture
 def app_with_routes(mock_qdrant_client, mock_embedding_service):
     """Create FastAPI app with agent tools routes registered."""
+    import src.mcp_server.agent_tools as agent_tools_module
+
     app = FastAPI()
     register_routes(app, mock_qdrant_client, mock_embedding_service)
+
+    # Override API key authentication for tests
+    if agent_tools_module.API_KEY_AUTH_AVAILABLE:
+        # Import from the source middleware module (not the agent_tools re-export)
+        from src.middleware.api_key_auth import verify_api_key, APIKeyInfo
+
+        # Create a mock API key info for tests
+        async def mock_verify_api_key():
+            return APIKeyInfo(
+                key_id="test-key",
+                user_id="test-user",
+                role="writer",
+                capabilities=["read", "write"],
+                is_agent=True,
+                metadata={},
+            )
+
+        app.dependency_overrides[verify_api_key] = mock_verify_api_key
+
     return app
 
 
@@ -334,7 +367,10 @@ class TestCheckPrecedentEndpoint:
 
     def test_check_precedent_clean(self, client, mock_qdrant_client):
         """Test precedent check with no matches (CLEAN verdict)."""
-        mock_qdrant_client.search.return_value = []
+        # query_points returns a response object with .points attribute
+        mock_response = MagicMock()
+        mock_response.points = []
+        mock_qdrant_client.query_points.return_value = mock_response
 
         response = client.post(
             "/tools/check_precedent",
@@ -362,7 +398,11 @@ class TestCheckPrecedentEndpoint:
         mock_hit.score = 0.92
 
         # First call returns failures, second returns empty (successes)
-        mock_qdrant_client.search.side_effect = [[mock_hit], []]
+        failure_response = MagicMock()
+        failure_response.points = [mock_hit]
+        success_response = MagicMock()
+        success_response.points = []
+        mock_qdrant_client.query_points.side_effect = [failure_response, success_response]
 
         response = client.post(
             "/tools/check_precedent",
@@ -389,7 +429,11 @@ class TestCheckPrecedentEndpoint:
         mock_hit.score = 0.95
 
         # First call returns empty (failures), second returns successes
-        mock_qdrant_client.search.side_effect = [[], [mock_hit]]
+        failure_response = MagicMock()
+        failure_response.points = []
+        success_response = MagicMock()
+        success_response.points = [mock_hit]
+        mock_qdrant_client.query_points.side_effect = [failure_response, success_response]
 
         response = client.post(
             "/tools/check_precedent",
@@ -404,7 +448,9 @@ class TestCheckPrecedentEndpoint:
 
     def test_check_precedent_custom_limit(self, client, mock_qdrant_client):
         """Test precedent check with custom lookback_limit."""
-        mock_qdrant_client.search.return_value = []
+        mock_response = MagicMock()
+        mock_response.points = []
+        mock_qdrant_client.query_points.return_value = mock_response
 
         response = client.post(
             "/tools/check_precedent",
@@ -415,8 +461,8 @@ class TestCheckPrecedentEndpoint:
         )
 
         assert response.status_code == 200
-        # Verify the limit was passed to search
-        call_args = mock_qdrant_client.search.call_args_list[0]
+        # Verify the limit was passed to query_points
+        call_args = mock_qdrant_client.query_points.call_args_list[0]
         assert call_args.kwargs.get("limit") == 10
 
 
@@ -429,7 +475,7 @@ class TestDiscoverSkillsEndpoint:
     """Tests for discover_skills endpoint."""
 
     def test_discover_skills_with_query(self, client, mock_qdrant_client):
-        """Test skill discovery with query."""
+        """Test skill discovery with query (semantic search mode)."""
         mock_hit = MagicMock()
         mock_hit.payload = {
             "skill_id": "skill-1",
@@ -440,7 +486,11 @@ class TestDiscoverSkillsEndpoint:
             "file_path": "/skills/fastapi.md"
         }
         mock_hit.score = 0.88
-        mock_qdrant_client.search.return_value = [mock_hit]
+
+        # query_points returns response with .points attribute
+        mock_response = MagicMock()
+        mock_response.points = [mock_hit]
+        mock_qdrant_client.query_points.return_value = mock_response
 
         response = client.post(
             "/tools/discover_skills",
@@ -455,8 +505,19 @@ class TestDiscoverSkillsEndpoint:
         assert data["skills"][0]["relevance_score"] == 0.88
 
     def test_discover_skills_with_tech_stack(self, client, mock_qdrant_client):
-        """Test skill discovery with tech_stack filter."""
-        mock_qdrant_client.search.return_value = []
+        """Test skill discovery with tech_stack filter (catalog mode)."""
+        # When only tech_stack is provided (no query), uses scroll (catalog mode)
+        mock_hit = MagicMock()
+        mock_hit.payload = {
+            "skill_id": "skill-2",
+            "title": "Python Redis Guide",
+            "domain": "backend",
+            "trigger": ["redis", "caching"],
+            "content": "# Redis Guide",
+            "file_path": "/skills/redis.md"
+        }
+        # scroll returns tuple (points, next_page_offset)
+        mock_qdrant_client.scroll.return_value = ([mock_hit], None)
 
         response = client.post(
             "/tools/discover_skills",
@@ -465,11 +526,14 @@ class TestDiscoverSkillsEndpoint:
 
         assert response.status_code == 200
         data = response.json()
-        assert "python" in data["query"].lower() or "redis" in data["query"].lower()
+        # In catalog mode, query contains "[catalog]" prefix
+        assert "[catalog]" in data["query"]
 
     def test_discover_skills_with_domain_filter(self, client, mock_qdrant_client):
-        """Test skill discovery with domain filter."""
-        mock_qdrant_client.search.return_value = []
+        """Test skill discovery with query and domain filter (semantic mode)."""
+        mock_response = MagicMock()
+        mock_response.points = []
+        mock_qdrant_client.query_points.return_value = mock_response
 
         response = client.post(
             "/tools/discover_skills",
@@ -480,8 +544,8 @@ class TestDiscoverSkillsEndpoint:
         )
 
         assert response.status_code == 200
-        # Verify filter was applied
-        call_args = mock_qdrant_client.search.call_args
+        # Verify filter was applied to query_points
+        call_args = mock_qdrant_client.query_points.call_args
         assert call_args.kwargs.get("query_filter") is not None
 
     def test_discover_skills_empty_request(self, client):
@@ -498,8 +562,10 @@ class TestDiscoverSkillsEndpoint:
         assert data["query"] == ""
 
     def test_discover_skills_custom_limit(self, client, mock_qdrant_client):
-        """Test skill discovery with custom limit."""
-        mock_qdrant_client.search.return_value = []
+        """Test skill discovery with custom limit (semantic mode)."""
+        mock_response = MagicMock()
+        mock_response.points = []
+        mock_qdrant_client.query_points.return_value = mock_response
 
         response = client.post(
             "/tools/discover_skills",
@@ -510,7 +576,7 @@ class TestDiscoverSkillsEndpoint:
         )
 
         assert response.status_code == 200
-        call_args = mock_qdrant_client.search.call_args
+        call_args = mock_qdrant_client.query_points.call_args
         assert call_args.kwargs.get("limit") == 10
 
 
@@ -570,7 +636,7 @@ class TestErrorHandling:
 
     def test_check_precedent_qdrant_error(self, client, mock_qdrant_client):
         """Test check_precedent handles Qdrant errors."""
-        mock_qdrant_client.search.side_effect = Exception("Search failed")
+        mock_qdrant_client.query_points.side_effect = Exception("Search failed")
 
         response = client.post(
             "/tools/check_precedent",
@@ -582,7 +648,7 @@ class TestErrorHandling:
 
     def test_discover_skills_qdrant_error(self, client, mock_qdrant_client):
         """Test discover_skills handles Qdrant errors."""
-        mock_qdrant_client.search.side_effect = Exception("Connection refused")
+        mock_qdrant_client.query_points.side_effect = Exception("Connection refused")
 
         response = client.post(
             "/tools/discover_skills",
