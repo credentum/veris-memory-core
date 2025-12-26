@@ -106,96 +106,199 @@ Succeed first try = 1 data point, learn nothing specific
 
 ---
 
-#### Phase 0: Smart Routing (This Sprint - Priority)
+#### Phase 0: Smart Routing via Metadata (This Sprint - Priority)
 
-Route packets based on risk/complexity BEFORE first attempt. Don't wait for failure on known-hard problems.
+Route packets based on risk/complexity using **packet metadata**, not separate queues. Any coder can handle any packet by switching modes based on metadata.
+
+**Dev Panel Decision (2025-12-26):** Rejected multi-queue approach in favor of metadata-based mode switching.
+
+| Approach | Verdict | Reason |
+|----------|---------|--------|
+| Separate queues + containers | ❌ Rejected | Idle workers, SPOF, deployment complexity |
+| Metadata-based mode switching | ✅ Approved | Simpler, no idle workers, any coder can do any work |
 
 ```
 Packet arrives
      ↓
-[Triage Classifier]
+[Orchestrator adds routing metadata]
      ↓
-├── HIGH risk (security, auth, ownership) → ao-panel directly
-├── NOVEL (skill_match < 0.5) → ao-panel directly
-├── LOW risk + common pattern → lua.md coder (fast path)
-└── UNKNOWN → lua.md coder, escalate on failure
+work_packets queue (single queue)
+     ↓
+Any coder claims packet
+     ↓
+[Coder reads metadata, switches mode]
+     ↓
+├── agent_mode: "ao-panel" → Enable web search, Opus, ao-panel prompt
+└── agent_mode: "standard" → Standard lua.md prompt, Sonnet
 ```
 
-**Triage Logic:**
+**Orchestrator: Add Routing Metadata**
 
 ```python
-def route_packet(packet: WorkPacket, skills: List[Skill]) -> str:
-    """Route packet to appropriate coder based on risk and skill availability."""
+def _prepare_packet_for_dispatch(self, packet: WorkPacket) -> WorkPacket:
+    """Add routing metadata before dispatch to single queue."""
 
-    # HIGH RISK: Direct to ao-panel (don't waste attempts)
+    # Determine agent mode based on risk/novelty
+    agent_mode, routing_reason = self._determine_agent_mode(packet)
+
+    # Add to packet metadata (NOT a separate queue)
+    packet.metadata["agent_mode"] = agent_mode
+    packet.metadata["model_hint"] = "opus" if agent_mode == "ao-panel" else "sonnet"
+    packet.metadata["routing_reason"] = routing_reason
+    packet.metadata["skill_match_score"] = self._best_skill_match(packet)
+    packet.metadata["web_search_enabled"] = agent_mode == "ao-panel"
+
+    # Log routing decision for observability
+    self.slog.routing_decision(
+        packet_id=packet.packet_id,
+        agent_mode=agent_mode,
+        routing_reason=routing_reason
+    )
+
+    return packet
+
+def _determine_agent_mode(self, packet: WorkPacket) -> Tuple[str, str]:
+    """Determine which mode the coder should use."""
+
+    # HIGH RISK: Security/auth patterns
     HIGH_RISK_PATTERNS = {
         "authentication", "authorization", "ownership", "security",
         "permissions", "access control", "admin", "sudo", "root"
     }
-    task_lower = packet.task_description.lower()
+    task_lower = packet.description.lower()
     if any(pattern in task_lower for pattern in HIGH_RISK_PATTERNS):
-        return "ao-panel"
+        return "ao-panel", "high_risk_security_pattern"
 
-    # NOVEL: No relevant skills found
-    best_skill_score = max((s.relevance for s in skills), default=0)
+    # NOVEL: No relevant skills found (skill_match < 0.5)
+    best_skill_score = self._best_skill_match(packet)
     if best_skill_score < 0.5:
-        return "ao-panel"
+        return "ao-panel", f"novel_low_skill_match_{best_skill_score:.2f}"
 
-    # Check reviewer feedback from previous attempts
-    if packet.attempt >= 2 and packet.previous_issues:
-        # Same issues twice = pattern not working
-        if issues_unchanged(packet.previous_issues):
-            return "ao-panel"
+    # ESCALATION: Same issues after 2+ attempts
+    if packet.attempt >= 2 and self._issues_unchanged(packet):
+        return "ao-panel", "escalated_repeated_failure"
 
-    # DEFAULT: Fast path with lua.md coder
-    return "lua.md-coder"
+    # DEFAULT: Standard fast path
+    return "standard", "common_pattern"
 ```
+
+**Coder Agent: Mode Switching**
+
+```python
+class CodingAgent:
+    def claim_and_process(self, packet: WorkPacket):
+        """Claim packet and switch mode based on metadata."""
+
+        # Read routing metadata
+        mode = packet.metadata.get("agent_mode", "standard")
+        model_hint = packet.metadata.get("model_hint", "sonnet")
+        web_search = packet.metadata.get("web_search_enabled", False)
+
+        # Switch mode
+        if mode == "ao-panel":
+            self._enable_ao_panel_mode(model_hint, web_search)
+        else:
+            self._enable_standard_mode()
+
+        # Process with appropriate mode
+        return self.execute(packet)
+
+    def _enable_ao_panel_mode(self, model: str, web_search: bool):
+        """Switch to ao-panel expertise mode."""
+        self.system_prompt = self._load_ao_panel_prompt()
+        self.web_search_enabled = web_search
+        self.model = model  # "opus"
+        self.skills = self._load_ao_skills()  # AO security patterns, etc.
+        log.info(f"Switched to ao-panel mode: model={model}, web_search={web_search}")
+
+    def _enable_standard_mode(self):
+        """Standard lua.md coder mode."""
+        self.system_prompt = self._load_lua_md_prompt()
+        self.web_search_enabled = False
+        self.model = "sonnet"
+        log.info("Using standard coder mode")
+```
+
+**Why Metadata-Based (Dev Panel Rationale):**
+
+| Problem | Multi-Queue | Metadata-Based |
+|---------|-------------|----------------|
+| Idle workers | ❌ ao-panel-coder sits idle when queue empty | ✅ Any coder can do any work |
+| Single point of failure | ❌ One container down = all AO work blocked | ✅ N coders = N potential ao-panel coders |
+| Deployment complexity | ❌ New container, new monitoring | ✅ Same container, config in metadata |
+| Load balancing | ❌ Manual queue sizing | ✅ Natural work distribution |
+| Debugging | ❌ Which queue did it go to? | ✅ Routing decision in packet metadata |
 
 **Routing Distribution (Expected):**
 
-| Route | Percentage | Rationale |
-|-------|------------|-----------|
-| lua.md fast path | 70-80% | Common patterns, well-matched skills |
-| ao-panel direct | 15-20% | Security/auth tasks, novel problems |
-| Escalated after failure | 5-10% | Unexpected complexity |
+| Mode | Percentage | Trigger |
+|------|------------|---------|
+| standard | 70-80% | Common patterns, skill_match ≥ 0.5 |
+| ao-panel | 15-20% | Security/auth OR skill_match < 0.5 |
+| ao-panel (escalated) | 5-10% | 2+ failures with same issues |
 
-**Why This Matters:**
-- wp-003 (security task) should have gone to ao-panel on attempt 1
-- Instead it failed 3 times because we waited for failure
-- Smart routing = right expert for the job from the start
+**Key Insight:**
+> "ao-panel-coder is a MODE, not a SERVICE. The difference is prompt + model + web search, not infrastructure." - Dev Panel, 2025-12-26
 
 ---
 
-#### Phase 1: ao-panel as Coder (This Sprint)
+#### Phase 1: ao-panel Mode Implementation (This Sprint)
 
-Expert panel (ao-panel) becomes the coder for routed/escalated packets.
+Implement mode switching in the existing coder agent. No new containers needed.
 
 **For smart-routed packets (HIGH risk / NOVEL):**
 ```
-Packet arrives → Triage: "security task" → ao-panel directly
-         → Has web search capability
-         → Has domain expertise (AO/Lua patterns)
-         → Solves directly
-         → SUCCESS
-         ↓
-Extract pattern to skill (async, post-success)
+Packet arrives
+     ↓
+Orchestrator: agent_mode="ao-panel", routing_reason="high_risk_security_pattern"
+     ↓
+work_packets queue
+     ↓
+Any coder claims packet
+     ↓
+Coder reads metadata → switches to ao-panel mode
+     ↓
+[ao-panel mode active]
+  → Opus model
+  → Web search enabled
+  → ao-panel prompt + skills
+  → Solves directly
+     ↓
+SUCCESS → Extract pattern to skill (async)
 ```
 
 **For escalated packets (failed fast path):**
 ```
-Attempt 1 → FAIL (lua.md with Sonnet)
-Attempt 2 → FAIL (lua.md with Opus + existing skills)
-Attempt 3 → ao-panel IS the coder
-         → SUCCESS
-         ↓
-Extract pattern to skill (async, post-success)
+Attempt 1 → FAIL (standard mode, Sonnet)
+     ↓
+Orchestrator updates: agent_mode="standard", attempt=2
+     ↓
+Attempt 2 → FAIL (standard mode, Opus + existing skills)
+     ↓
+Orchestrator updates: agent_mode="ao-panel", routing_reason="escalated_repeated_failure"
+     ↓
+Attempt 3 → Coder switches to ao-panel mode
+     ↓
+SUCCESS → Extract pattern to skill (async)
 ```
+
+**Implementation Checklist:**
+
+| Component | Change | Location |
+|-----------|--------|----------|
+| Orchestrator | Add `_determine_agent_mode()` | orchestrator/main.py |
+| Orchestrator | Add routing metadata to packets | `_prepare_packet_for_dispatch()` |
+| Coder Agent | Add mode switching logic | agents/coding_agent.py |
+| Coder Agent | Load ao-panel prompt when mode="ao-panel" | `_enable_ao_panel_mode()` |
+| Coder Agent | Enable web search when mode="ao-panel" | Tool initialization |
+| Trajectory | Log agent_mode in trajectory metadata | trajectory logging |
 
 **Why This Works:**
 - Security tasks get expert attention immediately (no wasted attempts)
 - Common patterns still use fast path (preserves learning signal)
-- ao-panel already exists and has the right capabilities
-- "Learn from success" captures what the expert did differently
+- Any coder can become ao-panel coder on demand (no SPOF)
+- No new containers, no new queues, no deployment changes
+- Routing decision is explicit in packet metadata (debuggable)
 
 ---
 
@@ -331,12 +434,24 @@ content: |
 
 #### Alternatives Considered
 
+**Skill Injection Approaches:**
+
 | Alternative | Pros | Cons | Decision |
 |-------------|------|------|----------|
 | Inject more existing skills | Simple | Already failed with 4 skills | Rejected |
 | Human-in-the-loop only | Always works | Doesn't scale, blocks pipeline | Partial (fallback) |
-| ao-panel as coder always | Guaranteed context | Expensive, bottleneck | Phase 1 only |
+| ao-panel as coder always | Guaranteed context | Expensive, bottleneck, no learning | Rejected |
 | Generate skill per issue | Targeted | Complex orchestration | Phase 2+ |
+
+**Routing Approaches (Dev Panel Review 2025-12-26):**
+
+| Alternative | Pros | Cons | Decision |
+|-------------|------|------|----------|
+| Multi-queue + separate container | Clean separation | Idle workers, SPOF, deployment complexity | ❌ Rejected |
+| Metadata-based mode switching | Simple, any coder can do any work, no SPOF | Coder must support mode switching | ✅ Approved |
+| Orchestrator direct invocation | Full control | Orchestrator becomes bottleneck | Rejected |
+
+**Key Decision:** ao-panel-coder is a MODE, not a SERVICE. The difference is prompt + model + web search, not infrastructure.
 
 ---
 
