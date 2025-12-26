@@ -464,7 +464,8 @@ class TrajectorySearchRequest(BaseModel):
     query: Optional[str] = Field(None, description="Semantic search query")
     agent: Optional[str] = Field(None, description="Filter by agent name")
     outcome: Optional[TrajectoryOutcome] = Field(None, description="Filter by outcome")
-    task_id: Optional[str] = Field(None, description="Filter by task ID")
+    task_id: Optional[str] = Field(None, description="Filter by task ID (exact match)")
+    parent_packet_id: Optional[str] = Field(None, description="Filter by parent packet ID (finds all work packets)")
     hours_ago: Optional[int] = Field(None, ge=1, le=720, description="Filter to last N hours")
     limit: int = Field(20, ge=1, le=100, description="Max results to return")
 

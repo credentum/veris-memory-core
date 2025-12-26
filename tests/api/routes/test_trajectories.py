@@ -26,7 +26,10 @@ class TestEnsureCollectionExists:
         """Test that existing collection is not recreated."""
         mock_client = Mock()
         mock_collections = Mock()
-        mock_collections.collections = [Mock(name=TRAJECTORY_COLLECTION)]
+        # Create a mock collection with .name attribute set correctly
+        mock_collection = Mock()
+        mock_collection.name = TRAJECTORY_COLLECTION
+        mock_collections.collections = [mock_collection]
         mock_client.client.get_collections.return_value = mock_collections
 
         result = ensure_collection_exists(mock_client)
@@ -429,3 +432,73 @@ class TestSearchTrajectoriesEndpoint:
             assert result.success is True
             assert result.count == 0
             assert len(result.trajectories) == 0
+
+    @pytest.mark.asyncio
+    async def test_search_trajectories_parent_packet_id_filter(self, mock_request):
+        """Test filtering by parent_packet_id to find all work packets for a saga."""
+        from src.api.routes.trajectories import search_trajectories
+        from src.api.models import TrajectorySearchRequest
+        from qdrant_client.models import FieldCondition, MatchValue
+
+        mock_qdrant = Mock()
+        mock_collections = Mock()
+        mock_collections.collections = [Mock(name=TRAJECTORY_COLLECTION)]
+        mock_qdrant.client.get_collections.return_value = mock_collections
+
+        # Mock scroll results - two work packets from the same parent
+        mock_point_1 = Mock()
+        mock_point_1.payload = {
+            "trajectory_id": "traj_wp001",
+            "task_id": "ao-suite-20251226-wp-001",
+            "agent": "coding_agent",
+            "outcome": "success",
+            "error": None,
+            "duration_ms": 1500.0,
+            "cost_usd": 0.05,
+            "trace_id": "mcp_001",
+            "timestamp": "2025-12-26T10:00:00",
+            "metadata": {},
+            "parent_packet_id": "ao-suite-20251226"
+        }
+        mock_point_2 = Mock()
+        mock_point_2.payload = {
+            "trajectory_id": "traj_wp002",
+            "task_id": "ao-suite-20251226-wp-002",
+            "agent": "coding_agent",
+            "outcome": "success",
+            "error": None,
+            "duration_ms": 2000.0,
+            "cost_usd": 0.08,
+            "trace_id": "mcp_002",
+            "timestamp": "2025-12-26T10:05:00",
+            "metadata": {},
+            "parent_packet_id": "ao-suite-20251226"
+        }
+        mock_qdrant.client.scroll.return_value = ([mock_point_1, mock_point_2], None)
+
+        with patch('src.api.routes.trajectories.get_qdrant_client', return_value=mock_qdrant), \
+             patch('src.api.routes.trajectories.get_embedding_generator', return_value=None), \
+             patch('src.api.routes.trajectories.api_logger'):
+
+            request = TrajectorySearchRequest(
+                parent_packet_id="ao-suite-20251226",
+                limit=20
+            )
+            result = await search_trajectories(mock_request, request)
+
+            assert result.success is True
+            assert result.count == 2
+            assert len(result.trajectories) == 2
+            assert result.trajectories[0].task_id == "ao-suite-20251226-wp-001"
+            assert result.trajectories[1].task_id == "ao-suite-20251226-wp-002"
+
+            # Verify scroll was called with parent_packet_id filter
+            mock_qdrant.client.scroll.assert_called_once()
+            call_kwargs = mock_qdrant.client.scroll.call_args.kwargs
+            scroll_filter = call_kwargs.get('scroll_filter')
+            assert scroll_filter is not None
+            # Verify the filter contains a condition for parent_packet_id
+            filter_conditions = scroll_filter.must
+            assert len(filter_conditions) == 1
+            assert filter_conditions[0].key == "parent_packet_id"
+            assert filter_conditions[0].match.value == "ao-suite-20251226"

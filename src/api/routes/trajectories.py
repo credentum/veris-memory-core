@@ -124,6 +124,12 @@ async def log_trajectory(
             hash_bytes = hashlib.sha256(embedding_text.encode()).digest()
             embedding = [float(b) / 255.0 for b in hash_bytes[:384]] + [0.0] * (384 - 32)
 
+        # Extract parent_packet_id from metadata for top-level indexing
+        # This enables filtering by parent packet to find all work packet trajectories
+        parent_packet_id = None
+        if request.metadata:
+            parent_packet_id = request.metadata.get("parent_packet_id")
+
         # Prepare payload for Qdrant
         payload = {
             "trajectory_id": trajectory_id,
@@ -136,6 +142,7 @@ async def log_trajectory(
             "duration_ms": request.duration_ms,
             "cost_usd": request.cost_usd,
             "metadata": request.metadata or {},
+            "parent_packet_id": parent_packet_id,  # Top-level for filtering
             "trace_id": trace_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "timestamp_unix": datetime.now(timezone.utc).timestamp(),
@@ -247,6 +254,12 @@ async def search_trajectories(
         if request.task_id:
             filter_conditions.append(
                 FieldCondition(key="task_id", match=MatchValue(value=request.task_id))
+            )
+
+        # Filter by parent_packet_id to find all work packet trajectories for a saga
+        if request.parent_packet_id:
+            filter_conditions.append(
+                FieldCondition(key="parent_packet_id", match=MatchValue(value=request.parent_packet_id))
             )
 
         # Time filter using timestamp_unix (new records only - old records may not have this field)
