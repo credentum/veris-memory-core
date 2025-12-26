@@ -53,7 +53,7 @@ curl -X POST http://172.17.0.1:8000/tools/query_graph \
 
 **Status:** Proposed (P1)
 **Target:** Q1 2026
-**GitHub Issue:** TBD
+**GitHub Issue:** [#98](https://github.com/credentum/veris-memory-core/issues/98)
 
 **Problem:** Static skill injection fails to close skill gaps. When an agent fails with security issues, the system retrieves thematically-related skills (e.g., "AO Security Patterns") but these are conceptual, not problem-solving. The agent receives philosophy when it needs syntax.
 
@@ -925,7 +925,7 @@ Weight = Surprise × (Authority / 10) × (1 + 0.5 × Sparsity)
 
 ## Proposed (2026)
 
-- [ ] **VMC-ADR-016:** Adaptive Skill Injection (TBD) - Q1 P1 - Expert panel generates skills on-demand
+- [ ] **VMC-ADR-016:** Adaptive Skill Injection ([#98](https://github.com/credentum/veris-memory-core/issues/98)) - Q1 P1 - Expert panel generates skills on-demand
 - [ ] **VMC-ADR-012:** Forgetting/Decay Mechanism ([#76](https://github.com/credentum/veris-memory-core/issues/76)) - Q1 P1
 - [ ] **VMC-ADR-013:** Success Pattern Learning ([#77](https://github.com/credentum/veris-memory-core/issues/77)) - Q1 P1
 - [ ] **VMC-ADR-014:** Cross-Agent Trust Protocol ([#78](https://github.com/credentum/veris-memory-core/issues/78)) - Q2 P2
@@ -982,7 +982,7 @@ Weight = Surprise × (Authority / 10) × (1 + 0.5 × Sparsity)
 
 - [System Architecture Map (Issue #68)](https://github.com/credentum/veris-memory-core/issues/68)
 - [agent-dev Architecture Decisions](https://github.com/credentum/agent-dev/blob/main/docs/ARCHITECTURE_DECISIONS.md)
-- [VMC-ADR-016: Adaptive Skill Injection (TBD)](TBD) - Expert panel skill generation
+- [VMC-ADR-016: Adaptive Skill Injection (Issue #98)](https://github.com/credentum/veris-memory-core/issues/98) - Expert panel skill generation
 - [VMC-ADR-005: Conflict Resolution (Issue #66)](https://github.com/credentum/veris-memory-core/issues/66)
 - [VMC-ADR-006: Cold Storage Archival (Issue #70)](https://github.com/credentum/veris-memory-core/issues/70)
 - [VMC-ADR-007: Vault HSM Integration (Issue #71)](https://github.com/credentum/veris-memory-core/issues/71)
