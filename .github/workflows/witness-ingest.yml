@@ -1,0 +1,316 @@
+name: Witness Event Ingestion
+
+# Ingest GitHub events into Veris Memory for The Witness to observe.
+# See: docs/adr/ADR-002-event-ingestion.md
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, closed, reopened, synchronize]
+  issues:
+    types: [opened, closed, reopened]
+  workflow_run:
+    workflows: ["CI", "Tests", "Build", "Witness Event Ingestion"]
+    types: [completed]
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    # Don't run on workflow_run for this workflow (avoid infinite loop)
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow.name != 'Witness Event Ingestion' }}
+
+    steps:
+      - name: Determine Event Type
+        id: event_type
+        run: |
+          EVENT_NAME="${{ github.event_name }}"
+          ACTION="${{ github.event.action }}"
+
+          case "$EVENT_NAME" in
+            push)
+              EVENT_TYPE="push"
+              ;;
+            pull_request)
+              if [ "$ACTION" = "closed" ]; then
+                if [ "${{ github.event.pull_request.merged }}" = "true" ]; then
+                  EVENT_TYPE="pr_merged"
+                else
+                  EVENT_TYPE="pr_closed"
+                fi
+              elif [ "$ACTION" = "opened" ]; then
+                EVENT_TYPE="pr_opened"
+              elif [ "$ACTION" = "reopened" ]; then
+                EVENT_TYPE="pr_opened"  # Treat reopen as opened
+              elif [ "$ACTION" = "synchronize" ]; then
+                EVENT_TYPE="push"  # New commits pushed to PR
+              else
+                EVENT_TYPE="pr_${ACTION}"
+              fi
+              ;;
+            issues)
+              if [ "$ACTION" = "closed" ]; then
+                STATE_REASON="${{ github.event.issue.state_reason }}"
+                if [ "$STATE_REASON" = "not_planned" ]; then
+                  EVENT_TYPE="issue_closed_not_planned"
+                else
+                  EVENT_TYPE="issue_closed_completed"
+                fi
+              elif [ "$ACTION" = "opened" ]; then
+                EVENT_TYPE="issue_opened"
+              elif [ "$ACTION" = "reopened" ]; then
+                EVENT_TYPE="issue_reopened"
+              else
+                EVENT_TYPE="issue_${ACTION}"
+              fi
+              ;;
+            workflow_run)
+              CONCLUSION="${{ github.event.workflow_run.conclusion }}"
+              if [ "$CONCLUSION" = "success" ]; then
+                EVENT_TYPE="workflow_succeeded"
+              elif [ "$CONCLUSION" = "failure" ]; then
+                EVENT_TYPE="workflow_failed"
+              else
+                EVENT_TYPE="workflow_${CONCLUSION}"
+              fi
+              ;;
+            *)
+              EVENT_TYPE="$EVENT_NAME"
+              ;;
+          esac
+
+          echo "event_type=$EVENT_TYPE" >> $GITHUB_OUTPUT
+          echo "Detected event type: $EVENT_TYPE"
+
+      - name: Extract Event Details
+        id: details
+        run: |
+          # Extract common fields based on event type
+          EVENT_NAME="${{ github.event_name }}"
+
+          # Timestamp
+          case "$EVENT_NAME" in
+            push)
+              TIMESTAMP="${{ github.event.head_commit.timestamp }}"
+              TITLE=$(echo '${{ github.event.head_commit.message }}' | head -1 | cut -c1-200)
+              SHA="${{ github.sha }}"
+              ;;
+            pull_request)
+              TIMESTAMP="${{ github.event.pull_request.updated_at }}"
+              TITLE="${{ github.event.pull_request.title }}"
+              SHA="${{ github.event.pull_request.head.sha }}"
+              ;;
+            issues)
+              TIMESTAMP="${{ github.event.issue.updated_at }}"
+              TITLE="${{ github.event.issue.title }}"
+              SHA=""
+              ;;
+            workflow_run)
+              TIMESTAMP="${{ github.event.workflow_run.updated_at }}"
+              TITLE="${{ github.event.workflow_run.name }}: ${{ github.event.workflow_run.conclusion }}"
+              SHA="${{ github.event.workflow_run.head_sha }}"
+              ;;
+            *)
+              TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              TITLE=""
+              SHA="${{ github.sha }}"
+              ;;
+          esac
+
+          # Fallback timestamp
+          if [ -z "$TIMESTAMP" ]; then
+            TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          fi
+
+          echo "timestamp=$TIMESTAMP" >> $GITHUB_OUTPUT
+          echo "title<<EOF" >> $GITHUB_OUTPUT
+          echo "$TITLE" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+
+      - name: Build Event Payload
+        id: payload
+        run: |
+          # Use jq to safely build JSON payload
+
+          # Get body preview (first 1000 chars, escaped)
+          BODY_PREVIEW=""
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BODY_PREVIEW=$(echo '${{ github.event.pull_request.body }}' | head -c 1000 || echo "")
+          elif [ "${{ github.event_name }}" = "issues" ]; then
+            BODY_PREVIEW=$(echo '${{ github.event.issue.body }}' | head -c 1000 || echo "")
+          fi
+
+          # Build JSON with jq for proper escaping
+          jq -n \
+            --arg github_event_id "${{ github.run_id }}-${{ github.run_attempt }}" \
+            --arg repo "${{ github.repository }}" \
+            --arg event_type "${{ steps.event_type.outputs.event_type }}" \
+            --arg timestamp "${{ steps.details.outputs.timestamp }}" \
+            --arg actor "${{ github.actor }}" \
+            --arg ref "${{ github.ref }}" \
+            --arg sha "${{ steps.details.outputs.sha }}" \
+            --argjson pr_number "${{ github.event.pull_request.number || 'null' }}" \
+            --argjson issue_number "${{ github.event.issue.number || 'null' }}" \
+            --arg title "${{ steps.details.outputs.title }}" \
+            --arg body_preview "$BODY_PREVIEW" \
+            --arg state_reason "${{ github.event.issue.state_reason || github.event.pull_request.state_reason || '' }}" \
+            --arg merged_by "${{ github.event.pull_request.merged_by.login || '' }}" \
+            --argjson files_changed "${{ github.event.pull_request.changed_files || 'null' }}" \
+            --argjson additions "${{ github.event.pull_request.additions || 'null' }}" \
+            --argjson deletions "${{ github.event.pull_request.deletions || 'null' }}" \
+            --arg base_branch "${{ github.event.pull_request.base.ref || '' }}" \
+            --arg head_branch "${{ github.event.pull_request.head.ref || '' }}" \
+            --arg commit_message "${{ steps.details.outputs.title }}" \
+            --arg ingested_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg workflow_run_id "${{ github.run_id }}" \
+            --arg github_run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --argjson repository_id "${{ github.repository_id }}" \
+            '{
+              type: "repo_event",
+              content: {
+                github_event_id: $github_event_id,
+                repo: $repo,
+                event_type: $event_type,
+                timestamp: $timestamp,
+                actor: $actor,
+                ref: $ref,
+                payload_summary: {
+                  sha: (if $sha != "" then $sha else null end),
+                  pr_number: $pr_number,
+                  issue_number: $issue_number,
+                  title: $title,
+                  body_preview: (if $body_preview != "" then $body_preview else null end),
+                  state_reason: (if $state_reason != "" then $state_reason else null end),
+                  merged_by: (if $merged_by != "" then $merged_by else null end),
+                  files_changed: $files_changed,
+                  additions: $additions,
+                  deletions: $deletions,
+                  base_branch: (if $base_branch != "" then $base_branch else null end),
+                  head_branch: (if $head_branch != "" then $head_branch else null end)
+                },
+                commit_message: $commit_message
+              },
+              metadata: {
+                ingested_at: $ingested_at,
+                source: "github_actions",
+                workflow_run_id: $workflow_run_id,
+                github_run_url: $github_run_url,
+                repository_id: $repository_id
+              },
+              author: "witness-ingestion",
+              author_type: "agent",
+              shared: true
+            }' > /tmp/event_payload.json
+
+          echo "Payload built:"
+          cat /tmp/event_payload.json | jq .
+
+      - name: Send to Veris Memory
+        id: store
+        continue-on-error: true
+        env:
+          VERIS_API_KEY: ${{ secrets.VERIS_API_KEY }}
+          VERIS_URL: ${{ secrets.VERIS_URL }}
+        run: |
+          if [ -z "$VERIS_URL" ] || [ -z "$VERIS_API_KEY" ]; then
+            echo "::warning::VERIS_URL or VERIS_API_KEY not configured"
+            echo "store_failed=true" >> $GITHUB_OUTPUT
+            echo "failure_reason=missing_secrets" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          # Send to Veris with timeout and retry
+          MAX_RETRIES=3
+          RETRY_DELAY=5
+
+          for attempt in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $attempt of $MAX_RETRIES..."
+
+            HTTP_CODE=$(curl -s -w "%{http_code}" -o /tmp/response.json \
+              --max-time 30 \
+              -X POST "${VERIS_URL}/tools/store_context" \
+              -H "Content-Type: application/json" \
+              -H "X-API-Key: ${VERIS_API_KEY}" \
+              -d @/tmp/event_payload.json)
+
+            echo "HTTP response code: $HTTP_CODE"
+
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+              echo "Event stored successfully"
+              echo "store_failed=false" >> $GITHUB_OUTPUT
+              cat /tmp/response.json | jq .
+              exit 0
+            fi
+
+            # Check for rate limiting
+            if [ "$HTTP_CODE" = "429" ]; then
+              echo "Rate limited, waiting ${RETRY_DELAY}s before retry..."
+              sleep $RETRY_DELAY
+              RETRY_DELAY=$((RETRY_DELAY * 2))
+              continue
+            fi
+
+            # Check for server errors (retry)
+            if [ "$HTTP_CODE" -ge 500 ]; then
+              echo "Server error, waiting ${RETRY_DELAY}s before retry..."
+              sleep $RETRY_DELAY
+              RETRY_DELAY=$((RETRY_DELAY * 2))
+              continue
+            fi
+
+            # Client error (don't retry)
+            if [ "$HTTP_CODE" -ge 400 ]; then
+              echo "::error::Client error: HTTP $HTTP_CODE"
+              cat /tmp/response.json
+              echo "store_failed=true" >> $GITHUB_OUTPUT
+              echo "failure_reason=client_error_$HTTP_CODE" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+          done
+
+          echo "::warning::All retries failed"
+          echo "store_failed=true" >> $GITHUB_OUTPUT
+          echo "failure_reason=max_retries_exceeded" >> $GITHUB_OUTPUT
+          exit 1
+
+      - name: Save Failed Event for Replay
+        if: steps.store.outputs.store_failed == 'true'
+        run: |
+          mkdir -p failed-events
+
+          # Include metadata about the failure
+          jq --arg reason "${{ steps.store.outputs.failure_reason }}" \
+             --arg run_id "${{ github.run_id }}" \
+             --arg run_attempt "${{ github.run_attempt }}" \
+             '. + {_replay_metadata: {failure_reason: $reason, run_id: $run_id, run_attempt: $run_attempt}}' \
+             /tmp/event_payload.json > failed-events/event-${{ github.run_id }}-${{ github.run_attempt }}.json
+
+          echo "Event saved for later replay:"
+          cat failed-events/event-${{ github.run_id }}-${{ github.run_attempt }}.json | jq .
+
+      - name: Upload Failed Events Artifact
+        if: steps.store.outputs.store_failed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-witness-events-${{ github.run_id }}
+          path: failed-events/
+          retention-days: 30
+
+      - name: Summary
+        run: |
+          echo "## Witness Event Ingestion" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Repository | \`${{ github.repository }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Event Type | \`${{ steps.event_type.outputs.event_type }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Actor | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Timestamp | ${{ steps.details.outputs.timestamp }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Store Status | ${{ steps.store.outputs.store_failed == 'true' && 'Failed (saved for replay)' || 'Success' }} |" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ steps.store.outputs.store_failed }}" = "true" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "> **Warning:** Event was saved as artifact for later replay." >> $GITHUB_STEP_SUMMARY
+            echo "> Failure reason: \`${{ steps.store.outputs.failure_reason }}\`" >> $GITHUB_STEP_SUMMARY
+          fi
