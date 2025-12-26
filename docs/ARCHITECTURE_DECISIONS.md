@@ -79,18 +79,100 @@ curl -X POST http://172.17.0.1:8000/tools/query_graph \
 > Current: Neo downloads "kung fu DVD" → watches it → still can't fight
 > Proposed: Master observes failure → teaches specific move → Neo applies → success
 
-**Proposed Solution:** Three-phase adaptive skill injection with expert panel intervention.
+**Proposed Solution:** Smart routing with four-phase adaptive skill injection.
 
 ---
 
-#### Phase 1: Pragmatist MVP (This Sprint)
+#### Why Not Always Use ao-panel?
 
-Expert panel (ao-panel) becomes the coder on attempt 3 instead of generating skills.
+Dev Panel review (2025-12-26) analyzed "why not always use the expert?" and identified key tradeoffs:
+
+| Metric | lua.md Coder | ao-panel |
+|--------|--------------|----------|
+| Latency | 30-60 sec | 3-5 min (web search + deliberation) |
+| Parallelization | 20+ concurrent | Rate limited (web search) |
+| External dependencies | None | Web search API |
+| Learning signal | Rich (failures teach) | Poor (success teaches less) |
+| Novel problem solving | ⚠️ Struggles | ✅ Strong |
+| Security edge cases | ❌ Misses them | ✅ Catches them |
+
+**The learning paradox:**
+```
+Fail → Fail → Succeed = 3 data points, learn what works
+Succeed first try = 1 data point, learn nothing specific
+```
+
+**Conclusion:** Don't ask "why not always use the expert?" Ask "how do I know when I need the expert?"
+
+---
+
+#### Phase 0: Smart Routing (This Sprint - Priority)
+
+Route packets based on risk/complexity BEFORE first attempt. Don't wait for failure on known-hard problems.
 
 ```
-Attempt 1 → FAIL (worker with Sonnet)
-Attempt 2 → FAIL (worker with Opus + existing skills)
-Attempt 3 → ao-panel IS the coder
+Packet arrives
+     ↓
+[Triage Classifier]
+     ↓
+├── HIGH risk (security, auth, ownership) → ao-panel directly
+├── NOVEL (skill_match < 0.5) → ao-panel directly
+├── LOW risk + common pattern → lua.md coder (fast path)
+└── UNKNOWN → lua.md coder, escalate on failure
+```
+
+**Triage Logic:**
+
+```python
+def route_packet(packet: WorkPacket, skills: List[Skill]) -> str:
+    """Route packet to appropriate coder based on risk and skill availability."""
+
+    # HIGH RISK: Direct to ao-panel (don't waste attempts)
+    HIGH_RISK_PATTERNS = {
+        "authentication", "authorization", "ownership", "security",
+        "permissions", "access control", "admin", "sudo", "root"
+    }
+    task_lower = packet.task_description.lower()
+    if any(pattern in task_lower for pattern in HIGH_RISK_PATTERNS):
+        return "ao-panel"
+
+    # NOVEL: No relevant skills found
+    best_skill_score = max((s.relevance for s in skills), default=0)
+    if best_skill_score < 0.5:
+        return "ao-panel"
+
+    # Check reviewer feedback from previous attempts
+    if packet.attempt >= 2 and packet.previous_issues:
+        # Same issues twice = pattern not working
+        if issues_unchanged(packet.previous_issues):
+            return "ao-panel"
+
+    # DEFAULT: Fast path with lua.md coder
+    return "lua.md-coder"
+```
+
+**Routing Distribution (Expected):**
+
+| Route | Percentage | Rationale |
+|-------|------------|-----------|
+| lua.md fast path | 70-80% | Common patterns, well-matched skills |
+| ao-panel direct | 15-20% | Security/auth tasks, novel problems |
+| Escalated after failure | 5-10% | Unexpected complexity |
+
+**Why This Matters:**
+- wp-003 (security task) should have gone to ao-panel on attempt 1
+- Instead it failed 3 times because we waited for failure
+- Smart routing = right expert for the job from the start
+
+---
+
+#### Phase 1: ao-panel as Coder (This Sprint)
+
+Expert panel (ao-panel) becomes the coder for routed/escalated packets.
+
+**For smart-routed packets (HIGH risk / NOVEL):**
+```
+Packet arrives → Triage: "security task" → ao-panel directly
          → Has web search capability
          → Has domain expertise (AO/Lua patterns)
          → Solves directly
@@ -99,10 +181,21 @@ Attempt 3 → ao-panel IS the coder
 Extract pattern to skill (async, post-success)
 ```
 
-**Why Phase 1 First:**
-- Gets learning immediately without building skill generation infrastructure
+**For escalated packets (failed fast path):**
+```
+Attempt 1 → FAIL (lua.md with Sonnet)
+Attempt 2 → FAIL (lua.md with Opus + existing skills)
+Attempt 3 → ao-panel IS the coder
+         → SUCCESS
+         ↓
+Extract pattern to skill (async, post-success)
+```
+
+**Why This Works:**
+- Security tasks get expert attention immediately (no wasted attempts)
+- Common patterns still use fast path (preserves learning signal)
 - ao-panel already exists and has the right capabilities
-- "Learn from success" is more reliable than "learn from failure"
+- "Learn from success" captures what the expert did differently
 
 ---
 
@@ -212,6 +305,11 @@ content: |
 
 | Metric | Purpose |
 |--------|---------|
+| `routing_decision` | Which coder was selected and why |
+| `routing_accuracy` | Did the routed coder succeed on first try? |
+| `high_risk_detection_rate` | Percentage of security tasks correctly identified |
+| `fast_path_success_rate` | lua.md coder success without escalation |
+| `escalation_rate` | How often fast path fails to ao-panel |
 | `skill_generation_success_rate` | Did ao-panel produce valid output? |
 | `skill_effectiveness_rate` | Did generated skill fix the issue? |
 | `skill_generation_latency_ms` | How long did research + authoring take? |
@@ -250,6 +348,10 @@ content: |
 | Skill relevance at injection | 0.54-0.67 | 0.85+ |
 | Time to skill (generated) | N/A | < 60 seconds |
 | Skills persisted for reuse | 0 | 100% of successful |
+| Smart routing accuracy | N/A | 90%+ (right coder first try) |
+| Security task first-attempt success | 0% (wp-003) | 70%+ |
+| Fast path utilization | N/A | 70-80% of packets |
+| ao-panel direct routing | N/A | 15-20% of packets |
 
 ---
 
@@ -258,9 +360,19 @@ content: |
 > "The skill gap detector works perfectly. The skill injection doesn't work at all.
 > We're teaching philosophy when we need to teach syntax." - Dev Panel, 2025-12-26
 
-**Panel Consensus:** Transform skill injection from "retrieve existing" to "generate on-demand" using expert panel with web search capability.
+> "Don't ask 'why not always use the expert?' Ask 'how do I know when I need the expert?'"
+> - Dev Panel (Smart Routing Review), 2025-12-26
 
-**Key Insight:** Neo didn't download martial arts philosophy—he downloaded executable motor patterns for specific moves. Our skills must be moves, not philosophy.
+**Panel Consensus:**
+1. Transform skill injection from "retrieve existing" to "generate on-demand"
+2. Route known-hard packets (security, auth) directly to ao-panel—don't wait for failure
+3. Keep fast path for common patterns to preserve learning signal and throughput
+
+**Key Insights:**
+- Neo didn't download martial arts philosophy—he downloaded executable motor patterns
+- wp-003 (security task) should never have gone to lua.md coder—triage should have caught it
+- 80% of packets are pattern application; 20% need expert deliberation
+- Failures teach more than successes, so don't ao-panel everything
 
 ---
 
