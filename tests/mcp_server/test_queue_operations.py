@@ -16,7 +16,8 @@ Tests cover:
 
 import json
 import pytest
-from unittest.mock import Mock, patch
+from datetime import datetime, timezone
+from unittest.mock import Mock, patch, AsyncMock
 
 from src.mcp_server import queue_operations
 
@@ -1359,6 +1360,8 @@ class TestRouteRegistration:
         assert "/tools/update_coder_heartbeat" in routes
         assert "/tools/get_all_coder_wip" in routes
         assert "/tools/cleanup_stale_wip" in routes
+        # Unified packet trace endpoint
+        assert "/tools/get_packet_trace" in routes
 
     def test_get_redis_raises_when_not_initialized(self):
         """Test that get_redis raises 503 when Redis not initialized."""
@@ -1504,3 +1507,235 @@ class TestClaimWorkPacketEndpoint:
 
         assert response.success is False
         assert "Invalid status" in response.error
+
+
+class TestGetPacketTrace:
+    """Tests for get_packet_trace unified observability endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_get_packet_trace_success(self):
+        """Test successful packet trace with saga and trajectories."""
+        mock_redis = Mock()
+
+        # Use recent timestamps to avoid stuck detection
+        now = datetime.now(timezone.utc)
+        ts_base = now.isoformat()
+        ts_plus_1m = (now.replace(second=0) if now.second < 30 else now).isoformat()
+
+        # Mock saga state - both packets completed (no stuck detection)
+        saga_data = {
+            "ao-suite-test-wp-001": {
+                "packet": {"packet_id": "ao-suite-test-wp-001"},
+                "status": "completed",
+                "claimed_at": ts_base,
+                "claimed_by": "coder-001",
+            },
+            "ao-suite-test-wp-002": {
+                "packet": {"packet_id": "ao-suite-test-wp-002"},
+                "status": "completed",
+                "claimed_at": ts_plus_1m,
+                "claimed_by": "coder-002",
+            }
+        }
+        mock_redis.get.return_value = json.dumps(saga_data)
+
+        # Mock saga events
+        mock_redis.xrange.return_value = [
+            ("1-0", {
+                "ts": ts_base,
+                "event_type": "dispatched",
+                "packet_id": "ao-suite-test-wp-001",
+                "details": "{}"
+            })
+        ]
+
+        # Mock trajectory API call
+        with patch('httpx.AsyncClient') as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "trajectories": [
+                    {
+                        "task_id": "ao-suite-test-wp-001",
+                        "outcome": "success",
+                        "agent": "coding_agent",
+                        "timestamp": ts_base,
+                        "duration_ms": 5000.0,
+                        "metadata": {}
+                    },
+                    {
+                        "task_id": "ao-suite-test-wp-002",
+                        "outcome": "success",
+                        "agent": "coding_agent",
+                        "timestamp": ts_plus_1m,
+                        "duration_ms": 3000.0,
+                        "metadata": {}
+                    }
+                ]
+            }
+            mock_client.post.return_value = mock_response
+
+            request = queue_operations.PacketTraceRequest(
+                packet_id="ao-suite-test",
+                user_id="dev_team"
+            )
+
+            response = await queue_operations.get_packet_trace(request, mock_redis)
+
+            assert response.success is True
+            assert response.packet_id == "ao-suite-test"
+            assert response.saga_exists is True
+            assert len(response.work_packets) == 2
+            assert response.completed_count == 2
+            assert response.total_count == 2
+            assert response.current_state == "completed"
+
+    @pytest.mark.asyncio
+    async def test_get_packet_trace_saga_not_found(self):
+        """Test packet trace when saga doesn't exist."""
+        mock_redis = Mock()
+        mock_redis.get.return_value = None
+        mock_redis.xrange.return_value = []
+
+        with patch('httpx.AsyncClient') as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {"trajectories": []}
+            mock_client.post.return_value = mock_response
+
+            request = queue_operations.PacketTraceRequest(
+                packet_id="nonexistent-packet",
+                user_id="dev_team"
+            )
+
+            response = await queue_operations.get_packet_trace(request, mock_redis)
+
+            assert response.success is True
+            assert response.saga_exists is False
+            assert len(response.work_packets) == 0
+            assert response.current_state == "no_work_packets"
+
+    @pytest.mark.asyncio
+    async def test_get_packet_trace_trajectory_api_failure(self):
+        """Test packet trace handles trajectory API failure gracefully."""
+        mock_redis = Mock()
+        saga_data = {
+            "wp-001": {
+                "packet": {"packet_id": "wp-001"},
+                "status": "pending_claim",
+            }
+        }
+        mock_redis.get.return_value = json.dumps(saga_data)
+        mock_redis.xrange.return_value = []
+
+        with patch('httpx.AsyncClient') as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+            mock_client.post.side_effect = Exception("Connection refused")
+
+            request = queue_operations.PacketTraceRequest(
+                packet_id="test-packet",
+                user_id="dev_team"
+            )
+
+            response = await queue_operations.get_packet_trace(request, mock_redis)
+
+            # Should still succeed with saga data, just no trajectories
+            assert response.success is True
+            assert response.saga_exists is True
+            assert len(response.work_packets) == 1
+
+    @pytest.mark.asyncio
+    async def test_get_packet_trace_discrepancy_detection(self):
+        """Test discrepancy detection between saga and trajectory states."""
+        mock_redis = Mock()
+
+        # Saga shows pending_claim
+        saga_data = {
+            "wp-001": {
+                "packet": {"packet_id": "wp-001"},
+                "status": "pending_claim",
+            }
+        }
+        mock_redis.get.return_value = json.dumps(saga_data)
+        mock_redis.xrange.return_value = []
+
+        with patch('httpx.AsyncClient') as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            # Trajectory shows packet was claimed
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "trajectories": [
+                    {
+                        "task_id": "test-packet-wp-001",
+                        "outcome": "partial",
+                        "agent": "coding_agent",
+                        "timestamp": "2025-01-01T00:00:00+00:00",
+                        "duration_ms": 0,
+                        "metadata": {"milestone": "packet_claimed"}
+                    }
+                ]
+            }
+            mock_client.post.return_value = mock_response
+
+            request = queue_operations.PacketTraceRequest(
+                packet_id="test-packet",
+                user_id="dev_team"
+            )
+
+            response = await queue_operations.get_packet_trace(request, mock_redis)
+
+            assert response.success is True
+            assert response.has_discrepancies is True
+            # Find the work packet with discrepancy
+            discrepant_wp = next((wp for wp in response.work_packets if wp.discrepancy), None)
+            assert discrepant_wp is not None
+            assert "pending_claim" in (discrepant_wp.discrepancy_note or "")
+
+    @pytest.mark.asyncio
+    async def test_get_packet_trace_stuck_detection(self):
+        """Test detection of stuck packets (no activity > 2min)."""
+        mock_redis = Mock()
+
+        # Saga shows in_flight with old timestamp
+        old_time = (datetime.now(timezone.utc).replace(microsecond=0)
+                    - __import__('datetime').timedelta(minutes=5)).isoformat()
+        saga_data = {
+            "wp-001": {
+                "packet": {"packet_id": "wp-001"},
+                "status": "in_flight",
+                "claimed_at": old_time,
+                "claimed_by": "coder-001",
+            }
+        }
+        mock_redis.get.return_value = json.dumps(saga_data)
+        mock_redis.xrange.return_value = []
+
+        with patch('httpx.AsyncClient') as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {"trajectories": []}
+            mock_client.post.return_value = mock_response
+
+            request = queue_operations.PacketTraceRequest(
+                packet_id="test-packet",
+                user_id="dev_team"
+            )
+
+            response = await queue_operations.get_packet_trace(request, mock_redis)
+
+            assert response.success is True
+            assert response.current_state == "stuck"
+            assert len(response.stuck_packets) > 0
