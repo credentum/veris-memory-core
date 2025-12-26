@@ -25,6 +25,12 @@ Coder Work-In-Progress (WIP) Observability:
 - POST /tools/update_coder_heartbeat - Update progress (turn, files, tool calls)
 - GET /tools/get_all_coder_wip - Get all active coders with their status
 
+Unified Packet Tracing (Dev Panel recommendation):
+- POST /tools/get_packet_trace - ONE call, complete picture of packet lifecycle
+  Combines: saga state, saga events, trajectories
+  Detects: discrepancies between saga and trajectory states
+  Identifies: stuck packets with no activity > 2min
+
 Pipeline Observability (added for debugging silent failures):
 - Active work tracking: When agent pops packet, SETEX creates tracking key with TTL
 - Event stream: Sorted set per packet records lifecycle events
@@ -1699,6 +1705,265 @@ async def cleanup_stale_wip(
         logger.error(f"Failed to cleanup stale WIP: {e}")
         raise HTTPException(
             status_code=500, detail=f"Failed to cleanup stale WIP: {e}"
+        )
+
+
+# =============================================================================
+# Packet Trace - Unified Observability (Dev Panel Recommendation)
+# =============================================================================
+
+
+class PacketTraceRequest(BaseModel):
+    """Request to get unified packet trace."""
+
+    packet_id: str = Field(..., description="Parent packet ID (e.g., ao-suite-20251226-025445)")
+    user_id: str = Field(default="dev_team", description="User/team ID")
+
+
+class WorkPacketTrace(BaseModel):
+    """Trace info for a single work packet."""
+
+    packet_id: str = Field(..., description="Work packet ID")
+    saga_status: Optional[str] = Field(None, description="Status from saga state")
+    trajectory_status: Optional[str] = Field(None, description="Latest outcome from trajectory")
+    trajectory_milestone: Optional[str] = Field(None, description="Latest milestone from trajectory")
+    claimed_at: Optional[str] = Field(None, description="When claimed (from saga)")
+    claimed_by: Optional[str] = Field(None, description="Agent that claimed (from saga)")
+    completed_at: Optional[str] = Field(None, description="When completed (from trajectory)")
+    discrepancy: bool = Field(False, description="True if saga and trajectory disagree")
+    discrepancy_note: Optional[str] = Field(None, description="Explanation of discrepancy")
+
+
+class TimelineEvent(BaseModel):
+    """A single event in the packet timeline."""
+
+    ts: str = Field(..., description="Timestamp")
+    event: str = Field(..., description="Event type")
+    packet_id: str = Field(..., description="Work packet ID")
+    source: str = Field(..., description="Event source: saga, trajectory, or orchestrator")
+    details: Optional[Dict[str, Any]] = Field(None, description="Additional details")
+
+
+class PacketTraceResponse(BaseModel):
+    """Unified view of packet lifecycle."""
+
+    success: bool = Field(..., description="Whether trace was retrieved")
+    packet_id: str = Field(..., description="Parent packet ID")
+    saga_exists: bool = Field(..., description="Whether saga state exists")
+    work_packets: List[WorkPacketTrace] = Field(..., description="Status of each work packet")
+    timeline: List[TimelineEvent] = Field(..., description="Merged events sorted by time")
+    current_state: str = Field(..., description="Computed state: pending, in_progress, completed, stuck, failed")
+    stuck_packets: List[str] = Field(default_factory=list, description="Packets with no activity > 2min")
+    completed_count: int = Field(0, description="Number of completed work packets")
+    total_count: int = Field(0, description="Total number of work packets")
+    has_discrepancies: bool = Field(False, description="True if any saga/trajectory discrepancies exist")
+    error: Optional[str] = Field(None, description="Error message if failed")
+
+
+@router.post("/tools/get_packet_trace", response_model=PacketTraceResponse)
+async def get_packet_trace(
+    request: PacketTraceRequest, redis=Depends(get_redis)
+) -> PacketTraceResponse:
+    """
+    Get unified view of packet lifecycle - ONE call, complete picture.
+
+    Combines data from:
+    - Saga state (Redis): Work packet status, claim info
+    - Saga events (Redis stream): Lifecycle events
+    - Trajectories (Qdrant via API): Agent execution outcomes
+
+    Detects discrepancies between saga state and trajectory data,
+    identifies stuck packets, and computes overall progress.
+    """
+    try:
+        timeline: List[TimelineEvent] = []
+        work_packets: List[WorkPacketTrace] = []
+        stuck_packets: List[str] = []
+
+        # 1. Get saga state from Redis
+        saga_key = f"{request.user_id}:saga:{request.packet_id}"
+        saga_data = redis.get(saga_key)
+
+        saga_exists = saga_data is not None
+        saga_dict = json.loads(saga_data) if saga_data else {}
+
+        # 2. Get saga events from Redis stream
+        events_key = f"{request.user_id}:saga_events:{request.packet_id}"
+        try:
+            saga_events = redis.xrange(events_key)
+        except Exception:
+            saga_events = []
+
+        # Add saga events to timeline
+        for event_id, event_data in saga_events:
+            ts = event_data.get("ts", "")
+            event_type = event_data.get("event_type", "unknown")
+            packet_id = event_data.get("packet_id", "")
+            details_str = event_data.get("details", "{}")
+            try:
+                details = json.loads(details_str) if details_str else {}
+            except Exception:
+                details = {"raw": details_str}
+
+            timeline.append(TimelineEvent(
+                ts=ts,
+                event=event_type,
+                packet_id=packet_id,
+                source="saga",
+                details=details
+            ))
+
+        # 3. Query trajectories by parent_packet_id
+        # Use internal HTTP call to trajectories API
+        trajectory_data = {}
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    "http://localhost:8000/api/v1/trajectories/search",
+                    json={"parent_packet_id": request.packet_id, "limit": 100},
+                    timeout=10.0
+                )
+                if resp.status_code == 200:
+                    traj_response = resp.json()
+                    for traj in traj_response.get("trajectories", []):
+                        task_id = traj.get("task_id", "")
+                        # Track latest trajectory per task_id
+                        if task_id not in trajectory_data:
+                            trajectory_data[task_id] = traj
+                        else:
+                            # Keep the more recent one
+                            if traj.get("timestamp", "") > trajectory_data[task_id].get("timestamp", ""):
+                                trajectory_data[task_id] = traj
+
+                        # Add to timeline
+                        metadata = traj.get("metadata", {}) or {}
+                        milestone = metadata.get("milestone", traj.get("outcome", "unknown"))
+                        timeline.append(TimelineEvent(
+                            ts=traj.get("timestamp", ""),
+                            event=f"trajectory:{milestone}",
+                            packet_id=task_id,
+                            source="trajectory",
+                            details={
+                                "outcome": traj.get("outcome"),
+                                "agent": traj.get("agent"),
+                                "duration_ms": traj.get("duration_ms"),
+                                "error": traj.get("error")
+                            }
+                        ))
+        except Exception as e:
+            logger.warning(f"Failed to query trajectories: {e}")
+
+        # 4. Build work packet traces with discrepancy detection
+        now = datetime.now(timezone.utc)
+        completed_count = 0
+
+        for wp_id, wp_data in saga_dict.items():
+            saga_status = wp_data.get("status", "unknown")
+            claimed_at = wp_data.get("claimed_at")
+            claimed_by = wp_data.get("claimed_by")
+
+            # Find matching trajectory
+            # Work packet IDs may be stored as full ID or just wp_id
+            full_wp_id = f"{request.packet_id}-{wp_id}" if not wp_id.startswith(request.packet_id) else wp_id
+            traj = trajectory_data.get(full_wp_id) or trajectory_data.get(wp_id)
+
+            traj_outcome = None
+            traj_milestone = None
+            completed_at = None
+
+            if traj:
+                traj_outcome = traj.get("outcome")
+                metadata = traj.get("metadata", {}) or {}
+                traj_milestone = metadata.get("milestone")
+                completed_at = traj.get("timestamp")
+
+            # Detect discrepancy
+            discrepancy = False
+            discrepancy_note = None
+
+            if saga_status == "pending_claim" and traj_milestone == "packet_claimed":
+                discrepancy = True
+                discrepancy_note = "Trajectory shows claimed but saga still pending_claim - agent may not have called claim_work_packet"
+            elif saga_status == "in_flight" and traj_outcome == "success":
+                discrepancy = True
+                discrepancy_note = "Trajectory shows success but saga still in_flight - completion may not have been recorded"
+            elif saga_status == "completed" and traj_outcome == "failure":
+                discrepancy = True
+                discrepancy_note = "Saga shows completed but trajectory shows failure - state inconsistency"
+
+            # Detect stuck packets (in_flight or pending_claim for > 2 min with no recent trajectory)
+            is_stuck = False
+            if saga_status in ("in_flight", "pending_claim"):
+                # Check if there's been any activity
+                last_activity = claimed_at or completed_at
+                if last_activity:
+                    try:
+                        activity_time = datetime.fromisoformat(last_activity.replace("Z", "+00:00"))
+                        age_seconds = (now - activity_time).total_seconds()
+                        if age_seconds > 120:  # 2 minutes
+                            is_stuck = True
+                            stuck_packets.append(full_wp_id)
+                    except Exception:
+                        pass
+
+            if saga_status == "completed" or traj_outcome == "success":
+                completed_count += 1
+
+            work_packets.append(WorkPacketTrace(
+                packet_id=full_wp_id,
+                saga_status=saga_status,
+                trajectory_status=traj_outcome,
+                trajectory_milestone=traj_milestone,
+                claimed_at=claimed_at,
+                claimed_by=claimed_by,
+                completed_at=completed_at,
+                discrepancy=discrepancy,
+                discrepancy_note=discrepancy_note
+            ))
+
+        # 5. Sort timeline by timestamp
+        timeline.sort(key=lambda e: e.ts)
+
+        # 6. Compute current_state
+        total_count = len(work_packets)
+        has_discrepancies = any(wp.discrepancy for wp in work_packets)
+
+        if total_count == 0:
+            current_state = "no_work_packets"
+        elif len(stuck_packets) > 0:
+            current_state = "stuck"
+        elif completed_count == total_count:
+            current_state = "completed"
+        elif completed_count > 0:
+            current_state = "in_progress"
+        elif any(wp.saga_status in ("in_flight", "pending_claim") for wp in work_packets):
+            current_state = "in_progress"
+        else:
+            current_state = "pending"
+
+        return PacketTraceResponse(
+            success=True,
+            packet_id=request.packet_id,
+            saga_exists=saga_exists,
+            work_packets=work_packets,
+            timeline=timeline,
+            current_state=current_state,
+            stuck_packets=stuck_packets,
+            completed_count=completed_count,
+            total_count=total_count,
+            has_discrepancies=has_discrepancies
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to get packet trace: {e}")
+        return PacketTraceResponse(
+            success=False,
+            packet_id=request.packet_id,
+            saga_exists=False,
+            work_packets=[],
+            timeline=[],
+            current_state="error",
+            error=str(e)
         )
 
 
