@@ -26,7 +26,8 @@ jobs:
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          BODY_LENGTH=${#PR_BODY}
+          # Use printf for safe string handling (avoids echo edge cases with -n/-e flags)
+          BODY_LENGTH=$(printf '%s' "$PR_BODY" | wc -c)
 
           # Skip PRs with minimal documentation (< 200 chars)
           if [ "$BODY_LENGTH" -lt 200 ]; then
@@ -36,9 +37,9 @@ jobs:
             exit 0
           fi
 
-          # Check for structured content
+          # Check for structured content (use printf for safe string handling)
           HAS_STRUCTURE="false"
-          if echo "$PR_BODY" | grep -qiE "(problem|solution|summary|why|changes|breaking)"; then
+          if printf '%s' "$PR_BODY" | grep -qiE "(problem|solution|summary|why|changes|breaking)"; then
             HAS_STRUCTURE="true"
           fi
 
@@ -191,7 +192,7 @@ jobs:
         run: |
           CONTEXT_ID="${{ steps.store.outputs.context_id }}"
 
-          gh pr comment ${{ github.event.pull_request.number }} --body "**Veris Memory:** PR knowledge stored.
+          gh pr comment "${{ github.event.pull_request.number }}" --body "**Veris Memory:** PR knowledge stored.
 
 \`\`\`
 Context ID: $CONTEXT_ID
