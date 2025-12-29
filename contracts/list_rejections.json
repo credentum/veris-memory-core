@@ -1,0 +1,204 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "schema_version": "1.0",
+  "name": "list_rejections",
+  "description": "Query rejection audit log for memories that failed Covenant gating (Phase 4: Truth Pillar)",
+  "version": "1.0.0",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "days": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 90,
+        "default": 7,
+        "description": "Number of days to look back"
+      },
+      "context_type": {
+        "type": "string",
+        "enum": ["decision", "design", "log", "trace", "event", "insight"],
+        "description": "Filter by context type"
+      },
+      "min_weight": {
+        "type": "number",
+        "minimum": 0.0,
+        "maximum": 1.0,
+        "description": "Minimum weight score to include"
+      },
+      "max_weight": {
+        "type": "number",
+        "minimum": 0.0,
+        "maximum": 1.0,
+        "description": "Maximum weight score to include"
+      },
+      "author_type": {
+        "type": "string",
+        "enum": ["agent", "human"],
+        "description": "Filter by author type"
+      },
+      "limit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 200,
+        "default": 50,
+        "description": "Maximum number of rejections to return"
+      }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["success", "rejections", "count", "query"],
+    "properties": {
+      "success": {
+        "type": "boolean",
+        "description": "Whether the query was successful"
+      },
+      "rejections": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "rejection_id": {
+              "type": "string",
+              "description": "Unique identifier for the rejection record"
+            },
+            "content_hash": {
+              "type": "string",
+              "description": "SHA-256 hash of the rejected content"
+            },
+            "content_title": {
+              "type": "string",
+              "description": "Title of the rejected content"
+            },
+            "context_type": {
+              "type": "string",
+              "description": "Type of context that was rejected"
+            },
+            "weight": {
+              "type": "number",
+              "description": "Calculated weight score (Surprise × Authority × Sparsity)"
+            },
+            "threshold": {
+              "type": "number",
+              "description": "Threshold that was applied for this context type"
+            },
+            "surprise_score": {
+              "type": "number",
+              "description": "Novelty score from vector probe"
+            },
+            "cluster_sparsity": {
+              "type": "number",
+              "description": "How sparse the embedding cluster is"
+            },
+            "authority": {
+              "type": "integer",
+              "description": "Source authority level (1-10)"
+            },
+            "reason": {
+              "type": "string",
+              "description": "Human-readable reason for rejection"
+            },
+            "author": {
+              "type": "string",
+              "description": "Author of the rejected content"
+            },
+            "author_type": {
+              "type": "string",
+              "description": "Type of author (agent or human)"
+            },
+            "rejected_at": {
+              "type": "string",
+              "format": "date-time",
+              "description": "When the rejection occurred"
+            }
+          }
+        },
+        "description": "List of rejection records matching the query"
+      },
+      "count": {
+        "type": "integer",
+        "description": "Number of rejections returned"
+      },
+      "query": {
+        "type": "object",
+        "description": "The query parameters that were applied",
+        "properties": {
+          "days": {
+            "type": "integer"
+          },
+          "context_type": {
+            "type": "string"
+          },
+          "min_weight": {
+            "type": "number"
+          },
+          "max_weight": {
+            "type": "number"
+          },
+          "author_type": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer"
+          }
+        }
+      },
+      "error": {
+        "type": "string",
+        "description": "Error message if the query failed"
+      }
+    }
+  },
+  "examples": [
+    {
+      "input": {
+        "days": 7,
+        "limit": 10
+      },
+      "output": {
+        "success": true,
+        "rejections": [
+          {
+            "rejection_id": "rej-abc123",
+            "content_hash": "sha256-xyz789",
+            "content_title": "Debug log entry",
+            "context_type": "log",
+            "weight": 0.15,
+            "threshold": 0.20,
+            "surprise_score": 0.3,
+            "cluster_sparsity": 0.2,
+            "authority": 3,
+            "reason": "Weight 0.15 below threshold 0.20 for type log",
+            "author": "coder-agent",
+            "author_type": "agent",
+            "rejected_at": "2025-12-29T10:30:00Z"
+          }
+        ],
+        "count": 1,
+        "query": {
+          "days": 7,
+          "limit": 10
+        }
+      }
+    },
+    {
+      "input": {
+        "context_type": "decision",
+        "min_weight": 0.25,
+        "max_weight": 0.40
+      },
+      "output": {
+        "success": true,
+        "rejections": [],
+        "count": 0,
+        "query": {
+          "days": 7,
+          "context_type": "decision",
+          "min_weight": 0.25,
+          "max_weight": 0.40,
+          "limit": 50
+        }
+      }
+    }
+  ]
+}

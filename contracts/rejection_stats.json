@@ -1,0 +1,128 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "schema_version": "1.0",
+  "name": "rejection_stats",
+  "description": "Get aggregate statistics for rejection audit log (Phase 4: Truth Pillar)",
+  "version": "1.0.0",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "days": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 90,
+        "default": 7,
+        "description": "Number of days to analyze"
+      }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["success", "stats", "period_days"],
+    "properties": {
+      "success": {
+        "type": "boolean",
+        "description": "Whether the query was successful"
+      },
+      "stats": {
+        "type": "object",
+        "description": "Aggregate statistics for the period",
+        "properties": {
+          "total_rejections": {
+            "type": "integer",
+            "description": "Total number of rejections in the period"
+          },
+          "period_days": {
+            "type": "integer",
+            "description": "Number of days in the analysis period"
+          },
+          "by_type": {
+            "type": "object",
+            "description": "Rejection count by context type",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "by_author_type": {
+            "type": "object",
+            "description": "Rejection count by author type (agent vs human)",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "avg_weight": {
+            "type": "number",
+            "description": "Average weight score of rejected content"
+          },
+          "avg_threshold": {
+            "type": "number",
+            "description": "Average threshold that was applied"
+          },
+          "close_calls": {
+            "type": "integer",
+            "description": "Number of rejections within 0.05 of threshold (potential false negatives)"
+          },
+          "close_call_rate": {
+            "type": "number",
+            "description": "Proportion of rejections that were close calls (0.0-1.0)"
+          }
+        }
+      },
+      "period_days": {
+        "type": "integer",
+        "description": "Number of days that were analyzed"
+      },
+      "error": {
+        "type": "string",
+        "description": "Error message if the query failed"
+      }
+    }
+  },
+  "examples": [
+    {
+      "input": {
+        "days": 7
+      },
+      "output": {
+        "success": true,
+        "stats": {
+          "total_rejections": 45,
+          "period_days": 7,
+          "by_type": {
+            "decision": 20,
+            "design": 15,
+            "log": 10
+          },
+          "by_author_type": {
+            "agent": 40,
+            "human": 5
+          },
+          "avg_weight": 0.22,
+          "avg_threshold": 0.35,
+          "close_calls": 8,
+          "close_call_rate": 0.18
+        },
+        "period_days": 7
+      }
+    },
+    {
+      "input": {
+        "days": 30
+      },
+      "output": {
+        "success": true,
+        "stats": {
+          "total_rejections": 0,
+          "period_days": 30,
+          "by_type": {},
+          "by_author_type": {},
+          "avg_weight": 0.0,
+          "avg_threshold": 0.0,
+          "close_calls": 0,
+          "close_call_rate": 0.0
+        },
+        "period_days": 30
+      }
+    }
+  ]
+}
