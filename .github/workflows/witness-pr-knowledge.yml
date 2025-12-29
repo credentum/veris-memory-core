@@ -150,7 +150,7 @@ jobs:
         id: store
         continue-on-error: true
         env:
-          VERIS_API_KEY: ${{ secrets.VERIS_API_KEY }}
+          VERIS_API_KEY: ${{ secrets.VERIS_API_KEY_WITNESS }}
           VERIS_URL: ${{ secrets.VERIS_URL }}
         run: |
           if [ -z "$VERIS_URL" ] || [ -z "$VERIS_API_KEY" ]; then
