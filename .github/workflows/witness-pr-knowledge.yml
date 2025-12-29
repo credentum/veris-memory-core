@@ -1,0 +1,224 @@
+name: PR Knowledge Ingestion
+
+# Store merged PR summaries to Veris Memory as institutional knowledge.
+# Separate from witness-ingest (events) - this captures the WHY, not just the WHAT.
+#
+# Based on audit of 179 PRs:
+# - 100% have structured bodies (Problem/Solution/Why)
+# - 74% have bodies > 1000 chars
+# - 0% are empty
+#
+# This is high-signal institutional knowledge worth preserving.
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  store-pr-knowledge:
+    runs-on: ubuntu-latest
+    # Only run when PR is merged, not just closed
+    if: ${{ github.event.pull_request.merged == true }}
+
+    steps:
+      - name: Check PR Body Quality
+        id: quality
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          BODY_LENGTH=${#PR_BODY}
+
+          # Skip PRs with minimal documentation (< 200 chars)
+          if [ "$BODY_LENGTH" -lt 200 ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "reason=body_too_short" >> $GITHUB_OUTPUT
+            echo "::notice::Skipping PR - body too short ($BODY_LENGTH chars)"
+            exit 0
+          fi
+
+          # Check for structured content
+          HAS_STRUCTURE="false"
+          if echo "$PR_BODY" | grep -qiE "(problem|solution|summary|why|changes|breaking)"; then
+            HAS_STRUCTURE="true"
+          fi
+
+          echo "skip=false" >> $GITHUB_OUTPUT
+          echo "body_length=$BODY_LENGTH" >> $GITHUB_OUTPUT
+          echo "has_structure=$HAS_STRUCTURE" >> $GITHUB_OUTPUT
+          echo "::notice::PR qualifies for knowledge storage (${BODY_LENGTH} chars, structured: ${HAS_STRUCTURE})"
+
+      - name: Fetch PR Details
+        if: steps.quality.outputs.skip != 'true'
+        id: pr_details
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Get full PR data including files changed
+          gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }} \
+            --jq '{
+              files_changed: .changed_files,
+              additions: .additions,
+              deletions: .deletions,
+              commits: .commits,
+              labels: [.labels[].name]
+            }' > /tmp/pr_meta.json
+
+          # Get list of files changed
+          gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files \
+            --jq '[.[].filename]' > /tmp/pr_files.json
+
+          echo "Got PR metadata and files list"
+          cat /tmp/pr_meta.json
+          echo "Files changed:"
+          cat /tmp/pr_files.json
+
+      - name: Build Knowledge Payload
+        if: steps.quality.outputs.skip != 'true'
+        id: payload
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
+          PR_MERGED_AT: ${{ github.event.pull_request.merged_at }}
+          PR_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          # Extract key sections from PR body if present
+          # Look for common headers: Problem, Solution, Summary, Why, Changes
+
+          # Build the knowledge payload using jq for safe JSON construction
+          jq -n \
+            --arg title "$PR_TITLE" \
+            --arg body "$PR_BODY" \
+            --arg author "$PR_AUTHOR" \
+            --arg merged_by "$PR_MERGED_BY" \
+            --arg merged_at "$PR_MERGED_AT" \
+            --arg repo "${{ github.repository }}" \
+            --argjson pr_number "${{ github.event.pull_request.number }}" \
+            --arg pr_url "${{ github.event.pull_request.html_url }}" \
+            --arg base_branch "$PR_BASE_BRANCH" \
+            --arg head_branch "$PR_HEAD_BRANCH" \
+            --argjson body_length "${{ steps.quality.outputs.body_length }}" \
+            --argjson has_structure "${{ steps.quality.outputs.has_structure }}" \
+            --slurpfile pr_meta /tmp/pr_meta.json \
+            --slurpfile files /tmp/pr_files.json \
+            '{
+              type: "decision",
+              content: {
+                title: $title,
+                description: $body,
+                pr_number: $pr_number,
+                pr_url: $pr_url,
+                repository: $repo,
+                author: $author,
+                merged_by: $merged_by,
+                merged_at: $merged_at,
+                base_branch: $base_branch,
+                head_branch: $head_branch,
+                files_changed: $files[0],
+                stats: {
+                  files_count: $pr_meta[0].files_changed,
+                  additions: $pr_meta[0].additions,
+                  deletions: $pr_meta[0].deletions,
+                  commits: $pr_meta[0].commits
+                },
+                labels: $pr_meta[0].labels,
+                quality: {
+                  body_length: $body_length,
+                  has_structure: $has_structure
+                },
+                recovery_query: ("PR " + ($pr_number | tostring) + " " + $repo + " " + $title)
+              },
+              metadata: {
+                source: "github_pr_merge",
+                ingested_at: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
+                pr_number: $pr_number,
+                repository: $repo,
+                files_primary: ($files[0] | if length > 0 then .[0] else null end)
+              },
+              author: $author,
+              author_type: "human",
+              shared: true
+            }' > /tmp/knowledge_payload.json
+
+          echo "Knowledge payload built:"
+          cat /tmp/knowledge_payload.json | jq .
+
+      - name: Store to Veris Memory
+        if: steps.quality.outputs.skip != 'true'
+        id: store
+        continue-on-error: true
+        env:
+          VERIS_API_KEY: ${{ secrets.VERIS_API_KEY }}
+          VERIS_URL: ${{ secrets.VERIS_URL }}
+        run: |
+          if [ -z "$VERIS_URL" ] || [ -z "$VERIS_API_KEY" ]; then
+            echo "::warning::VERIS_URL or VERIS_API_KEY not configured"
+            echo "store_failed=true" >> $GITHUB_OUTPUT
+            echo "failure_reason=missing_secrets" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          # Send to Veris Memory
+          HTTP_CODE=$(curl -s -w "%{http_code}" -o /tmp/response.json \
+            --max-time 30 \
+            -X POST "${VERIS_URL}/tools/store_context" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${VERIS_API_KEY}" \
+            -d @/tmp/knowledge_payload.json)
+
+          echo "HTTP response code: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+            echo "PR knowledge stored successfully"
+            echo "store_failed=false" >> $GITHUB_OUTPUT
+            CONTEXT_ID=$(cat /tmp/response.json | jq -r '.id // .context_id // "unknown"')
+            echo "context_id=$CONTEXT_ID" >> $GITHUB_OUTPUT
+            cat /tmp/response.json | jq .
+          else
+            echo "::error::Failed to store PR knowledge: HTTP $HTTP_CODE"
+            cat /tmp/response.json
+            echo "store_failed=true" >> $GITHUB_OUTPUT
+            echo "failure_reason=http_error_$HTTP_CODE" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Add Comment with Context ID
+        if: steps.store.outputs.store_failed == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CONTEXT_ID="${{ steps.store.outputs.context_id }}"
+
+          gh pr comment ${{ github.event.pull_request.number }} --body "**Veris Memory:** PR knowledge stored.
+
+\`\`\`
+Context ID: $CONTEXT_ID
+Recovery Query: \"PR ${{ github.event.pull_request.number }} ${{ github.repository }}\"
+\`\`\`
+
+Future agents can retrieve this decision context from Veris Memory."
+
+      - name: Summary
+        run: |
+          echo "## PR Knowledge Ingestion" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| PR | #${{ github.event.pull_request.number }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Title | ${{ github.event.pull_request.title }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Author | @${{ github.event.pull_request.user.login }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Body Length | ${{ steps.quality.outputs.body_length }} chars |" >> $GITHUB_STEP_SUMMARY
+          echo "| Has Structure | ${{ steps.quality.outputs.has_structure }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Skipped | ${{ steps.quality.outputs.skip }} |" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ steps.quality.outputs.skip }}" = "true" ]; then
+            echo "| Skip Reason | ${{ steps.quality.outputs.reason }} |" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ steps.store.outputs.store_failed }}" = "true" ]; then
+            echo "| Store Status | Failed |" >> $GITHUB_STEP_SUMMARY
+            echo "| Failure Reason | ${{ steps.store.outputs.failure_reason }} |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Store Status | Success |" >> $GITHUB_STEP_SUMMARY
+            echo "| Context ID | \`${{ steps.store.outputs.context_id }}\` |" >> $GITHUB_STEP_SUMMARY
+          fi
