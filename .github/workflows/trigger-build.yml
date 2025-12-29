@@ -1,0 +1,67 @@
+name: Trigger Image Build
+
+# When veris-memory-core code changes, trigger build-executor to rebuild images
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - '.github/workflows/claude-code-review.yml'
+      - '.github/workflows/cve-scan.yml'
+
+  release:
+    types: [published]
+
+  # Manual trigger for on-demand rebuilds
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Reason for manual trigger'
+        required: false
+        default: 'Manual rebuild requested'
+
+jobs:
+  trigger-build-executor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger build-executor
+        env:
+          GH_TOKEN: ${{ secrets.DROTER_BUILD_EXECUTOR_TOKEN }}
+        run: |
+          echo "Triggering build-executor for veris-memory-core update..."
+          echo "  Commit: ${{ github.sha }}"
+          echo "  Ref: ${{ github.ref_name }}"
+
+          curl -X POST \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{ secrets.DROTER_BUILD_EXECUTOR_TOKEN }}" \
+            https://api.github.com/repos/droter/build-executor/dispatches \
+            -d '{
+              "event_type": "veris-memory-core-updated",
+              "client_payload": {
+                "sha": "${{ github.sha }}",
+                "ref": "${{ github.ref_name }}",
+                "actor": "${{ github.actor }}"
+              }
+            }'
+
+          echo "✅ Triggered build-executor workflow"
+
+      - name: Summary
+        run: |
+          echo "## 🧠 Veris Memory Core Build Triggered" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Trigger | \`${{ github.event_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Reason | ${{ inputs.reason || 'Push to main' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Target | droter/build-executor |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The build-executor workflow will:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Build base image (ML dependencies)" >> $GITHUB_STEP_SUMMARY
+          echo "2. Build context-store and api images" >> $GITHUB_STEP_SUMMARY
+          echo "3. Push to GHCR" >> $GITHUB_STEP_SUMMARY
+          echo "4. Trigger deployment on veris-platform" >> $GITHUB_STEP_SUMMARY
