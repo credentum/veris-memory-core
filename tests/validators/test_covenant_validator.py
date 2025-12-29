@@ -382,6 +382,136 @@ class TestContradictionSignals:
         ) is True
 
 
+class TestRejectionLogging:
+    """Test suite for rejection audit logging."""
+
+    def setup_method(self):
+        """Set up test fixtures with mocked dependencies."""
+        self.mock_mediator = MagicMock(spec=CovenantMediator)
+        self.mock_qdrant = MagicMock()
+        self.mock_neo4j = MagicMock()
+        self.mock_rejection_store = MagicMock()
+
+        self.validator = CovenantValidator(
+            mediator=self.mock_mediator,
+            qdrant_client=self.mock_qdrant,
+            neo4j_client=self.mock_neo4j,
+            rejection_store=self.mock_rejection_store,
+        )
+
+    @pytest.mark.asyncio
+    async def test_rejection_logged_on_reject(self):
+        """Test that rejections are logged to the audit store."""
+        with patch('src.validators.covenant_validator.COVENANT_MEDIATOR_ENABLED', True):
+            self.mock_mediator.should_bypass.return_value = False
+            self.mock_mediator.evaluate_memory = AsyncMock(
+                return_value=MemoryEvaluation(
+                    surprise_score=0.15,
+                    cluster_sparsity=0.20,
+                    weight=0.10,
+                    is_novel=False,
+                    action=EvaluationAction.REJECT,
+                    reason="Weight 0.10 < threshold 0.40",
+                    threshold_used=0.40,
+                    authority=5,
+                )
+            )
+
+            self.mock_qdrant.search.return_value = [{"score": 0.9}]
+            self.mock_neo4j.query.return_value = []
+            self.mock_rejection_store.log_rejection = AsyncMock(return_value="rej-123")
+
+            result = await self.validator.validate(
+                content={"title": "Duplicate Entry"},
+                embedding=[0.1] * 10,
+                authority=5,
+                context_type="decision",
+                author="test-agent",
+                author_type="agent",
+            )
+
+            assert result.action == EvaluationAction.REJECT
+
+            # Verify rejection was logged
+            self.mock_rejection_store.log_rejection.assert_called_once()
+            call_kwargs = self.mock_rejection_store.log_rejection.call_args[1]
+            assert call_kwargs["context_type"] == "decision"
+            assert call_kwargs["weight"] == 0.10
+            assert call_kwargs["threshold"] == 0.40
+            assert call_kwargs["author"] == "test-agent"
+            assert call_kwargs["author_type"] == "agent"
+
+    @pytest.mark.asyncio
+    async def test_rejection_not_logged_on_promote(self):
+        """Test that promotions are not logged to rejection store."""
+        with patch('src.validators.covenant_validator.COVENANT_MEDIATOR_ENABLED', True):
+            self.mock_mediator.should_bypass.return_value = False
+            self.mock_mediator.evaluate_memory = AsyncMock(
+                return_value=MemoryEvaluation(
+                    surprise_score=0.8,
+                    cluster_sparsity=0.6,
+                    weight=0.6,
+                    is_novel=True,
+                    action=EvaluationAction.PROMOTE,
+                    reason="Novel content",
+                    threshold_used=0.40,
+                    authority=7,
+                )
+            )
+
+            self.mock_qdrant.search.return_value = [{"score": 0.3}]
+            self.mock_neo4j.query.return_value = []
+            self.mock_rejection_store.log_rejection = AsyncMock()
+
+            result = await self.validator.validate(
+                content={"title": "Novel Insight"},
+                embedding=[0.1] * 10,
+                authority=7,
+                context_type="decision",
+            )
+
+            assert result.action == EvaluationAction.PROMOTE
+
+            # Verify rejection was NOT logged
+            self.mock_rejection_store.log_rejection.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejection_logging_failure_does_not_block(self):
+        """Test that rejection logging failures don't block the validation."""
+        with patch('src.validators.covenant_validator.COVENANT_MEDIATOR_ENABLED', True):
+            self.mock_mediator.should_bypass.return_value = False
+            self.mock_mediator.evaluate_memory = AsyncMock(
+                return_value=MemoryEvaluation(
+                    surprise_score=0.15,
+                    cluster_sparsity=0.20,
+                    weight=0.10,
+                    is_novel=False,
+                    action=EvaluationAction.REJECT,
+                    reason="Low weight",
+                    threshold_used=0.40,
+                    authority=5,
+                )
+            )
+
+            self.mock_qdrant.search.return_value = []
+            self.mock_neo4j.query.return_value = []
+
+            # Simulate rejection store failure
+            self.mock_rejection_store.log_rejection = AsyncMock(
+                side_effect=Exception("Redis connection failed")
+            )
+
+            # Should still return rejection result despite logging failure
+            result = await self.validator.validate(
+                content={"title": "Test"},
+                embedding=[0.1] * 10,
+                authority=5,
+                context_type="log",
+            )
+
+            assert result.action == EvaluationAction.REJECT
+
+
 class TestIntegrationScenarios:
     """Integration test scenarios for realistic use cases."""
 

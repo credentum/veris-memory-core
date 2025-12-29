@@ -5,13 +5,18 @@ Integration layer that connects the CovenantMediator with store_context.
 Performs vector probing, graph conflict checking, and weight evaluation
 before allowing memories to be stored.
 
+Rejection Audit Log:
+    When memories are rejected, they are logged to Redis for audit purposes.
+    This ensures we can answer "What has the system forgotten?" (Truth pillar).
+    See: GitHub issue #62 (witness repo)
+
 Usage:
     validator = CovenantValidator(mediator, qdrant_client, neo4j_client)
     evaluation = await validator.validate(request, embedding, sparse_vector)
     if evaluation.action == EvaluationAction.PROMOTE:
         # Proceed with storage
     elif evaluation.action == EvaluationAction.REJECT:
-        # Return rejection response
+        # Return rejection response (already logged to audit)
     elif evaluation.action == EvaluationAction.CONFLICT:
         # Create conflict node
 """
@@ -28,6 +33,7 @@ from ..models.evaluation import (
     GraphConflict,
     MemoryEvaluation,
 )
+from ..storage.rejection_store import RejectionStore, get_rejection_store
 
 # Feature flag
 COVENANT_MEDIATOR_ENABLED = (
@@ -56,6 +62,7 @@ class CovenantValidator:
     2. Token novelty detection via sparse embeddings
     3. Graph conflict checking for contradictions
     4. Weight calculation for storage decision
+    5. Rejection audit logging (when memories don't pass the gate)
     """
 
     def __init__(
@@ -64,6 +71,7 @@ class CovenantValidator:
         qdrant_client,
         neo4j_client,
         sparse_service=None,
+        rejection_store: Optional[RejectionStore] = None,
     ):
         """
         Initialize the CovenantValidator.
@@ -73,11 +81,13 @@ class CovenantValidator:
             qdrant_client: Qdrant client for vector probing
             neo4j_client: Neo4j client for graph conflict checking
             sparse_service: Optional sparse embedding service for token novelty
+            rejection_store: Optional RejectionStore for audit logging
         """
         self._mediator = mediator
         self._qdrant = qdrant_client
         self._neo4j = neo4j_client
         self._sparse_service = sparse_service
+        self._rejection_store = rejection_store
 
     async def validate(
         self,
@@ -86,12 +96,15 @@ class CovenantValidator:
         authority: int,
         context_type: str,
         sparse_vector: Optional[Dict[str, Any]] = None,
+        author: str = "unknown",
+        author_type: str = "unknown",
     ) -> MemoryEvaluation:
         """
         Validate a memory for storage worthiness.
 
         This is the main entry point called by store_context before
-        committing to storage.
+        committing to storage. Rejected memories are logged to the
+        rejection audit store.
 
         Args:
             content: The memory content to validate
@@ -99,6 +112,8 @@ class CovenantValidator:
             authority: Source authority (1-10)
             context_type: Type of context (decision, design, log, etc.)
             sparse_vector: Optional sparse vector for token novelty
+            author: Author of the content (for audit logging)
+            author_type: Type of author - "agent" or "human" (for audit logging)
 
         Returns:
             MemoryEvaluation with action and explanation
@@ -157,7 +172,64 @@ class CovenantValidator:
                 f"{evaluation.reason}. Conflict: {graph_conflict.existing_claim}"
             )
 
+        # Log rejection to audit store (Truth pillar compliance)
+        if evaluation.action == EvaluationAction.REJECT:
+            await self._log_rejection(
+                content=content,
+                context_type=context_type,
+                evaluation=evaluation,
+                author=author,
+                author_type=author_type,
+            )
+
         return evaluation
+
+    async def _log_rejection(
+        self,
+        content: Dict[str, Any],
+        context_type: str,
+        evaluation: MemoryEvaluation,
+        author: str,
+        author_type: str,
+    ) -> None:
+        """
+        Log a rejected memory to the audit store.
+
+        This ensures we can answer "What has the system forgotten?"
+        as required by the Truth pillar (Ted Chiang's concern).
+
+        Args:
+            content: The rejected content
+            context_type: Type of context
+            evaluation: The evaluation result with scores
+            author: Author of the content
+            author_type: Type of author
+        """
+        try:
+            # Get or create rejection store
+            store = self._rejection_store or get_rejection_store()
+
+            rejection_id = await store.log_rejection(
+                content=content,
+                context_type=context_type,
+                weight=evaluation.weight,
+                threshold=evaluation.threshold_used,
+                surprise_score=evaluation.surprise_score,
+                cluster_sparsity=evaluation.cluster_sparsity,
+                authority=evaluation.authority,
+                reason=evaluation.reason or "No reason provided",
+                author=author,
+                author_type=author_type,
+            )
+
+            if rejection_id:
+                logger.debug(f"Logged rejection to audit store: {rejection_id}")
+            else:
+                logger.warning("Failed to log rejection to audit store")
+
+        except Exception as e:
+            # Fail-open: don't block storage operations due to audit logging failures
+            logger.error(f"Error logging rejection to audit store: {e}")
 
     async def _vector_probe(
         self,
@@ -367,11 +439,14 @@ async def validate_covenant(
     qdrant_client,
     neo4j_client,
     sparse_vector: Optional[Dict[str, Any]] = None,
+    author: str = "unknown",
+    author_type: str = "unknown",
 ) -> MemoryEvaluation:
     """
     Convenience function to validate a memory against the Covenant.
 
     Creates a validator instance and runs validation in one call.
+    Rejected memories are automatically logged to the audit store.
 
     Args:
         content: Memory content
@@ -381,6 +456,8 @@ async def validate_covenant(
         qdrant_client: Qdrant client
         neo4j_client: Neo4j client
         sparse_vector: Optional sparse embedding
+        author: Author of the content (for audit logging)
+        author_type: Type of author - "agent" or "human" (for audit logging)
 
     Returns:
         MemoryEvaluation with action
@@ -396,4 +473,6 @@ async def validate_covenant(
         authority=authority,
         context_type=context_type,
         sparse_vector=sparse_vector,
+        author=author,
+        author_type=author_type,
     )

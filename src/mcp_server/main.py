@@ -5051,6 +5051,190 @@ async def resolve_conflict(
 
 
 # ============================================================================
+# Phase 4: Rejection Audit Log (Truth Pillar Compliance)
+# ============================================================================
+
+
+class ListRejectionsRequest(BaseModel):
+    """Request model for list_rejections tool."""
+
+    days: int = Field(
+        default=7,
+        ge=1,
+        le=90,
+        description="Number of days to look back (default: 7, max: 90).",
+    )
+    context_type: Optional[str] = Field(
+        default=None,
+        pattern="^(decision|design|log|trace)$",
+        description="Filter by context type.",
+    )
+    min_weight: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Minimum weight score filter.",
+    )
+    max_weight: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Maximum weight score filter.",
+    )
+    author: Optional[str] = Field(
+        default=None,
+        description="Filter by author.",
+    )
+    limit: int = Field(
+        default=50,
+        ge=1,
+        le=200,
+        description="Maximum number of results to return.",
+    )
+
+
+class RejectionStatsRequest(BaseModel):
+    """Request model for rejection_stats tool."""
+
+    days: int = Field(
+        default=7,
+        ge=1,
+        le=90,
+        description="Number of days to analyze (default: 7, max: 90).",
+    )
+
+
+@app.post("/tools/list_rejections")
+async def list_rejections(
+    request: ListRejectionsRequest,
+    api_key_info: Optional[APIKeyInfo] = (
+        Depends(verify_api_key) if API_KEY_AUTH_AVAILABLE else None
+    ),
+) -> Dict[str, Any]:
+    """
+    List rejected memories from the Covenant Mediator audit log.
+
+    Phase 4: Truth Pillar Compliance - Answers "What has the system forgotten?"
+    When the Covenant Mediator rejects memories for being too similar or low-authority,
+    this endpoint provides visibility into those rejections.
+
+    Use cases:
+    - Audit what content was filtered out
+    - Find "close calls" that almost passed the threshold
+    - Debug retrieval failures (was the answer rejected?)
+    - Monitor rejection rates by type/author
+
+    Example:
+        POST /tools/list_rejections
+        {"days": 7, "context_type": "decision", "min_weight": 0.25}
+
+    Returns:
+        {
+            "success": true,
+            "rejections": [...],
+            "count": 15,
+            "query": {"days": 7, "context_type": "decision", ...}
+        }
+    """
+    try:
+        from ..storage.rejection_store import get_rejection_store
+
+        logger.info(
+            f"Listing rejections: days={request.days}, type={request.context_type}, "
+            f"weight_range=[{request.min_weight}, {request.max_weight}]"
+        )
+
+        store = get_rejection_store()
+        rejections = await store.list_rejections(
+            days=request.days,
+            context_type=request.context_type,
+            min_weight=request.min_weight,
+            max_weight=request.max_weight,
+            author=request.author,
+            limit=request.limit,
+        )
+
+        return {
+            "success": True,
+            "rejections": rejections,
+            "count": len(rejections),
+            "query": {
+                "days": request.days,
+                "context_type": request.context_type,
+                "min_weight": request.min_weight,
+                "max_weight": request.max_weight,
+                "author": request.author,
+                "limit": request.limit,
+            },
+        }
+
+    except Exception as e:
+        logger.error(f"List rejections failed: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "rejections": [],
+            "count": 0,
+        }
+
+
+@app.post("/tools/rejection_stats")
+async def rejection_stats(
+    request: RejectionStatsRequest,
+    api_key_info: Optional[APIKeyInfo] = (
+        Depends(verify_api_key) if API_KEY_AUTH_AVAILABLE else None
+    ),
+) -> Dict[str, Any]:
+    """
+    Get aggregate statistics about rejected memories.
+
+    Provides insights into Covenant Mediator filtering behavior:
+    - Rejection counts by type and author
+    - Average weight and threshold values
+    - Close calls (rejections within 0.1 of threshold)
+
+    Use for monitoring threshold effectiveness and detecting
+    over-aggressive or under-aggressive filtering.
+
+    Example:
+        POST /tools/rejection_stats
+        {"days": 30}
+
+    Returns:
+        {
+            "success": true,
+            "stats": {
+                "total_rejections": 45,
+                "by_type": {"decision": 20, "design": 15, "log": 10},
+                "avg_weight": 0.22,
+                "close_calls": 8,
+                "close_call_rate": 0.18
+            }
+        }
+    """
+    try:
+        from ..storage.rejection_store import get_rejection_store
+
+        logger.info(f"Getting rejection stats: days={request.days}")
+
+        store = get_rejection_store()
+        stats = await store.get_stats(days=request.days)
+
+        return {
+            "success": True,
+            "stats": stats,
+        }
+
+    except Exception as e:
+        logger.error(f"Rejection stats failed: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "stats": {},
+        }
+
+
+# ============================================================================
 # Phase 2: Audit Provenance Endpoints
 # ============================================================================
 

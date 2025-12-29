@@ -11,6 +11,7 @@ from .kv_store import DuckDBAnalytics, MetricEvent, RedisConnector
 from .neo4j_client import Neo4jInitializer
 from .qdrant_client import VectorDBInitializer
 from .redis_connector import EnhancedRedisConnector
+from .rejection_store import RejectionRecord, RejectionStore, get_rejection_store
 
 __all__ = [
     "Neo4jInitializer",
@@ -25,4 +26,7 @@ __all__ = [
     "CacheEntry",
     "AnalyticsResult",
     "TimeSeriesData",
+    "RejectionStore",
+    "RejectionRecord",
+    "get_rejection_store",
 ]
