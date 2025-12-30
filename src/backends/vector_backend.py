@@ -11,6 +11,8 @@ import os
 import time
 from typing import Any, List
 
+from qdrant_client.http import models as qdrant_models
+
 from ..interfaces.backend_interface import (
     BackendHealthStatus,
     BackendSearchError,
@@ -345,15 +347,86 @@ class VectorBackend(BackendSearchInterface):
             backend_logger.error(f"Embedding generation failed: {e}")
             raise
 
+    def _build_qdrant_filter(self, options: SearchOptions) -> qdrant_models.Filter | None:
+        """
+        Convert SearchOptions.filters to Qdrant filter format.
+
+        Handles metadata fields like author, tags, type, etc. by building
+        Qdrant FieldCondition objects that filter at the database level.
+
+        Args:
+            options: Search options containing filters dict
+
+        Returns:
+            Qdrant Filter object or None if no filters specified
+        """
+        if not options.filters:
+            return None
+
+        filter_conditions = []
+
+        for key, value in options.filters.items():
+            # Skip special keys that are handled separately
+            if key in ("include_shared", "sort_by", "sort_order"):
+                continue
+
+            # Handle different value types
+            if value is None:
+                continue
+
+            if isinstance(value, list):
+                # For list values (like tags), use MatchAny
+                if value:  # Only add if non-empty
+                    filter_conditions.append(
+                        qdrant_models.FieldCondition(
+                            key=key,
+                            match=qdrant_models.MatchAny(any=value)
+                        )
+                    )
+            elif isinstance(value, bool):
+                filter_conditions.append(
+                    qdrant_models.FieldCondition(
+                        key=key,
+                        match=qdrant_models.MatchValue(value=value)
+                    )
+                )
+            elif isinstance(value, float):
+                # Qdrant MatchValue doesn't support float - skip with warning
+                # Float exact-match filtering is rarely needed for metadata
+                backend_logger.warning(
+                    f"Skipping filter '{key}': float values not supported by Qdrant MatchValue"
+                )
+                continue
+            elif isinstance(value, (str, int)):
+                filter_conditions.append(
+                    qdrant_models.FieldCondition(
+                        key=key,
+                        match=qdrant_models.MatchValue(value=value)
+                    )
+                )
+
+        if not filter_conditions:
+            return None
+
+        backend_logger.debug(
+            f"Built Qdrant filter with {len(filter_conditions)} conditions: "
+            f"{[c.key for c in filter_conditions]}"
+        )
+
+        return qdrant_models.Filter(must=filter_conditions)
+
     async def _perform_vector_search(
         self, query_vector: List[float], options: SearchOptions
     ) -> List[Any]:
         """Perform dense-only vector search (used by search_by_embedding for HyDE)."""
         try:
+            # Build Qdrant filter from options.filters (Issue #102 fix)
+            qdrant_filter = self._build_qdrant_filter(options)
+
             results = self.client.search(
                 query_vector=query_vector,
                 limit=options.limit,
-                filter_dict=None,
+                filter_dict=qdrant_filter,
             )
 
             # Apply score threshold manually
@@ -374,6 +447,9 @@ class VectorBackend(BackendSearchInterface):
     ) -> List[Any]:
         """Perform hybrid search combining dense and sparse vectors when available."""
         try:
+            # Build Qdrant filter from options.filters (Issue #102 fix)
+            qdrant_filter = self._build_qdrant_filter(options)
+
             # Use hybrid_search if we have sparse vector and client supports it
             if sparse_vector and hasattr(self.client, 'hybrid_search'):
                 backend_logger.debug(
@@ -383,7 +459,7 @@ class VectorBackend(BackendSearchInterface):
                     dense_vector=query_vector,
                     sparse_vector=sparse_vector,
                     limit=options.limit,
-                    filter_dict=None,
+                    filter_dict=qdrant_filter,
                 )
 
                 # Apply score threshold
@@ -397,16 +473,17 @@ class VectorBackend(BackendSearchInterface):
             return self.client.search(
                 query_vector=query_vector,
                 limit=options.limit,
-                filter_dict=None,
+                filter_dict=qdrant_filter,
             )
 
         except Exception as e:
             backend_logger.warning(f"Hybrid search failed, falling back to dense: {e}")
             # Fallback to dense-only search
+            qdrant_filter = self._build_qdrant_filter(options)
             return self.client.search(
                 query_vector=query_vector,
                 limit=options.limit,
-                filter_dict=None,
+                filter_dict=qdrant_filter,
             )
 
     def _convert_to_memory_results(self, raw_results: List[Any]) -> List[MemoryResult]:

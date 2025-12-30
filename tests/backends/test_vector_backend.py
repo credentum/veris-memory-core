@@ -550,5 +550,245 @@ class TestVectorBackendHybridSearch:
                 assert len(results) == 2
 
 
+class TestVectorBackendQdrantFilter:
+    """Test suite for _build_qdrant_filter method (Issue #102 fix)."""
+
+    @pytest.fixture
+    def vector_backend(self):
+        """Create a vector backend instance for testing."""
+        mock_client = Mock()
+        mock_embedding_generator = Mock()
+        backend = VectorBackend(mock_client, mock_embedding_generator)
+        return backend
+
+    def test_empty_filters_returns_none(self, vector_backend):
+        """Test that empty filters dict returns None."""
+        from src.interfaces.backend_interface import SearchOptions
+
+        options = SearchOptions(limit=10, filters={})
+        result = vector_backend._build_qdrant_filter(options)
+        assert result is None
+
+    def test_no_filters_returns_none(self, vector_backend):
+        """Test that no filters returns None."""
+        from src.interfaces.backend_interface import SearchOptions
+
+        options = SearchOptions(limit=10)
+        result = vector_backend._build_qdrant_filter(options)
+        assert result is None
+
+    def test_string_filter_creates_match_value(self, vector_backend):
+        """Test that string filter creates MatchValue condition."""
+        from src.interfaces.backend_interface import SearchOptions
+        from qdrant_client.http import models as qdrant_models
+
+        options = SearchOptions(limit=10, filters={"author": "sentinel_test_abc123"})
+        result = vector_backend._build_qdrant_filter(options)
+
+        assert result is not None
+        assert isinstance(result, qdrant_models.Filter)
+        assert len(result.must) == 1
+        assert result.must[0].key == "author"
+        assert isinstance(result.must[0].match, qdrant_models.MatchValue)
+        assert result.must[0].match.value == "sentinel_test_abc123"
+
+    def test_int_filter_creates_match_value(self, vector_backend):
+        """Test that integer filter creates MatchValue condition."""
+        from src.interfaces.backend_interface import SearchOptions
+        from qdrant_client.http import models as qdrant_models
+
+        options = SearchOptions(limit=10, filters={"priority": 5})
+        result = vector_backend._build_qdrant_filter(options)
+
+        assert result is not None
+        assert len(result.must) == 1
+        assert result.must[0].key == "priority"
+        assert result.must[0].match.value == 5
+
+    def test_float_filter_skipped_with_warning(self, vector_backend):
+        """Test that float filter is skipped (Qdrant MatchValue doesn't support float)."""
+        from src.interfaces.backend_interface import SearchOptions
+
+        options = SearchOptions(limit=10, filters={"score": 0.95})
+        result = vector_backend._build_qdrant_filter(options)
+
+        # Float filters are skipped because Qdrant MatchValue only supports bool/int/str
+        assert result is None
+
+    def test_boolean_filter_creates_match_value(self, vector_backend):
+        """Test that boolean filter creates MatchValue condition."""
+        from src.interfaces.backend_interface import SearchOptions
+        from qdrant_client.http import models as qdrant_models
+
+        options = SearchOptions(limit=10, filters={"shared": True})
+        result = vector_backend._build_qdrant_filter(options)
+
+        assert result is not None
+        assert len(result.must) == 1
+        assert result.must[0].key == "shared"
+        assert result.must[0].match.value is True
+
+    def test_list_filter_creates_match_any(self, vector_backend):
+        """Test that list filter creates MatchAny condition."""
+        from src.interfaces.backend_interface import SearchOptions
+        from qdrant_client.http import models as qdrant_models
+
+        options = SearchOptions(limit=10, filters={"tags": ["tag1", "tag2", "tag3"]})
+        result = vector_backend._build_qdrant_filter(options)
+
+        assert result is not None
+        assert len(result.must) == 1
+        assert result.must[0].key == "tags"
+        assert isinstance(result.must[0].match, qdrant_models.MatchAny)
+        assert result.must[0].match.any == ["tag1", "tag2", "tag3"]
+
+    def test_empty_list_filter_skipped(self, vector_backend):
+        """Test that empty list filter is skipped."""
+        from src.interfaces.backend_interface import SearchOptions
+
+        options = SearchOptions(limit=10, filters={"tags": []})
+        result = vector_backend._build_qdrant_filter(options)
+        assert result is None
+
+    def test_none_value_skipped(self, vector_backend):
+        """Test that None value is skipped."""
+        from src.interfaces.backend_interface import SearchOptions
+
+        options = SearchOptions(limit=10, filters={"author": None})
+        result = vector_backend._build_qdrant_filter(options)
+        assert result is None
+
+    def test_special_keys_skipped(self, vector_backend):
+        """Test that special keys (include_shared, sort_by, sort_order) are skipped."""
+        from src.interfaces.backend_interface import SearchOptions
+
+        options = SearchOptions(
+            limit=10,
+            filters={
+                "author": "test_user",
+                "include_shared": True,  # Should be skipped
+                "sort_by": "created_at",  # Should be skipped
+                "sort_order": "desc",  # Should be skipped
+            }
+        )
+        result = vector_backend._build_qdrant_filter(options)
+
+        assert result is not None
+        assert len(result.must) == 1  # Only author, special keys skipped
+        assert result.must[0].key == "author"
+
+    def test_multiple_filters(self, vector_backend):
+        """Test multiple filters create multiple conditions."""
+        from src.interfaces.backend_interface import SearchOptions
+
+        options = SearchOptions(
+            limit=10,
+            filters={
+                "author": "test_user",
+                "type": "decision",
+                "shared": True,
+            }
+        )
+        result = vector_backend._build_qdrant_filter(options)
+
+        assert result is not None
+        assert len(result.must) == 3
+        keys = {cond.key for cond in result.must}
+        assert keys == {"author", "type", "shared"}
+
+    def test_mixed_filter_types(self, vector_backend):
+        """Test mix of string, list, and boolean filters."""
+        from src.interfaces.backend_interface import SearchOptions
+        from qdrant_client.http import models as qdrant_models
+
+        options = SearchOptions(
+            limit=10,
+            filters={
+                "author": "sentinel_test",  # string → MatchValue
+                "tags": ["important", "urgent"],  # list → MatchAny
+                "shared": False,  # bool → MatchValue
+            }
+        )
+        result = vector_backend._build_qdrant_filter(options)
+
+        assert result is not None
+        assert len(result.must) == 3
+
+        # Verify each filter type
+        for cond in result.must:
+            if cond.key == "author":
+                assert isinstance(cond.match, qdrant_models.MatchValue)
+                assert cond.match.value == "sentinel_test"
+            elif cond.key == "tags":
+                assert isinstance(cond.match, qdrant_models.MatchAny)
+                assert cond.match.any == ["important", "urgent"]
+            elif cond.key == "shared":
+                assert isinstance(cond.match, qdrant_models.MatchValue)
+                assert cond.match.value is False
+
+
+class TestVectorBackendSearchWithFilters:
+    """Test that search methods correctly pass filters to Qdrant (Issue #102)."""
+
+    @pytest.fixture
+    def vector_backend(self):
+        """Create a vector backend instance for testing."""
+        mock_client = Mock()
+        mock_embedding_generator = Mock()
+        backend = VectorBackend(mock_client, mock_embedding_generator)
+        return backend
+
+    @pytest.mark.asyncio
+    async def test_perform_vector_search_passes_filter(self, vector_backend):
+        """Test _perform_vector_search passes filter_dict to client."""
+        from src.interfaces.backend_interface import SearchOptions
+
+        vector_backend.client.search = Mock(return_value=[])
+
+        options = SearchOptions(limit=10, filters={"author": "test_user"})
+        await vector_backend._perform_vector_search([0.1, 0.2, 0.3], options)
+
+        vector_backend.client.search.assert_called_once()
+        call_kwargs = vector_backend.client.search.call_args.kwargs
+        assert call_kwargs["filter_dict"] is not None
+        assert len(call_kwargs["filter_dict"].must) == 1
+        assert call_kwargs["filter_dict"].must[0].key == "author"
+
+    @pytest.mark.asyncio
+    async def test_perform_vector_search_with_sparse_passes_filter(self, vector_backend):
+        """Test _perform_vector_search_with_sparse passes filter_dict to client."""
+        from src.interfaces.backend_interface import SearchOptions
+
+        vector_backend.client.hybrid_search = Mock(return_value=[])
+
+        options = SearchOptions(limit=10, filters={"author": "sentinel_abc"})
+        sparse_vector = {"indices": [0, 1], "values": [0.5, 0.5]}
+        await vector_backend._perform_vector_search_with_sparse(
+            [0.1, 0.2, 0.3], sparse_vector, options
+        )
+
+        vector_backend.client.hybrid_search.assert_called_once()
+        call_kwargs = vector_backend.client.hybrid_search.call_args.kwargs
+        assert call_kwargs["filter_dict"] is not None
+        assert len(call_kwargs["filter_dict"].must) == 1
+        assert call_kwargs["filter_dict"].must[0].key == "author"
+
+    @pytest.mark.asyncio
+    async def test_search_without_filters_passes_none(self, vector_backend):
+        """Test search without filters passes None to client."""
+        from src.interfaces.backend_interface import SearchOptions
+        from unittest.mock import patch
+
+        vector_backend.client.search = Mock(return_value=[])
+        vector_backend.embedding_generator.generate_embedding = AsyncMock(return_value=[0.1])
+
+        with patch('src.backends.vector_backend.HYBRID_SEARCH_AVAILABLE', False):
+            options = SearchOptions(limit=10)  # No filters
+            await vector_backend.search("test query", options)
+
+            call_kwargs = vector_backend.client.search.call_args.kwargs
+            assert call_kwargs["filter_dict"] is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
