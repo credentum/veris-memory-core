@@ -390,7 +390,14 @@ class VectorBackend(BackendSearchInterface):
                         match=qdrant_models.MatchValue(value=value)
                     )
                 )
-            elif isinstance(value, (str, int, float)):
+            elif isinstance(value, float):
+                # Qdrant MatchValue doesn't support float - skip with warning
+                # Float exact-match filtering is rarely needed for metadata
+                backend_logger.warning(
+                    f"Skipping filter '{key}': float values not supported by Qdrant MatchValue"
+                )
+                continue
+            elif isinstance(value, (str, int)):
                 filter_conditions.append(
                     qdrant_models.FieldCondition(
                         key=key,
