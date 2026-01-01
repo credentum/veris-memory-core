@@ -42,7 +42,9 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from typing_extensions import TypedDict
@@ -1723,6 +1725,121 @@ async def cleanup_stale_wip(
 # =============================================================================
 
 
+def _parse_ao_panel_from_outcome(outcome_reason: str) -> List[str]:
+    """
+    Extract AO Panel issues from final_outcome_reason string.
+
+    The AO Panel issues are stored in the format:
+    "... AO Panel Issues: [Expert1] description1; [Expert2] description2"
+    """
+    issues = []
+    if not outcome_reason:
+        return issues
+
+    if "AO Panel Issues:" in outcome_reason:
+        panel_section = outcome_reason.split("AO Panel Issues:")[-1]
+        # Parse [Expert] issue format
+        matches = re.findall(r'\[(\w+)\]\s*([^;\[\]]+)', panel_section)
+        issues = [f"[{expert}] {desc.strip()}" for expert, desc in matches]
+
+    return issues
+
+
+def _extract_rejection_details(metadata: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """
+    Extract all rejection reasons from trajectory metadata.
+
+    Returns None if there was no rejection (success case).
+    Returns structured dict with rejection details at each level:
+    - static_analysis: Summary from static analysis tools
+    - ao_lens_issues: List of ao-lens security issues
+    - llm_reviewer: LLM reviewer rejection reason
+    - ao_panel: List of AO Panel expert issues
+    - test_results: Test failure details
+    """
+    if not metadata:
+        return None
+
+    # Only include if there was a rejection
+    rejection_reason = metadata.get("rejection_reason")
+    review_verdict = metadata.get("review_verdict")
+
+    # If not rejected, return None
+    if not rejection_reason and review_verdict not in ("REJECT", "ESCALATE"):
+        return None
+
+    return {
+        "static_analysis": metadata.get("static_analysis_summary"),
+        "ao_lens_issues": (metadata.get("ao_lens") or {}).get("issues", [])[:5],
+        "llm_reviewer": metadata.get("rejection_reason"),
+        "ao_panel": _parse_ao_panel_from_outcome(
+            metadata.get("final_outcome_reason", "")
+        ),
+        "test_results": metadata.get("test_results"),
+    }
+
+
+def _summarize_rejection(rejection_reasons: Optional[Dict[str, Any]]) -> List[str]:
+    """
+    Create a brief summary of rejection reasons for timeline display.
+
+    Returns list like: ["ao-lens:3 issues", "ao_panel:2 issues"]
+    """
+    if not rejection_reasons:
+        return []
+
+    summary = []
+
+    # ao-lens issues
+    ao_lens = rejection_reasons.get("ao_lens_issues") or []
+    if ao_lens:
+        summary.append(f"ao-lens:{len(ao_lens)} issues")
+
+    # AO Panel issues
+    ao_panel = rejection_reasons.get("ao_panel") or []
+    if ao_panel:
+        summary.append(f"ao_panel:{len(ao_panel)} issues")
+
+    # LLM reviewer
+    llm = rejection_reasons.get("llm_reviewer")
+    if llm:
+        summary.append("llm_reviewer:rejected")
+
+    # Static analysis
+    static = rejection_reasons.get("static_analysis")
+    if static and "FAIL" in str(static):
+        summary.append("static:failed")
+
+    # Test results
+    tests = rejection_reasons.get("test_results")
+    if tests and not tests.get("passed", True):
+        summary.append(f"tests:{tests.get('failed_tests', 0)} failed")
+
+    return summary if summary else ["rejected"]
+
+
+class RejectionDetails(BaseModel):
+    """Structured rejection reasons at each validation level."""
+
+    static_analysis: Optional[str] = Field(None, description="Static analysis summary")
+    ao_lens_issues: List[str] = Field(default_factory=list, description="ao-lens security issues")
+    llm_reviewer: Optional[str] = Field(None, description="LLM reviewer rejection reason")
+    ao_panel: List[str] = Field(default_factory=list, description="AO Panel expert issues")
+    test_results: Optional[Dict[str, Any]] = Field(None, description="Test failure details")
+
+
+class AttemptDetail(BaseModel):
+    """Details for a single coder/reviewer attempt."""
+
+    attempt: int = Field(..., description="Attempt number (1-based)")
+    outcome: str = Field(..., description="Outcome: success, failure, partial")
+    agent: str = Field(..., description="Agent: coding_agent, reviewer, etc.")
+    timestamp: str = Field(..., description="When this attempt completed")
+    duration_ms: Optional[float] = Field(None, description="Duration in milliseconds")
+    files_modified: List[str] = Field(default_factory=list, description="Files modified in this attempt")
+    rejection_reasons: Optional[RejectionDetails] = Field(None, description="Rejection details if rejected")
+
+
 class PacketTraceRequest(BaseModel):
     """Request to get unified packet trace."""
 
@@ -1742,6 +1859,10 @@ class WorkPacketTrace(BaseModel):
     completed_at: Optional[str] = Field(None, description="When completed (from trajectory)")
     discrepancy: bool = Field(False, description="True if saga and trajectory disagree")
     discrepancy_note: Optional[str] = Field(None, description="Explanation of discrepancy")
+    # NEW: All attempts with rejection details
+    attempts: List[AttemptDetail] = Field(default_factory=list, description="All attempts with rejection details")
+    total_attempts: int = Field(0, description="Total number of attempts")
+    final_outcome: Optional[str] = Field(None, description="Final outcome: success, failure, escalated")
 
 
 class TimelineEventDetails(TypedDict, total=False):
@@ -1757,6 +1878,10 @@ class TimelineEventDetails(TypedDict, total=False):
     agent: str  # coding_agent, reviewer, architect
     duration_ms: float
     error: Optional[str]
+
+    # Rejection event details (NEW)
+    attempt: int
+    reasons: List[str]  # Summary like ["ao-lens:3 issues", "ao_panel:2 issues"]
 
     # Raw details for unknown event types
     raw: str
@@ -1843,19 +1968,25 @@ async def get_packet_trace(
 
         # 3. Query trajectories by parent_packet_id
         # Use internal HTTP call to trajectories API
-        trajectory_data = {}
+        # NEW: Track ALL trajectories per work packet (not just latest)
+        all_trajectories_by_wp: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        trajectory_data = {}  # Keep for backwards compat - latest trajectory per task_id
         try:
             async with httpx.AsyncClient() as client:
                 resp = await client.post(
                     f"{INTERNAL_API_BASE_URL}/api/v1/trajectories/search",
-                    json={"parent_packet_id": request.packet_id, "limit": 100},
+                    json={"parent_packet_id": request.packet_id, "limit": 200},
                     timeout=10.0
                 )
                 if resp.status_code == 200:
                     traj_response = resp.json()
                     for traj in traj_response.get("trajectories", []):
                         task_id = traj.get("task_id", "")
-                        # Track latest trajectory per task_id
+
+                        # Store ALL trajectories for building attempts list
+                        all_trajectories_by_wp[task_id].append(traj)
+
+                        # Track latest trajectory per task_id (backwards compat)
                         if task_id not in trajectory_data:
                             trajectory_data[task_id] = traj
                         else:
@@ -1878,6 +2009,22 @@ async def get_packet_trace(
                                 "error": traj.get("error")
                             }
                         ))
+
+                        # NEW: Add rejection event to timeline if this was a rejection
+                        rejection_details = _extract_rejection_details(metadata)
+                        if rejection_details:
+                            rejection_summary = _summarize_rejection(rejection_details)
+                            timeline.append(TimelineEvent(
+                                ts=traj.get("timestamp", ""),
+                                event="attempt_rejected",
+                                packet_id=task_id,
+                                source="trajectory",
+                                details={
+                                    "outcome": traj.get("outcome"),
+                                    "agent": traj.get("agent"),
+                                    "reasons": rejection_summary
+                                }
+                            ))
         except Exception as e:
             logger.warning(f"Failed to query trajectories: {e}")
 
@@ -1937,6 +2084,48 @@ async def get_packet_trace(
             if saga_status == "completed" or traj_outcome == "success":
                 completed_count += 1
 
+            # NEW: Build attempts list from ALL trajectories for this work packet
+            attempts: List[AttemptDetail] = []
+            wp_trajectories = all_trajectories_by_wp.get(full_wp_id) or all_trajectories_by_wp.get(wp_id) or []
+            # Sort by timestamp to get chronological order
+            wp_trajectories.sort(key=lambda t: t.get("timestamp", ""))
+
+            for attempt_num, attempt_traj in enumerate(wp_trajectories, 1):
+                attempt_metadata = attempt_traj.get("metadata", {}) or {}
+                rejection_details_dict = _extract_rejection_details(attempt_metadata)
+
+                # Convert to RejectionDetails model if we have rejection data
+                rejection_model = None
+                if rejection_details_dict:
+                    rejection_model = RejectionDetails(
+                        static_analysis=rejection_details_dict.get("static_analysis"),
+                        ao_lens_issues=rejection_details_dict.get("ao_lens_issues") or [],
+                        llm_reviewer=rejection_details_dict.get("llm_reviewer"),
+                        ao_panel=rejection_details_dict.get("ao_panel") or [],
+                        test_results=rejection_details_dict.get("test_results")
+                    )
+
+                attempts.append(AttemptDetail(
+                    attempt=attempt_num,
+                    outcome=attempt_traj.get("outcome", "unknown"),
+                    agent=attempt_traj.get("agent", "unknown"),
+                    timestamp=attempt_traj.get("timestamp", ""),
+                    duration_ms=attempt_traj.get("duration_ms"),
+                    files_modified=attempt_metadata.get("files_modified") or [],
+                    rejection_reasons=rejection_model
+                ))
+
+            # Determine final outcome
+            final_outcome = None
+            if saga_status == "intervention":
+                final_outcome = "escalated"
+            elif saga_status == "completed" or traj_outcome == "success":
+                final_outcome = "success"
+            elif attempts and all(a.outcome == "failure" for a in attempts):
+                final_outcome = "failure"
+            elif attempts:
+                final_outcome = attempts[-1].outcome
+
             work_packets.append(WorkPacketTrace(
                 packet_id=full_wp_id,
                 saga_status=saga_status,
@@ -1946,7 +2135,10 @@ async def get_packet_trace(
                 claimed_by=claimed_by,
                 completed_at=completed_at,
                 discrepancy=discrepancy,
-                discrepancy_note=discrepancy_note
+                discrepancy_note=discrepancy_note,
+                attempts=attempts,
+                total_attempts=len(attempts),
+                final_outcome=final_outcome
             ))
 
         # 5. Sort timeline by timestamp
