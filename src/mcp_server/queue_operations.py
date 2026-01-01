@@ -216,6 +216,10 @@ class CompleteTaskRequest(BaseModel):
     reviewer_duration_ms: Optional[int] = Field(
         default=None, ge=0, description="Time spent in reviewer phase (milliseconds)"
     )
+    # Work packet meta passthrough for orchestrator (ao_panel_fix_attempt, etc.)
+    meta: Optional[Dict[str, Any]] = Field(
+        default=None, description="Work packet meta to pass through to orchestrator"
+    )
 
 
 class CompleteTaskResponse(BaseModel):
@@ -894,6 +898,8 @@ async def complete_task(
                 # Phase 2.2: Phase timing breakdown
                 "coder_duration_ms": request.coder_duration_ms,
                 "reviewer_duration_ms": request.reviewer_duration_ms,
+                # Work packet meta passthrough (ao_panel_fix_attempt, etc.)
+                "meta": request.meta,
             }
             redis.lpush(approved_queue_key, json.dumps(publish_data))
             queued_for_publish = True
