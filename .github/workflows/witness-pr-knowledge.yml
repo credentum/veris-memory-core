@@ -192,14 +192,17 @@ jobs:
         run: |
           CONTEXT_ID="${{ steps.store.outputs.context_id }}"
 
-          gh pr comment "${{ github.event.pull_request.number }}" --body "**Veris Memory:** PR knowledge stored.
+          gh pr comment "${{ github.event.pull_request.number }}" --body "$(cat <<EOF
+          **Veris Memory:** PR knowledge stored.
 
-\`\`\`
-Context ID: $CONTEXT_ID
-Recovery Query: \"PR ${{ github.event.pull_request.number }} ${{ github.repository }}\"
-\`\`\`
+          \`\`\`
+          Context ID: $CONTEXT_ID
+          Recovery Query: PR ${{ github.event.pull_request.number }} ${{ github.repository }}
+          \`\`\`
 
-Future agents can retrieve this decision context from Veris Memory."
+          Future agents can retrieve this decision context from Veris Memory.
+          EOF
+          )"
 
       - name: Summary
         run: |
