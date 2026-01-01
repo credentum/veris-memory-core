@@ -192,24 +192,32 @@ jobs:
         run: |
           CONTEXT_ID="${{ steps.store.outputs.context_id }}"
 
-          gh pr comment "${{ github.event.pull_request.number }}" --body "**Veris Memory:** PR knowledge stored.
+          gh pr comment "${{ github.event.pull_request.number }}" --body "$(cat <<EOF
+          **Veris Memory:** PR knowledge stored.
 
-\`\`\`
-Context ID: $CONTEXT_ID
-Recovery Query: \"PR ${{ github.event.pull_request.number }} ${{ github.repository }}\"
-\`\`\`
+          \`\`\`
+          Context ID: $CONTEXT_ID
+          Recovery Query: PR ${{ github.event.pull_request.number }} ${{ github.repository }}
+          \`\`\`
 
-Future agents can retrieve this decision context from Veris Memory."
+          Future agents can retrieve this decision context from Veris Memory.
+          EOF
+          )"
 
       - name: Summary
+        env:
+          # Use env vars to prevent command injection from user-controlled inputs
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           echo "## PR Knowledge Ingestion" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| PR | #${{ github.event.pull_request.number }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Title | ${{ github.event.pull_request.title }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Author | @${{ github.event.pull_request.user.login }} |" >> $GITHUB_STEP_SUMMARY
+          # Use printf to safely handle user-controlled content (prevents command injection)
+          printf '| Title | %s |\n' "$PR_TITLE" >> $GITHUB_STEP_SUMMARY
+          printf '| Author | @%s |\n' "$PR_AUTHOR" >> $GITHUB_STEP_SUMMARY
           echo "| Body Length | ${{ steps.quality.outputs.body_length }} chars |" >> $GITHUB_STEP_SUMMARY
           echo "| Has Structure | ${{ steps.quality.outputs.has_structure }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Skipped | ${{ steps.quality.outputs.skip }} |" >> $GITHUB_STEP_SUMMARY
