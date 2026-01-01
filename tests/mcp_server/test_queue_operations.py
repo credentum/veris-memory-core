@@ -1739,3 +1739,540 @@ class TestGetPacketTrace:
             assert response.success is True
             assert response.current_state == "stuck"
             assert len(response.stuck_packets) > 0
+
+
+# =============================================================================
+# Tests for Rejection Details Helper Functions (PR #106)
+# =============================================================================
+
+
+class TestParseAoPanelFromOutcome:
+    """Tests for _parse_ao_panel_from_outcome helper function."""
+
+    def test_empty_string(self):
+        """Test with empty string input."""
+        result = queue_operations._parse_ao_panel_from_outcome("")
+        assert result == []
+
+    def test_none_input(self):
+        """Test with None input (should handle gracefully)."""
+        result = queue_operations._parse_ao_panel_from_outcome(None)
+        assert result == []
+
+    def test_no_ao_panel_section(self):
+        """Test with string that doesn't contain 'AO Panel Issues:'."""
+        result = queue_operations._parse_ao_panel_from_outcome("Some other rejection reason")
+        assert result == []
+
+    def test_single_expert_issue(self):
+        """Test with single expert issue."""
+        outcome = "Rejected. AO Panel Issues: [Ledger] Missing authorization check"
+        result = queue_operations._parse_ao_panel_from_outcome(outcome)
+        assert len(result) == 1
+        assert "[Ledger] Missing authorization check" in result[0]
+
+    def test_multiple_expert_issues(self):
+        """Test with multiple expert issues."""
+        outcome = (
+            "Code review failed. AO Panel Issues: "
+            "[Ledger] No msg.From check; [Patch] Schema validation missing; "
+            "[Nova] Parameter bounds not enforced"
+        )
+        result = queue_operations._parse_ao_panel_from_outcome(outcome)
+        assert len(result) == 3
+        assert any("Ledger" in r for r in result)
+        assert any("Patch" in r for r in result)
+        assert any("Nova" in r for r in result)
+
+    def test_malformed_pattern(self):
+        """Test with malformed pattern (missing brackets)."""
+        outcome = "AO Panel Issues: Some issue without brackets"
+        result = queue_operations._parse_ao_panel_from_outcome(outcome)
+        # Should not crash, may return empty or partial
+        assert isinstance(result, list)
+
+    def test_nested_brackets(self):
+        """Test with nested brackets in description."""
+        outcome = "AO Panel Issues: [Ledger] Check msg.From [required] for auth"
+        result = queue_operations._parse_ao_panel_from_outcome(outcome)
+        assert len(result) >= 1
+        assert "Ledger" in result[0]
+
+
+class TestExtractRejectionDetails:
+    """Tests for _extract_rejection_details helper function."""
+
+    def test_none_metadata(self):
+        """Test with None metadata."""
+        result = queue_operations._extract_rejection_details(None)
+        assert result is None
+
+    def test_empty_metadata(self):
+        """Test with empty metadata dict."""
+        result = queue_operations._extract_rejection_details({})
+        assert result is None
+
+    def test_no_rejection_approve_verdict(self):
+        """Test with APPROVE verdict (no rejection)."""
+        metadata = {"review_verdict": "APPROVE", "some_field": "value"}
+        result = queue_operations._extract_rejection_details(metadata)
+        assert result is None
+
+    def test_reject_verdict(self):
+        """Test with REJECT verdict."""
+        metadata = {
+            "review_verdict": "REJECT",
+            "rejection_reason": "Code has security issues",
+            "static_analysis_summary": "luac:PASS, ao-lens:WARN(3)",
+            "ao_lens": {"issues": ["NO_AUTH_CHECK", "NIL_GUARD_REQUIRED"]},
+            "test_results": {"passed": False, "failed_tests": 2},
+        }
+        result = queue_operations._extract_rejection_details(metadata)
+        assert result is not None
+        assert result["llm_reviewer"] == "Code has security issues"
+        assert result["static_analysis"] == "luac:PASS, ao-lens:WARN(3)"
+        assert len(result["ao_lens_issues"]) == 2
+        assert result["test_results"]["passed"] is False
+
+    def test_escalate_verdict(self):
+        """Test with ESCALATE verdict."""
+        metadata = {
+            "review_verdict": "ESCALATE",
+            "rejection_reason": "Needs human review",
+        }
+        result = queue_operations._extract_rejection_details(metadata)
+        assert result is not None
+        assert result["llm_reviewer"] == "Needs human review"
+
+    def test_rejection_reason_without_verdict(self):
+        """Test with rejection_reason but no explicit verdict."""
+        metadata = {
+            "rejection_reason": "Failed static analysis",
+        }
+        result = queue_operations._extract_rejection_details(metadata)
+        assert result is not None
+        assert result["llm_reviewer"] == "Failed static analysis"
+
+    def test_ao_panel_in_final_outcome_reason(self):
+        """Test extraction of AO Panel issues from final_outcome_reason."""
+        metadata = {
+            "review_verdict": "REJECT",
+            "rejection_reason": "AO Panel rejected",
+            "final_outcome_reason": (
+                "FAILURE: AO Panel Issues: [Ledger] Missing auth; [Nova] No bounds"
+            ),
+        }
+        result = queue_operations._extract_rejection_details(metadata)
+        assert result is not None
+        assert len(result["ao_panel"]) == 2
+
+    def test_partial_rejection_data(self):
+        """Test with partial rejection data (some fields missing)."""
+        metadata = {
+            "review_verdict": "REJECT",
+            # No rejection_reason, no ao_lens, no test_results
+        }
+        result = queue_operations._extract_rejection_details(metadata)
+        assert result is not None
+        assert result["llm_reviewer"] is None
+        assert result["ao_lens_issues"] == []
+        assert result["test_results"] is None
+
+    def test_ao_lens_issues_limit(self):
+        """Test that ao_lens issues are limited to 5."""
+        metadata = {
+            "review_verdict": "REJECT",
+            "ao_lens": {"issues": [f"ISSUE_{i}" for i in range(10)]},
+        }
+        result = queue_operations._extract_rejection_details(metadata)
+        assert result is not None
+        assert len(result["ao_lens_issues"]) == 5
+
+
+class TestSummarizeRejection:
+    """Tests for _summarize_rejection helper function."""
+
+    def test_none_input(self):
+        """Test with None input."""
+        result = queue_operations._summarize_rejection(None)
+        assert result == []
+
+    def test_empty_dict(self):
+        """Test with empty dict."""
+        result = queue_operations._summarize_rejection({})
+        assert result == []
+
+    def test_ao_lens_issues_only(self):
+        """Test with only ao-lens issues."""
+        rejection_reasons = {
+            "ao_lens_issues": ["NO_AUTH", "NIL_GUARD", "JSON_DECODE"],
+        }
+        result = queue_operations._summarize_rejection(rejection_reasons)
+        assert "ao-lens:3 issues" in result
+
+    def test_ao_panel_issues_only(self):
+        """Test with only ao_panel issues."""
+        rejection_reasons = {
+            "ao_panel": ["[Ledger] Missing auth", "[Nova] No bounds"],
+        }
+        result = queue_operations._summarize_rejection(rejection_reasons)
+        assert "ao_panel:2 issues" in result
+
+    def test_llm_reviewer_rejection(self):
+        """Test with LLM reviewer rejection."""
+        rejection_reasons = {
+            "llm_reviewer": "Code does not meet requirements",
+        }
+        result = queue_operations._summarize_rejection(rejection_reasons)
+        assert "llm_reviewer:rejected" in result
+
+    def test_static_analysis_failure(self):
+        """Test with static analysis failure."""
+        rejection_reasons = {
+            "static_analysis": "luac:FAIL, ao-lens:PASS",
+        }
+        result = queue_operations._summarize_rejection(rejection_reasons)
+        assert "static:failed" in result
+
+    def test_test_failures(self):
+        """Test with test failures."""
+        rejection_reasons = {
+            "test_results": {"passed": False, "failed_tests": 3},
+        }
+        result = queue_operations._summarize_rejection(rejection_reasons)
+        assert "tests:3 failed" in result
+
+    def test_all_issue_types(self):
+        """Test with all issue types present."""
+        rejection_reasons = {
+            "ao_lens_issues": ["ISSUE1", "ISSUE2"],
+            "ao_panel": ["[Expert] Issue"],
+            "llm_reviewer": "Rejected",
+            "static_analysis": "tool:FAIL",
+            "test_results": {"passed": False, "failed_tests": 1},
+        }
+        result = queue_operations._summarize_rejection(rejection_reasons)
+        assert len(result) >= 4  # At least ao-lens, ao_panel, llm, static, tests
+
+    def test_empty_issues_returns_rejected(self):
+        """Test that empty but present reasons returns ['rejected']."""
+        rejection_reasons = {
+            "ao_lens_issues": [],
+            "ao_panel": [],
+            "llm_reviewer": None,
+        }
+        result = queue_operations._summarize_rejection(rejection_reasons)
+        # Should return ["rejected"] as fallback
+        assert "rejected" in result
+
+
+class TestRejectionModels:
+    """Tests for RejectionDetails and AttemptDetail Pydantic models."""
+
+    def test_rejection_details_defaults(self):
+        """Test RejectionDetails model with defaults."""
+        details = queue_operations.RejectionDetails()
+        assert details.static_analysis is None
+        assert details.ao_lens_issues == []
+        assert details.llm_reviewer is None
+        assert details.ao_panel == []
+        assert details.test_results is None
+
+    def test_rejection_details_all_fields(self):
+        """Test RejectionDetails model with all fields."""
+        details = queue_operations.RejectionDetails(
+            static_analysis="luac:PASS",
+            ao_lens_issues=["NO_AUTH"],
+            llm_reviewer="Rejected",
+            ao_panel=["[Ledger] Issue"],
+            test_results={"passed": False},
+        )
+        assert details.static_analysis == "luac:PASS"
+        assert details.ao_lens_issues == ["NO_AUTH"]
+        assert details.llm_reviewer == "Rejected"
+        assert details.ao_panel == ["[Ledger] Issue"]
+        assert details.test_results == {"passed": False}
+
+    def test_attempt_detail_required_fields(self):
+        """Test AttemptDetail model requires certain fields."""
+        # These fields are required
+        attempt = queue_operations.AttemptDetail(
+            attempt=1,
+            outcome="failure",
+            agent="coding_agent",
+            timestamp="2025-01-01T00:00:00Z",
+        )
+        assert attempt.attempt == 1
+        assert attempt.outcome == "failure"
+        assert attempt.agent == "coding_agent"
+        assert attempt.timestamp == "2025-01-01T00:00:00Z"
+
+    def test_attempt_detail_optional_fields(self):
+        """Test AttemptDetail model optional fields."""
+        attempt = queue_operations.AttemptDetail(
+            attempt=2,
+            outcome="failure",
+            agent="coding_agent",
+            timestamp="2025-01-01T00:00:00Z",
+            duration_ms=5000.0,
+            files_modified=["ao/pid.lua"],
+            rejection_reasons=queue_operations.RejectionDetails(
+                ao_lens_issues=["NO_AUTH"]
+            ),
+        )
+        assert attempt.duration_ms == 5000.0
+        assert attempt.files_modified == ["ao/pid.lua"]
+        assert attempt.rejection_reasons is not None
+        assert attempt.rejection_reasons.ao_lens_issues == ["NO_AUTH"]
+
+    def test_attempt_detail_defaults(self):
+        """Test AttemptDetail model default values."""
+        attempt = queue_operations.AttemptDetail(
+            attempt=1,
+            outcome="success",
+            agent="coding_agent",
+            timestamp="2025-01-01T00:00:00Z",
+        )
+        assert attempt.duration_ms is None
+        assert attempt.files_modified == []
+        assert attempt.rejection_reasons is None
+
+
+class TestGetPacketTraceAttemptsAndRejections:
+    """Tests for get_packet_trace with multiple attempts and rejection details."""
+
+    @pytest.mark.asyncio
+    async def test_multiple_attempts_builds_attempts_list(self):
+        """Test that multiple trajectories for same work packet build attempts list."""
+        mock_redis = Mock()
+
+        now = datetime.now(timezone.utc)
+        ts1 = now.isoformat()
+        ts2 = (now.replace(second=30) if now.second < 30 else now).isoformat()
+
+        saga_data = {
+            "wp-001": {
+                "packet": {"packet_id": "wp-001"},
+                "status": "completed",
+                "claimed_at": ts1,
+            }
+        }
+        mock_redis.get.return_value = json.dumps(saga_data)
+        mock_redis.xrange.return_value = []
+
+        with patch('httpx.AsyncClient') as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            # Return multiple trajectories for same task_id (multiple attempts)
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "trajectories": [
+                    {
+                        "task_id": "test-packet-wp-001",
+                        "outcome": "failure",
+                        "agent": "coding_agent",
+                        "timestamp": ts1,
+                        "duration_ms": 5000.0,
+                        "metadata": {
+                            "files_modified": ["ao/pid.lua"],
+                            "review_verdict": "REJECT",
+                            "rejection_reason": "Missing auth check",
+                            "ao_lens": {"issues": ["NO_AUTH_CHECK"]},
+                        }
+                    },
+                    {
+                        "task_id": "test-packet-wp-001",
+                        "outcome": "success",
+                        "agent": "coding_agent",
+                        "timestamp": ts2,
+                        "duration_ms": 4000.0,
+                        "metadata": {
+                            "files_modified": ["ao/pid.lua"],
+                            "review_verdict": "APPROVE",
+                        }
+                    }
+                ]
+            }
+            mock_client.post.return_value = mock_response
+
+            request = queue_operations.PacketTraceRequest(
+                packet_id="test-packet",
+                user_id="dev_team"
+            )
+
+            response = await queue_operations.get_packet_trace(request, mock_redis)
+
+            assert response.success is True
+            assert len(response.work_packets) == 1
+
+            wp = response.work_packets[0]
+            assert wp.total_attempts == 2
+            assert len(wp.attempts) == 2
+
+            # First attempt should be failure with rejection details
+            first_attempt = wp.attempts[0]
+            assert first_attempt.attempt == 1
+            assert first_attempt.outcome == "failure"
+            assert first_attempt.rejection_reasons is not None
+            assert "NO_AUTH_CHECK" in first_attempt.rejection_reasons.ao_lens_issues
+
+            # Second attempt should be success
+            second_attempt = wp.attempts[1]
+            assert second_attempt.attempt == 2
+            assert second_attempt.outcome == "success"
+
+    @pytest.mark.asyncio
+    async def test_attempt_rejected_timeline_events(self):
+        """Test that attempt_rejected events appear in timeline."""
+        mock_redis = Mock()
+
+        now = datetime.now(timezone.utc)
+        ts1 = now.isoformat()
+
+        saga_data = {
+            "wp-001": {
+                "packet": {"packet_id": "wp-001"},
+                "status": "intervention",
+            }
+        }
+        mock_redis.get.return_value = json.dumps(saga_data)
+        mock_redis.xrange.return_value = []
+
+        with patch('httpx.AsyncClient') as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "trajectories": [
+                    {
+                        "task_id": "test-packet-wp-001",
+                        "outcome": "failure",
+                        "agent": "coding_agent",
+                        "timestamp": ts1,
+                        "duration_ms": 5000.0,
+                        "metadata": {
+                            "review_verdict": "REJECT",
+                            "rejection_reason": "Security issues found",
+                            "ao_lens": {"issues": ["NO_AUTH_CHECK", "NIL_GUARD"]},
+                        }
+                    }
+                ]
+            }
+            mock_client.post.return_value = mock_response
+
+            request = queue_operations.PacketTraceRequest(
+                packet_id="test-packet",
+                user_id="dev_team"
+            )
+
+            response = await queue_operations.get_packet_trace(request, mock_redis)
+
+            assert response.success is True
+
+            # Find attempt_rejected event in timeline
+            rejected_events = [
+                e for e in response.timeline
+                if e.event == "attempt_rejected"
+            ]
+            assert len(rejected_events) >= 1
+
+            rejected_event = rejected_events[0]
+            assert rejected_event.source == "trajectory"
+            assert "reasons" in (rejected_event.details or {})
+
+    @pytest.mark.asyncio
+    async def test_final_outcome_escalated(self):
+        """Test that final_outcome is 'escalated' for intervention status."""
+        mock_redis = Mock()
+
+        now = datetime.now(timezone.utc)
+        saga_data = {
+            "wp-001": {
+                "packet": {"packet_id": "wp-001"},
+                "status": "intervention",
+            }
+        }
+        mock_redis.get.return_value = json.dumps(saga_data)
+        mock_redis.xrange.return_value = []
+
+        with patch('httpx.AsyncClient') as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "trajectories": [
+                    {
+                        "task_id": "test-packet-wp-001",
+                        "outcome": "failure",
+                        "agent": "coding_agent",
+                        "timestamp": now.isoformat(),
+                        "metadata": {"review_verdict": "REJECT"},
+                    }
+                ]
+            }
+            mock_client.post.return_value = mock_response
+
+            request = queue_operations.PacketTraceRequest(
+                packet_id="test-packet",
+                user_id="dev_team"
+            )
+
+            response = await queue_operations.get_packet_trace(request, mock_redis)
+
+            assert response.success is True
+            wp = response.work_packets[0]
+            assert wp.final_outcome == "escalated"
+
+    @pytest.mark.asyncio
+    async def test_files_modified_in_attempts(self):
+        """Test that files_modified is captured per attempt."""
+        mock_redis = Mock()
+
+        now = datetime.now(timezone.utc)
+        saga_data = {
+            "wp-001": {
+                "packet": {"packet_id": "wp-001"},
+                "status": "completed",
+            }
+        }
+        mock_redis.get.return_value = json.dumps(saga_data)
+        mock_redis.xrange.return_value = []
+
+        with patch('httpx.AsyncClient') as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "trajectories": [
+                    {
+                        "task_id": "test-packet-wp-001",
+                        "outcome": "success",
+                        "agent": "coding_agent",
+                        "timestamp": now.isoformat(),
+                        "metadata": {
+                            "files_modified": ["ao/pid.lua", "ao/utils.lua"],
+                        }
+                    }
+                ]
+            }
+            mock_client.post.return_value = mock_response
+
+            request = queue_operations.PacketTraceRequest(
+                packet_id="test-packet",
+                user_id="dev_team"
+            )
+
+            response = await queue_operations.get_packet_trace(request, mock_redis)
+
+            assert response.success is True
+            wp = response.work_packets[0]
+            assert len(wp.attempts) == 1
+            assert wp.attempts[0].files_modified == ["ao/pid.lua", "ao/utils.lua"]
