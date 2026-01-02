@@ -500,5 +500,5 @@ class TestSearchTrajectoriesEndpoint:
             # Verify the filter contains a condition for parent_packet_id
             filter_conditions = scroll_filter.must
             assert len(filter_conditions) == 1
-            assert filter_conditions[0].key == "parent_packet_id"
+            assert filter_conditions[0].key == "metadata.parent_packet_id"
             assert filter_conditions[0].match.value == "ao-suite-20251226"
