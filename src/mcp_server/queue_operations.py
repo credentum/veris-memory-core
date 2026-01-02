@@ -1725,6 +1725,49 @@ async def cleanup_stale_wip(
 # =============================================================================
 
 
+def _parse_ao_lens_from_outcome(outcome_reason: str) -> List[str]:
+    """
+    Extract ao-lens issues from final_outcome_reason string.
+
+    Parses issues from format like:
+    - **[CRITICAL]** {'source': 'ao-lens', 'code': 'NIL_EQUALITY_SECURITY', 'message': '...'}
+    Or from section like:
+    ### ao-lens (2 errors)
+    - /path/file.lua:25: [CRITICAL] message
+    """
+    issues = []
+    if not outcome_reason:
+        return issues
+
+    # Parse structured issue dicts from LLM Review Issues section
+    # Format: {'source': 'ao-lens', 'code': 'NIL_EQUALITY_SECURITY', 'message': '...'}
+    import ast
+    for match in re.finditer(r"\{'source': 'ao-lens'[^}]+\}", outcome_reason):
+        try:
+            issue_dict = ast.literal_eval(match.group())
+            code = issue_dict.get("code", "UNKNOWN")
+            severity = issue_dict.get("severity", "medium").upper()
+            message = issue_dict.get("message", "")[:80]
+            issues.append(f"[{severity}] {code}: {message}")
+        except Exception:
+            pass
+
+    # Also parse simpler format: /path:line: [SEVERITY] message
+    for match in re.finditer(r":(\d+): \[(\w+)\] (.+?)(?=\n|$)", outcome_reason):
+        line, severity, msg = match.groups()
+        issues.append(f"[{severity}] line {line}: {msg[:60]}")
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for issue in issues:
+        if issue not in seen:
+            seen.add(issue)
+            unique.append(issue)
+
+    return unique[:10]  # Cap at 10 issues
+
+
 def _parse_ao_panel_from_outcome(outcome_reason: str) -> List[str]:
     """
     Extract AO Panel issues from final_outcome_reason string.
@@ -1763,14 +1806,29 @@ def _extract_rejection_details(metadata: Optional[Dict[str, Any]]) -> Optional[D
     # Only include if there was a rejection
     rejection_reason = metadata.get("rejection_reason")
     review_verdict = metadata.get("review_verdict")
+    final_outcome = metadata.get("final_outcome_reason", "")
 
     # If not rejected, return None
-    if not rejection_reason and review_verdict not in ("REJECT", "ESCALATE"):
+    # Check multiple signals: explicit rejection_reason, review verdict, or FAILURE in outcome
+    has_rejection = (
+        rejection_reason or
+        review_verdict in ("REJECT", "ESCALATE") or
+        "FAILURE:" in final_outcome or
+        "REJECTED" in final_outcome
+    )
+    if not has_rejection:
         return None
+
+    # Get ao-lens issues: first try structured field, then parse from outcome text
+    ao_lens_issues = (metadata.get("ao_lens") or {}).get("issues", [])[:5]
+    if not ao_lens_issues:
+        ao_lens_issues = _parse_ao_lens_from_outcome(
+            metadata.get("final_outcome_reason", "")
+        )
 
     return {
         "static_analysis": metadata.get("static_analysis_summary"),
-        "ao_lens_issues": (metadata.get("ao_lens") or {}).get("issues", [])[:5],
+        "ao_lens_issues": ao_lens_issues,
         "llm_reviewer": metadata.get("rejection_reason"),
         "ao_panel": _parse_ao_panel_from_outcome(
             metadata.get("final_outcome_reason", "")
