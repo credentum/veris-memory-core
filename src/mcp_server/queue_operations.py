@@ -1725,6 +1725,49 @@ async def cleanup_stale_wip(
 # =============================================================================
 
 
+def _parse_ao_lens_from_outcome(outcome_reason: str) -> List[str]:
+    """
+    Extract ao-lens issues from final_outcome_reason string.
+
+    Parses issues from format like:
+    - **[CRITICAL]** {'source': 'ao-lens', 'code': 'NIL_EQUALITY_SECURITY', 'message': '...'}
+    Or from section like:
+    ### ao-lens (2 errors)
+    - /path/file.lua:25: [CRITICAL] message
+    """
+    issues = []
+    if not outcome_reason:
+        return issues
+
+    # Parse structured issue dicts from LLM Review Issues section
+    # Format: {'source': 'ao-lens', 'code': 'NIL_EQUALITY_SECURITY', 'message': '...'}
+    import ast
+    for match in re.finditer(r"\{'source': 'ao-lens'[^}]+\}", outcome_reason):
+        try:
+            issue_dict = ast.literal_eval(match.group())
+            code = issue_dict.get("code", "UNKNOWN")
+            severity = issue_dict.get("severity", "medium").upper()
+            message = issue_dict.get("message", "")[:80]
+            issues.append(f"[{severity}] {code}: {message}")
+        except Exception:
+            pass
+
+    # Also parse simpler format: /path:line: [SEVERITY] message
+    for match in re.finditer(r":(\d+): \[(\w+)\] (.+?)(?=\n|$)", outcome_reason):
+        line, severity, msg = match.groups()
+        issues.append(f"[{severity}] line {line}: {msg[:60]}")
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for issue in issues:
+        if issue not in seen:
+            seen.add(issue)
+            unique.append(issue)
+
+    return unique[:10]  # Cap at 10 issues
+
+
 def _parse_ao_panel_from_outcome(outcome_reason: str) -> List[str]:
     """
     Extract AO Panel issues from final_outcome_reason string.
@@ -1763,14 +1806,29 @@ def _extract_rejection_details(metadata: Optional[Dict[str, Any]]) -> Optional[D
     # Only include if there was a rejection
     rejection_reason = metadata.get("rejection_reason")
     review_verdict = metadata.get("review_verdict")
+    final_outcome = metadata.get("final_outcome_reason", "")
 
     # If not rejected, return None
-    if not rejection_reason and review_verdict not in ("REJECT", "ESCALATE"):
+    # Check multiple signals: explicit rejection_reason, review verdict, or FAILURE in outcome
+    has_rejection = (
+        rejection_reason or
+        review_verdict in ("REJECT", "ESCALATE") or
+        "FAILURE:" in final_outcome or
+        "REJECTED" in final_outcome
+    )
+    if not has_rejection:
         return None
+
+    # Get ao-lens issues: first try structured field, then parse from outcome text
+    ao_lens_issues = (metadata.get("ao_lens") or {}).get("issues", [])[:5]
+    if not ao_lens_issues:
+        ao_lens_issues = _parse_ao_lens_from_outcome(
+            metadata.get("final_outcome_reason", "")
+        )
 
     return {
         "static_analysis": metadata.get("static_analysis_summary"),
-        "ao_lens_issues": (metadata.get("ao_lens") or {}).get("issues", [])[:5],
+        "ao_lens_issues": ao_lens_issues,
         "llm_reviewer": metadata.get("rejection_reason"),
         "ao_panel": _parse_ao_panel_from_outcome(
             metadata.get("final_outcome_reason", "")
@@ -2084,14 +2142,32 @@ async def get_packet_trace(
             if saga_status == "completed" or traj_outcome == "success":
                 completed_count += 1
 
-            # NEW: Build attempts list from ALL trajectories for this work packet
+            # NEW: Build attempts list from completion trajectories only
+            # Only include reviewer_completed (has verdict) or final coder failure (has final_outcome_reason)
             attempts: List[AttemptDetail] = []
             wp_trajectories = all_trajectories_by_wp.get(full_wp_id) or all_trajectories_by_wp.get(wp_id) or []
             # Sort by timestamp to get chronological order
             wp_trajectories.sort(key=lambda t: t.get("timestamp", ""))
 
-            for attempt_num, attempt_traj in enumerate(wp_trajectories, 1):
+            # Filter to only completion events that represent actual attempts
+            completion_milestones = {"reviewer_completed", "coder_completed"}
+            attempt_num = 0
+            for attempt_traj in wp_trajectories:
                 attempt_metadata = attempt_traj.get("metadata", {}) or {}
+                milestone = attempt_metadata.get("milestone")
+                outcome = attempt_traj.get("outcome")
+                has_final_outcome = bool(attempt_metadata.get("final_outcome_reason"))
+
+                # Only count as attempt if: reviewer_completed, coder_completed, or final failure with outcome
+                is_completion = (
+                    milestone in completion_milestones or
+                    (outcome == "failure" and has_final_outcome) or
+                    (outcome == "success" and attempt_traj.get("agent") == "coding_agent")
+                )
+                if not is_completion:
+                    continue
+
+                attempt_num += 1
                 rejection_details_dict = _extract_rejection_details(attempt_metadata)
 
                 # Convert to RejectionDetails model if we have rejection data
