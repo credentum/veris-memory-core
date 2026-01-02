@@ -2033,7 +2033,7 @@ async def get_packet_trace(
             async with httpx.AsyncClient() as client:
                 resp = await client.post(
                     f"{INTERNAL_API_BASE_URL}/api/v1/trajectories/search",
-                    json={"parent_packet_id": request.packet_id, "limit": 200},
+                    json={"parent_packet_id": request.packet_id, "limit": 100},
                     timeout=10.0
                 )
                 if resp.status_code == 200:
