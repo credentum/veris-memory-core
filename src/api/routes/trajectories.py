@@ -259,7 +259,7 @@ async def search_trajectories(
         # Filter by parent_packet_id to find all work packet trajectories for a saga
         if request.parent_packet_id:
             filter_conditions.append(
-                FieldCondition(key="parent_packet_id", match=MatchValue(value=request.parent_packet_id))
+                FieldCondition(key="metadata.parent_packet_id", match=MatchValue(value=request.parent_packet_id))
             )
 
         # Time filter using timestamp_unix (new records only - old records may not have this field)
