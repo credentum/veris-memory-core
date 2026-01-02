@@ -2142,14 +2142,32 @@ async def get_packet_trace(
             if saga_status == "completed" or traj_outcome == "success":
                 completed_count += 1
 
-            # NEW: Build attempts list from ALL trajectories for this work packet
+            # NEW: Build attempts list from completion trajectories only
+            # Only include reviewer_completed (has verdict) or final coder failure (has final_outcome_reason)
             attempts: List[AttemptDetail] = []
             wp_trajectories = all_trajectories_by_wp.get(full_wp_id) or all_trajectories_by_wp.get(wp_id) or []
             # Sort by timestamp to get chronological order
             wp_trajectories.sort(key=lambda t: t.get("timestamp", ""))
 
-            for attempt_num, attempt_traj in enumerate(wp_trajectories, 1):
+            # Filter to only completion events that represent actual attempts
+            completion_milestones = {"reviewer_completed", "coder_completed"}
+            attempt_num = 0
+            for attempt_traj in wp_trajectories:
                 attempt_metadata = attempt_traj.get("metadata", {}) or {}
+                milestone = attempt_metadata.get("milestone")
+                outcome = attempt_traj.get("outcome")
+                has_final_outcome = bool(attempt_metadata.get("final_outcome_reason"))
+
+                # Only count as attempt if: reviewer_completed, coder_completed, or final failure with outcome
+                is_completion = (
+                    milestone in completion_milestones or
+                    (outcome == "failure" and has_final_outcome) or
+                    (outcome == "success" and attempt_traj.get("agent") == "coding_agent")
+                )
+                if not is_completion:
+                    continue
+
+                attempt_num += 1
                 rejection_details_dict = _extract_rejection_details(attempt_metadata)
 
                 # Convert to RejectionDetails model if we have rejection data
