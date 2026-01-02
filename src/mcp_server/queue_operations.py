@@ -1923,28 +1923,6 @@ class WorkPacketTrace(BaseModel):
     final_outcome: Optional[str] = Field(None, description="Final outcome: success, failure, escalated")
 
 
-class TimelineEventDetails(TypedDict, total=False):
-    """Type hints for common timeline event detail fields."""
-
-    # Saga event details
-    workspace_path: str
-    branch_name: str
-    agent_id: str
-
-    # Trajectory event details
-    outcome: str  # success, failure, partial
-    agent: str  # coding_agent, reviewer, architect
-    duration_ms: float
-    error: Optional[str]
-
-    # Rejection event details (NEW)
-    attempt: int
-    reasons: List[str]  # Summary like ["ao-lens:3 issues", "ao_panel:2 issues"]
-
-    # Raw details for unknown event types
-    raw: str
-
-
 class TimelineEvent(BaseModel):
     """A single event in the packet timeline."""
 
@@ -1952,7 +1930,8 @@ class TimelineEvent(BaseModel):
     event: str = Field(..., description="Event type")
     packet_id: str = Field(..., description="Work packet ID")
     source: str = Field(..., description="Event source: saga, trajectory, or orchestrator")
-    details: Optional[TimelineEventDetails] = Field(None, description="Additional details")
+    # Use Dict[str, Any] to allow arbitrary event details (ao_panel, saga, trajectory, etc.)
+    details: Optional[Dict[str, Any]] = Field(None, description="Additional details")
 
 
 class PacketTraceResponse(BaseModel):
