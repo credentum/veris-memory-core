@@ -29,7 +29,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
-from ..core.mediator import CovenantMediator
+from ..core.mediator import (
+    CovenantMediator,
+    CROSS_ENCODER_NOVELTY_THRESHOLD,
+    CROSS_ENCODER_SURPRISE_BOOST,
+)
 from ..models.evaluation import (
     ConflictSeverity,
     EvaluationAction,
@@ -37,14 +41,6 @@ from ..models.evaluation import (
     MemoryEvaluation,
 )
 from ..storage.rejection_store import RejectionStore, get_rejection_store
-
-# Cross-encoder configuration
-CROSS_ENCODER_NOVELTY_THRESHOLD = float(
-    os.environ.get("CROSS_ENCODER_NOVELTY_THRESHOLD", "0.0")
-)
-CROSS_ENCODER_SURPRISE_BOOST = float(
-    os.environ.get("CROSS_ENCODER_SURPRISE_BOOST", "0.15")
-)
 
 # Feature flag
 COVENANT_MEDIATOR_ENABLED = (

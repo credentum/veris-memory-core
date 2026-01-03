@@ -642,5 +642,215 @@ class TestIntegrationScenarios:
             assert result.action == EvaluationAction.CONFLICT
 
 
+class TestExtractContentText:
+    """Test suite for _extract_content_text() helper method (PR #110)."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.validator = CovenantValidator(
+            mediator=MagicMock(spec=CovenantMediator),
+            qdrant_client=MagicMock(),
+            neo4j_client=MagicMock(),
+        )
+
+    def test_extract_text_from_dict_with_text(self):
+        """Test extracting text from dict with 'text' field."""
+        content = {"text": "Main text content", "metadata": "ignored"}
+        text = self.validator._extract_content_text(content)
+        assert "Main text content" in text
+
+    def test_extract_text_from_dict_with_title_description(self):
+        """Test extracting text from dict with title and description."""
+        content = {
+            "title": "Important Decision",
+            "description": "We decided to use microservices"
+        }
+        text = self.validator._extract_content_text(content)
+        assert "Important Decision" in text
+        assert "microservices" in text
+
+    def test_extract_text_from_nested_dict(self):
+        """Test extracting text from nested structure."""
+        content = {
+            "title": "Outer Title",
+            "content": {
+                "text": "Nested text content"
+            }
+        }
+        text = self.validator._extract_content_text(content)
+        # Should find text in nested structure
+        assert "Outer Title" in text
+        assert "Nested text content" in text
+
+    def test_extract_text_truncates_long_content(self):
+        """Test that very long content is truncated."""
+        long_text = "x" * 5000  # Very long text
+        content = {"text": long_text}
+        text = self.validator._extract_content_text(content)
+        # Should be truncated to 2000 chars
+        assert len(text) <= 2000
+
+    def test_extract_text_empty_dict(self):
+        """Test extracting text from empty dict."""
+        text = self.validator._extract_content_text({})
+        assert text == ""
+
+    def test_extract_text_from_list_values(self):
+        """Test extracting text when dict values are lists."""
+        content = {
+            "tags": ["python", "api", "design"],
+            "title": "API Design"
+        }
+        text = self.validator._extract_content_text(content)
+        assert "API Design" in text
+
+    def test_extract_text_with_decision_fields(self):
+        """Test extracting text from decision-type content."""
+        content = {
+            "title": "Architecture Decision",
+            "decision": "Use event sourcing",
+            "rationale": "Better audit trail"
+        }
+        text = self.validator._extract_content_text(content)
+        assert "Architecture Decision" in text
+        assert "event sourcing" in text
+        assert "audit trail" in text
+
+
+class TestVectorProbeEnhanced:
+    """Test suite for _vector_probe_enhanced() method (PR #110).
+
+    Tests the enhanced vector probe that uses hybrid search
+    and cross-encoder reranking to detect false-positive matches.
+    """
+
+    def setup_method(self):
+        """Set up test fixtures with mocked dependencies."""
+        self.mock_mediator = MagicMock(spec=CovenantMediator)
+        self.mock_qdrant = MagicMock()
+        self.mock_neo4j = MagicMock()
+
+        self.validator = CovenantValidator(
+            mediator=self.mock_mediator,
+            qdrant_client=self.mock_qdrant,
+            neo4j_client=self.mock_neo4j,
+        )
+
+    @pytest.mark.asyncio
+    async def test_enhanced_probe_with_hybrid_search(self):
+        """Test enhanced probe uses hybrid search when available."""
+        # Mock hybrid_search method on qdrant client
+        mock_results = [
+            {"score": 0.8, "payload": {"content": {"text": "Result 1"}}},
+            {"score": 0.6, "payload": {"content": {"text": "Result 2"}}},
+        ]
+        self.mock_qdrant.hybrid_search = MagicMock(return_value=mock_results)
+
+        # Mock reranker to be disabled (patch at the storage module where it's imported)
+        with patch('src.storage.reranker.get_reranker') as mock_get_reranker:
+            mock_reranker = MagicMock()
+            mock_reranker.enabled = False
+            mock_get_reranker.return_value = mock_reranker
+
+            sparse_vector = {"indices": [1, 2, 3], "values": [0.5, 0.3, 0.2]}
+            similarities, cross_encoder_max = await self.validator._vector_probe_enhanced(
+                embedding=[0.1] * 384,
+                content_text="Test query",
+                sparse_vector=sparse_vector,
+            )
+
+            # Should return similarity scores
+            assert len(similarities) == 2
+            assert similarities[0] == 0.8
+            # hybrid_search should have been called
+            self.mock_qdrant.hybrid_search.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_enhanced_probe_fallback_to_dense(self):
+        """Test enhanced probe falls back to dense search when no sparse vector."""
+        # Mock qdrant without hybrid_search (simulates fallback)
+        del self.mock_qdrant.hybrid_search  # Ensure hybrid_search doesn't exist
+
+        mock_results = [
+            {"score": 0.7, "payload": {}},
+            {"score": 0.5, "payload": {}},
+        ]
+        self.mock_qdrant.search = MagicMock(return_value=mock_results)
+
+        with patch('src.storage.reranker.get_reranker') as mock_get_reranker:
+            mock_reranker = MagicMock()
+            mock_reranker.enabled = False
+            mock_get_reranker.return_value = mock_reranker
+
+            similarities, cross_encoder_max = await self.validator._vector_probe_enhanced(
+                embedding=[0.1] * 384,
+                content_text="Test query",
+                sparse_vector=None,  # No sparse vector
+            )
+
+            # Should use regular dense search
+            assert len(similarities) == 2
+            assert similarities[0] == 0.7
+
+    @pytest.mark.asyncio
+    async def test_enhanced_probe_with_cross_encoder_reranking(self):
+        """Test enhanced probe extracts cross-encoder score from reranked results."""
+        mock_search_results = [
+            {"score": 0.8, "payload": {"content": {"text": "Semantically similar"}}},
+            {"score": 0.75, "payload": {"content": {"text": "Keyword overlap only"}}},
+        ]
+        self.mock_qdrant.search = MagicMock(return_value=mock_search_results)
+
+        # Mock reranked results with cross-encoder scores
+        mock_reranked = [
+            {"score": 0.8, "rerank_score": 2.5, "payload": {}},
+            {"score": 0.75, "rerank_score": -1.0, "payload": {}},
+        ]
+
+        with patch('src.storage.reranker.get_reranker') as mock_get_reranker:
+            mock_reranker = MagicMock()
+            mock_reranker.enabled = True
+            mock_reranker.rerank.return_value = mock_reranked
+            mock_get_reranker.return_value = mock_reranker
+
+            similarities, cross_encoder_max = await self.validator._vector_probe_enhanced(
+                embedding=[0.1] * 384,
+                content_text="Test query",
+                sparse_vector=None,
+            )
+
+            # Should extract max cross-encoder score
+            assert cross_encoder_max == 2.5
+
+    @pytest.mark.asyncio
+    async def test_enhanced_probe_handles_errors_gracefully(self):
+        """Test enhanced probe handles errors and returns empty on failure."""
+        self.mock_qdrant.search = MagicMock(side_effect=Exception("Search failed"))
+
+        similarities, cross_encoder_max = await self.validator._vector_probe_enhanced(
+            embedding=[0.1] * 384,
+            content_text="Test",
+            sparse_vector=None,
+        )
+
+        # Should return empty list on error (fail-open)
+        assert similarities == []
+        assert cross_encoder_max == -10.0
+
+    @pytest.mark.asyncio
+    async def test_enhanced_probe_empty_results(self):
+        """Test enhanced probe with no search results (cold start)."""
+        self.mock_qdrant.search = MagicMock(return_value=[])
+
+        similarities, cross_encoder_max = await self.validator._vector_probe_enhanced(
+            embedding=[0.1] * 384,
+            content_text="First memory in empty system",
+            sparse_vector=None,
+        )
+
+        assert similarities == []
+        assert cross_encoder_max == -10.0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

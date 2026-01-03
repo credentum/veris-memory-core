@@ -16,6 +16,8 @@ import os
 from src.core.mediator import (
     CovenantMediator,
     get_covenant_mediator,
+    CROSS_ENCODER_NOVELTY_THRESHOLD,
+    CROSS_ENCODER_SURPRISE_BOOST,
 )
 from src.models.evaluation import (
     MemoryEvaluation,
@@ -387,6 +389,151 @@ class TestEdgeCases:
         # Cold start: surprise=0.5 (neutral), sparsity=1.0 (no neighbors)
         assert evaluation.surprise_score == 0.5
         assert evaluation.cluster_sparsity == 1.0
+
+
+class TestCrossEncoderVerification:
+    """Test suite for cross-encoder novelty verification (PR #110).
+
+    Tests the cross_encoder_max parameter in evaluate_memory() which
+    detects false-positive similarity matches from keyword overlap.
+    """
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.mediator = CovenantMediator(default_threshold=0.3)
+
+    @pytest.mark.asyncio
+    async def test_cross_encoder_max_none(self):
+        """Test evaluation when cross_encoder_max is None (not provided)."""
+        evaluation = await self.mediator.evaluate_memory(
+            content={"title": "Test content"},
+            embedding=[0.1] * 10,
+            authority=5,
+            context_type="log",
+            top_k_similarities=[0.7, 0.6, 0.5],
+            rare_token_count=0,
+            has_graph_conflict=False,
+            cross_encoder_max=None,  # Not provided
+        )
+
+        # Should work normally without cross-encoder boost
+        assert evaluation.action in [EvaluationAction.PROMOTE, EvaluationAction.REJECT]
+        # Surprise should be calculated from similarities only
+        expected_surprise = 1 - 0.7  # 1 - max_cosine = 0.3
+        assert abs(evaluation.surprise_score - expected_surprise) < 0.1
+
+    @pytest.mark.asyncio
+    async def test_cross_encoder_below_threshold_boosts_surprise(self):
+        """Test that low cross-encoder score boosts surprise (false-positive detection)."""
+        # Scenario: Vector similarity says "similar" but cross-encoder says "not similar"
+        # This indicates keyword overlap, not true semantic similarity
+
+        evaluation = await self.mediator.evaluate_memory(
+            content={"title": "EU AI Act governance for autonomous agents"},
+            embedding=[0.1] * 10,
+            authority=5,
+            context_type="decision",
+            top_k_similarities=[0.85, 0.75, 0.65],  # High similarity (would normally reject)
+            rare_token_count=0,
+            has_graph_conflict=False,
+            cross_encoder_max=-5.0,  # Low score = cross-encoder says "not actually similar"
+        )
+
+        # With high similarity, base surprise = 1 - 0.85 = 0.15
+        # Cross-encoder boost should add CROSS_ENCODER_SURPRISE_BOOST (0.15)
+        # Boosted surprise = 0.15 + 0.15 = 0.30
+        assert evaluation.surprise_score >= 0.25  # Should be boosted
+
+    @pytest.mark.asyncio
+    async def test_cross_encoder_above_threshold_no_boost(self):
+        """Test that high cross-encoder score doesn't boost surprise."""
+        # Scenario: Both vector similarity and cross-encoder agree content is similar
+        # No false-positive detected, no boost needed
+
+        evaluation = await self.mediator.evaluate_memory(
+            content={"title": "Duplicate content"},
+            embedding=[0.1] * 10,
+            authority=5,
+            context_type="log",
+            top_k_similarities=[0.9, 0.85, 0.8],  # High similarity
+            rare_token_count=0,
+            has_graph_conflict=False,
+            cross_encoder_max=2.5,  # High score = cross-encoder confirms similarity
+        )
+
+        # Base surprise = 1 - 0.9 = 0.1
+        # No boost should be applied since cross_encoder_max >= threshold
+        assert evaluation.surprise_score <= 0.15  # Should NOT be boosted
+
+    @pytest.mark.asyncio
+    async def test_cross_encoder_boost_can_promote_borderline_content(self):
+        """Test that cross-encoder boost can change rejection to promotion."""
+        # Scenario: Content that would normally be rejected becomes promoted
+        # when cross-encoder detects false-positive similarity
+
+        # First, verify it would be rejected without cross-encoder
+        eval_without = await self.mediator.evaluate_memory(
+            content={"title": "ETHOS paper on EU AI Act"},
+            embedding=[0.1] * 10,
+            authority=5,
+            context_type="decision",  # threshold = 0.4
+            top_k_similarities=[0.75],  # base surprise = 0.25
+            rare_token_count=0,
+            has_graph_conflict=False,
+            cross_encoder_max=None,
+        )
+
+        # Now with cross-encoder detecting false positive
+        eval_with = await self.mediator.evaluate_memory(
+            content={"title": "ETHOS paper on EU AI Act"},
+            embedding=[0.1] * 10,
+            authority=5,
+            context_type="decision",
+            top_k_similarities=[0.75],
+            rare_token_count=0,
+            has_graph_conflict=False,
+            cross_encoder_max=-3.0,  # False positive detected
+        )
+
+        # The boosted version should have higher surprise
+        assert eval_with.surprise_score > eval_without.surprise_score
+        # And potentially different actions (boost may change reject to promote)
+        assert eval_with.weight > eval_without.weight
+
+    @pytest.mark.asyncio
+    async def test_cross_encoder_boost_capped_at_one(self):
+        """Test that surprise boost doesn't exceed 1.0."""
+        evaluation = await self.mediator.evaluate_memory(
+            content={"title": "Very novel content"},
+            embedding=[0.1] * 10,
+            authority=7,
+            context_type="log",
+            top_k_similarities=[0.1, 0.05, 0.02],  # Already very novel (surprise ~0.9)
+            rare_token_count=5,  # Extra token novelty bonus
+            has_graph_conflict=False,
+            cross_encoder_max=-10.0,  # Would add boost
+        )
+
+        # Surprise should be capped at 1.0 even with all boosts
+        assert evaluation.surprise_score <= 1.0
+
+    @pytest.mark.asyncio
+    async def test_cross_encoder_in_reason_string(self):
+        """Test that cross-encoder info appears in evaluation reason."""
+        evaluation = await self.mediator.evaluate_memory(
+            content={"title": "Test"},
+            embedding=[0.1] * 10,
+            authority=5,
+            context_type="log",
+            top_k_similarities=[0.8],
+            rare_token_count=0,
+            has_graph_conflict=False,
+            cross_encoder_max=-2.0,  # Below threshold
+        )
+
+        # Reason should mention cross-encoder boost
+        if evaluation.action == EvaluationAction.PROMOTE:
+            assert "cross-encoder" in evaluation.reason.lower()
 
 
 if __name__ == "__main__":
