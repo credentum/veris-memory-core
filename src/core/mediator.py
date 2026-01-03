@@ -8,6 +8,10 @@ Key Principles from Titans paper (arXiv:2412.00341):
 1. Surprise: How different is this from what we already know?
 2. Weight: Surprise × Authority × Cluster_Sparsity
 
+Enhanced with cross-encoder verification to prevent false-positive
+similarity matches from keyword overlap (e.g., "governance" in EU AI Act
+paper matching internal governance panels).
+
 Only information with sufficient weight passes through the gate.
 
 Usage:
@@ -18,7 +22,8 @@ Usage:
         authority=7,
         context_type="decision",
         top_k_similarities=[0.85, 0.72, 0.65],
-        rare_token_count=3
+        rare_token_count=3,
+        cross_encoder_max=-5.0  # Cross-encoder says "not similar"
     )
     if evaluation.action == EvaluationAction.PROMOTE:
         # Store the memory
@@ -42,6 +47,17 @@ HIGH_AUTHORITY_BYPASS = int(os.environ.get("HIGH_AUTHORITY_BYPASS", "8"))
 DEFAULT_WEIGHT_THRESHOLD = float(os.environ.get("COVENANT_WEIGHT_THRESHOLD", "0.3"))
 TOKEN_NOVELTY_BONUS = float(os.environ.get("TOKEN_NOVELTY_BONUS", "0.5"))
 SPARSITY_WEIGHT = float(os.environ.get("SPARSITY_WEIGHT", "0.5"))
+
+# Cross-encoder novelty detection
+# When cross-encoder score is below this threshold, boost surprise
+# (indicates false-positive from keyword overlap, content is actually novel)
+CROSS_ENCODER_NOVELTY_THRESHOLD = float(
+    os.environ.get("CROSS_ENCODER_NOVELTY_THRESHOLD", "0.0")
+)
+# Amount to boost surprise when cross-encoder detects false positive
+CROSS_ENCODER_SURPRISE_BOOST = float(
+    os.environ.get("CROSS_ENCODER_SURPRISE_BOOST", "0.15")
+)
 
 
 class CovenantMediator:
@@ -193,6 +209,7 @@ class CovenantMediator:
         top_k_similarities: Optional[List[float]] = None,
         rare_token_count: int = 0,
         has_graph_conflict: bool = False,
+        cross_encoder_max: Optional[float] = None,
     ) -> MemoryEvaluation:
         """
         Evaluate a memory for storage worthiness.
@@ -200,6 +217,11 @@ class CovenantMediator:
         This is the main entry point for the Covenant Mediator.
         It calculates surprise, sparsity, and weight, then decides
         whether to promote, reject, or flag as conflict.
+
+        Cross-encoder verification is used to detect false-positive
+        similarity matches from keyword overlap. When the cross-encoder
+        score is low (indicating semantic dissimilarity), the surprise
+        score is boosted to reflect the true novelty of the content.
 
         Args:
             content: The memory content to evaluate
@@ -209,6 +231,8 @@ class CovenantMediator:
             top_k_similarities: Similarities to nearest neighbors (from Qdrant)
             rare_token_count: Number of rare tokens (from sparse embeddings)
             has_graph_conflict: Whether Neo4j detected a contradiction
+            cross_encoder_max: Max cross-encoder score from reranking (optional)
+                              Low scores indicate false-positive similarity
 
         Returns:
             MemoryEvaluation with action and explanation
@@ -218,9 +242,23 @@ class CovenantMediator:
         # Ensure we have similarities list
         similarities = top_k_similarities or []
 
-        # Calculate metrics
+        # Calculate base metrics
         surprise = self.calculate_surprise(similarities, rare_token_count)
         sparsity = self.calculate_cluster_sparsity(similarities)
+
+        # Apply cross-encoder novelty boost if available
+        cross_encoder_boosted = False
+        if cross_encoder_max is not None and cross_encoder_max < CROSS_ENCODER_NOVELTY_THRESHOLD:
+            # Cross-encoder says "not actually similar" - this is truly novel content
+            # that got false-positive matched due to keyword overlap
+            original_surprise = surprise
+            surprise = min(1.0, surprise + CROSS_ENCODER_SURPRISE_BOOST)
+            cross_encoder_boosted = True
+            logger.info(
+                f"Cross-encoder novelty boost: {original_surprise:.3f} → {surprise:.3f} "
+                f"(cross_encoder_max={cross_encoder_max:.3f} < threshold={CROSS_ENCODER_NOVELTY_THRESHOLD})"
+            )
+
         weight = self.calculate_weight(surprise, authority, sparsity)
 
         # Get threshold for this context type
@@ -252,19 +290,23 @@ class CovenantMediator:
 
         elif weight >= threshold:
             evaluation.action = EvaluationAction.PROMOTE
+            cross_encoder_note = " (cross-encoder boosted)" if cross_encoder_boosted else ""
             evaluation.reason = (
                 f"Weight {weight:.3f} >= threshold {threshold:.3f}. "
-                f"Surprise={surprise:.3f}, Sparsity={sparsity:.3f}, Authority={authority}"
+                f"Surprise={surprise:.3f}{cross_encoder_note}, Sparsity={sparsity:.3f}, Authority={authority}"
             )
             self._promotions += 1
             logger.debug(f"Covenant promote: {evaluation.reason}")
 
         else:
             evaluation.action = EvaluationAction.REJECT
+            cross_encoder_info = ""
+            if cross_encoder_max is not None:
+                cross_encoder_info = f", CrossEncoder={cross_encoder_max:.3f}"
             evaluation.reason = (
                 f"Weight {weight:.3f} < threshold {threshold:.3f}. "
                 f"Memory not novel enough for type '{context_type}'. "
-                f"Surprise={surprise:.3f}, Sparsity={sparsity:.3f}, Authority={authority}"
+                f"Surprise={surprise:.3f}, Sparsity={sparsity:.3f}, Authority={authority}{cross_encoder_info}"
             )
             self._rejections += 1
             logger.info(f"Covenant reject: {evaluation.reason}")
