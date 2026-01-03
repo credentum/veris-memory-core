@@ -5,6 +5,9 @@ Integration layer that connects the CovenantMediator with store_context.
 Performs vector probing, graph conflict checking, and weight evaluation
 before allowing memories to be stored.
 
+Enhanced with hybrid search (BM25 + dense) and cross-encoder verification
+to prevent false-positive similarity matches from keyword overlap.
+
 Rejection Audit Log:
     When memories are rejected, they are logged to Redis for audit purposes.
     This ensures we can answer "What has the system forgotten?" (Truth pillar).
@@ -34,6 +37,14 @@ from ..models.evaluation import (
     MemoryEvaluation,
 )
 from ..storage.rejection_store import RejectionStore, get_rejection_store
+
+# Cross-encoder configuration
+CROSS_ENCODER_NOVELTY_THRESHOLD = float(
+    os.environ.get("CROSS_ENCODER_NOVELTY_THRESHOLD", "0.0")
+)
+CROSS_ENCODER_SURPRISE_BOOST = float(
+    os.environ.get("CROSS_ENCODER_SURPRISE_BOOST", "0.15")
+)
 
 # Feature flag
 COVENANT_MEDIATOR_ENABLED = (
@@ -145,8 +156,15 @@ class CovenantValidator:
                 authority=authority,
             )
 
-        # Step 1: Vector probe - find similar memories
-        top_k_similarities = await self._vector_probe(embedding)
+        # Extract text content for cross-encoder comparison
+        content_text = self._extract_content_text(content)
+
+        # Step 1: Vector probe with hybrid search + cross-encoder verification
+        top_k_similarities, cross_encoder_max = await self._vector_probe_enhanced(
+            embedding=embedding,
+            content_text=content_text,
+            sparse_vector=sparse_vector,
+        )
 
         # Step 2: Count rare tokens from sparse vector
         rare_token_count = self._count_rare_tokens(sparse_vector)
@@ -155,7 +173,7 @@ class CovenantValidator:
         graph_conflict = await self._check_graph_conflict(content)
         has_conflict = graph_conflict.severity != ConflictSeverity.NONE
 
-        # Step 4: Evaluate with mediator
+        # Step 4: Evaluate with mediator (includes cross-encoder boost)
         evaluation = await self._mediator.evaluate_memory(
             content=content,
             embedding=embedding,
@@ -164,6 +182,7 @@ class CovenantValidator:
             top_k_similarities=top_k_similarities,
             rare_token_count=rare_token_count,
             has_graph_conflict=has_conflict,
+            cross_encoder_max=cross_encoder_max,
         )
 
         # Attach conflict details if present
@@ -231,6 +250,130 @@ class CovenantValidator:
             # Fail-open: don't block storage operations due to audit logging failures
             logger.error(f"Error logging rejection to audit store: {e}")
 
+    def _extract_content_text(self, content: Dict[str, Any]) -> str:
+        """
+        Extract text content for cross-encoder comparison.
+
+        Args:
+            content: Memory content dictionary
+
+        Returns:
+            Concatenated text representation of the content
+        """
+        text_parts = []
+
+        # Extract from common fields
+        for field in ["title", "description", "text", "summary", "content"]:
+            if field in content:
+                value = content[field]
+                if isinstance(value, str):
+                    text_parts.append(value)
+                elif isinstance(value, dict):
+                    # Recursively extract from nested dict
+                    text_parts.append(self._extract_content_text(value))
+
+        # Handle key_insight, decision, rationale for decision-type content
+        for field in ["key_insight", "decision", "rationale", "insight"]:
+            if field in content and isinstance(content[field], str):
+                text_parts.append(content[field])
+
+        result = " ".join(text_parts)
+        # Truncate to reasonable length for cross-encoder
+        return result[:2000] if len(result) > 2000 else result
+
+    async def _vector_probe_enhanced(
+        self,
+        embedding: List[float],
+        content_text: str,
+        sparse_vector: Optional[Dict[str, Any]] = None,
+        k: int = 10,
+    ) -> Tuple[List[float], float]:
+        """
+        Enhanced vector probe using hybrid search and cross-encoder verification.
+
+        Uses BM25 + dense vectors with RRF fusion for initial retrieval,
+        then applies cross-encoder to get true semantic similarity scores.
+        This prevents false-positive matches from keyword overlap.
+
+        Args:
+            embedding: Dense embedding vector
+            content_text: Text content for cross-encoder comparison
+            sparse_vector: Optional sparse vector for BM25 matching
+            k: Number of neighbors to retrieve
+
+        Returns:
+            Tuple of (similarity scores, max cross-encoder score)
+        """
+        cross_encoder_max = -10.0  # Default: no similar content found
+
+        try:
+            # Try hybrid search first (BM25 + dense with RRF)
+            if sparse_vector and hasattr(self._qdrant, 'hybrid_search'):
+                try:
+                    results = self._qdrant.hybrid_search(
+                        dense_vector=embedding,
+                        sparse_vector=sparse_vector,
+                        limit=k,
+                    )
+                    logger.debug(f"Hybrid search found {len(results)} candidates")
+                except Exception as e:
+                    logger.warning(f"Hybrid search failed, falling back to dense: {e}")
+                    results = self._qdrant.search(query_vector=embedding, limit=k)
+            else:
+                # Fallback to dense-only search
+                results = self._qdrant.search(query_vector=embedding, limit=k)
+
+            if not results:
+                logger.debug("No similar memories found - treating as novel")
+                return [], -10.0
+
+            # Extract similarity scores from initial search
+            similarities = [r.get("score", 0.0) for r in results]
+
+            # Apply cross-encoder for true semantic similarity
+            try:
+                from ..storage.reranker import get_reranker
+                reranker = get_reranker()
+
+                if reranker.enabled and content_text:
+                    # Rerank results to get cross-encoder scores
+                    reranked = reranker.rerank(content_text, results)
+
+                    if reranked:
+                        # Get the max cross-encoder score
+                        cross_encoder_max = max(
+                            r.get("rerank_score", -10.0) for r in reranked
+                        )
+                        logger.debug(
+                            f"Cross-encoder max score: {cross_encoder_max:.3f} "
+                            f"(threshold: {CROSS_ENCODER_NOVELTY_THRESHOLD})"
+                        )
+
+                        # If cross-encoder says "not similar", this is truly novel
+                        if cross_encoder_max < CROSS_ENCODER_NOVELTY_THRESHOLD:
+                            logger.info(
+                                f"Cross-encoder detected false-positive similarity. "
+                                f"Score {cross_encoder_max:.3f} < threshold "
+                                f"{CROSS_ENCODER_NOVELTY_THRESHOLD}. "
+                                f"Boosting novelty signal."
+                            )
+
+            except ImportError:
+                logger.debug("Reranker not available, using vector scores only")
+            except Exception as e:
+                logger.warning(f"Cross-encoder reranking failed: {e}")
+
+            logger.debug(
+                f"Vector probe: {len(similarities)} neighbors, "
+                f"cross-encoder max: {cross_encoder_max:.3f}"
+            )
+            return similarities, cross_encoder_max
+
+        except Exception as e:
+            logger.warning(f"Enhanced vector probe failed: {e}")
+            # Return empty list - will be treated as cold start
+            return [], -10.0
+
     async def _vector_probe(
         self,
         embedding: List[float],
@@ -238,7 +381,9 @@ class CovenantValidator:
         collection: str = "context_embeddings",
     ) -> List[float]:
         """
-        Probe Qdrant for k-nearest neighbors.
+        Probe Qdrant for k-nearest neighbors (legacy method).
+
+        Deprecated: Use _vector_probe_enhanced for hybrid search + cross-encoder.
 
         Args:
             embedding: Query embedding vector
