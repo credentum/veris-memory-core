@@ -54,9 +54,19 @@ SPARSITY_WEIGHT = float(os.environ.get("SPARSITY_WEIGHT", "0.5"))
 CROSS_ENCODER_NOVELTY_THRESHOLD = float(
     os.environ.get("CROSS_ENCODER_NOVELTY_THRESHOLD", "0.0")
 )
-# Amount to boost surprise when cross-encoder detects false positive
+# Base boost amount when cross-encoder detects false positive
 CROSS_ENCODER_SURPRISE_BOOST = float(
     os.environ.get("CROSS_ENCODER_SURPRISE_BOOST", "0.15")
+)
+# Additional boost scaling based on cross-encoder confidence (0.0 to 1.0)
+# More negative cross-encoder scores get larger boosts
+CROSS_ENCODER_SCALED_BOOST = float(
+    os.environ.get("CROSS_ENCODER_SCALED_BOOST", "0.40")
+)
+# Minimum surprise floor when cross-encoder overrides vector similarity
+# Ensures false-positive matches don't suppress genuinely novel content
+CROSS_ENCODER_MIN_SURPRISE_FLOOR = float(
+    os.environ.get("CROSS_ENCODER_MIN_SURPRISE_FLOOR", "0.50")
 )
 
 
@@ -252,11 +262,30 @@ class CovenantMediator:
             # Cross-encoder says "not actually similar" - this is truly novel content
             # that got false-positive matched due to keyword overlap
             original_surprise = surprise
-            surprise = min(1.0, surprise + CROSS_ENCODER_SURPRISE_BOOST)
+
+            # Calculate cross-encoder strength: how strongly it disagrees (0.0 to 1.0)
+            # cross_encoder_max ranges from ~-12 (completely unrelated) to 0 (threshold)
+            # More negative = more confident it's novel
+            cross_encoder_strength = min(abs(cross_encoder_max), 5.0) / 5.0
+
+            # Scaled boost: base + additional based on cross-encoder confidence
+            # When cross_encoder = -0.8: strength = 0.16, boost = 0.15 + 0.40 × 0.16 = 0.21
+            # When cross_encoder = -5.0: strength = 1.0, boost = 0.15 + 0.40 = 0.55
+            scaled_boost = CROSS_ENCODER_SURPRISE_BOOST + (CROSS_ENCODER_SCALED_BOOST * cross_encoder_strength)
+
+            # Minimum surprise floor ensures false-positives don't suppress novel content
+            # When cross-encoder strongly disagrees with vector similarity, trust cross-encoder
+            min_surprise_floor = CROSS_ENCODER_MIN_SURPRISE_FLOOR + (0.20 * cross_encoder_strength)
+
+            # Apply both boost and floor, take the higher value
+            boosted_surprise = min(1.0, surprise + scaled_boost)
+            surprise = max(min_surprise_floor, boosted_surprise)
+
             cross_encoder_boosted = True
             logger.info(
                 f"Cross-encoder novelty boost: {original_surprise:.3f} → {surprise:.3f} "
-                f"(cross_encoder_max={cross_encoder_max:.3f} < threshold={CROSS_ENCODER_NOVELTY_THRESHOLD})"
+                f"(cross_encoder_max={cross_encoder_max:.3f}, strength={cross_encoder_strength:.3f}, "
+                f"scaled_boost={scaled_boost:.3f}, floor={min_surprise_floor:.3f})"
             )
 
         weight = self.calculate_weight(surprise, authority, sparsity)
