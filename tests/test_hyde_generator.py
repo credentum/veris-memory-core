@@ -31,8 +31,8 @@ class TestHyDEConfig(unittest.TestCase):
         config = HyDEConfig()
 
         self.assertTrue(config.enabled)
-        # Default to free Grok model via OpenRouter
-        self.assertEqual(config.model, "x-ai/grok-4.1-fast:free")
+        # Default to Mistral Small via OpenRouter (excellent for RAG)
+        self.assertEqual(config.model, "mistralai/mistral-small-3.1-24b-instruct-2503")
         self.assertEqual(config.api_provider, "openrouter")
         self.assertEqual(config.base_url, "https://openrouter.ai/api/v1")
         self.assertEqual(config.max_tokens, 150)
@@ -107,8 +107,8 @@ class TestHyDEGenerator(unittest.TestCase):
 
         self.assertIsNotNone(generator.config)
         self.assertTrue(generator.config.enabled)
-        # Default to free Grok model via OpenRouter
-        self.assertEqual(generator.config.model, "x-ai/grok-4.1-fast:free")
+        # Default to Mistral Small via OpenRouter (excellent for RAG)
+        self.assertEqual(generator.config.model, "mistralai/mistral-small-3.1-24b-instruct-2503")
         self.assertEqual(generator.config.api_provider, "openrouter")
 
     def test_generator_initialization_from_env(self):
@@ -269,18 +269,17 @@ class TestHyDEGeneratorAsync(unittest.IsolatedAsyncioTestCase):
         mock_client.chat.completions.create = AsyncMock(return_value=mock_llm_response)
         generator._client = mock_client
 
-        # Mock the embedding service
-        mock_embedding_service = AsyncMock()
-        mock_embedding_service.generate_embedding = AsyncMock(return_value=[0.1, 0.2, 0.3])
-        generator._embedding_service = mock_embedding_service
+        # Mock the generate_embedding function (now uses OpenRouter-aware wrapper)
+        with patch('embedding.service.generate_embedding', new_callable=AsyncMock) as mock_embed:
+            mock_embed.return_value = [0.1, 0.2, 0.3]
 
-        result = await generator.generate_hyde_embedding("How do I configure Neo4j?")
+            result = await generator.generate_hyde_embedding("How do I configure Neo4j?")
 
-        self.assertIsInstance(result, HyDEResult)
-        self.assertEqual(result.hypothetical_doc, "To configure Neo4j...")
-        self.assertEqual(result.embedding, [0.1, 0.2, 0.3])
-        self.assertFalse(result.cache_hit)
-        self.assertIsNone(result.error)
+            self.assertIsInstance(result, HyDEResult)
+            self.assertEqual(result.hypothetical_doc, "To configure Neo4j...")
+            self.assertEqual(result.embedding, [0.1, 0.2, 0.3])
+            self.assertFalse(result.cache_hit)
+            self.assertIsNone(result.error)
 
     async def test_generate_hyde_embedding_cache_hit(self):
         """Test that cache hits return cached results."""

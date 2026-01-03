@@ -118,7 +118,6 @@ Answer:"""
         # single-instance deployments and development/testing.
         self._cache: Dict[str, Dict[str, Any]] = {}  # Simple in-memory cache
         self._cache_timestamps: Dict[str, float] = {}  # Track cache entry times
-        self._embedding_service = None
         self._metrics = {
             "total_requests": 0,
             "cache_hits": 0,
@@ -174,19 +173,6 @@ Answer:"""
             except ImportError:
                 raise ImportError("openai package not installed. Install with: pip install openai")
         return self._client
-
-    async def _get_embedding_service(self):
-        """Get or create the embedding service."""
-        if self._embedding_service is None:
-            try:
-                from ..embedding.service import EmbeddingService
-
-                self._embedding_service = EmbeddingService()
-                await self._embedding_service.initialize()
-            except Exception as e:
-                logger.error(f"Failed to initialize embedding service: {e}")
-                raise
-        return self._embedding_service
 
     async def generate_hypothetical_doc(self, query: str) -> str:
         """
@@ -279,9 +265,9 @@ Answer:"""
                     error="Empty response from LLM",
                 )
 
-            # Get embedding of hypothetical doc
-            embedding_service = await self._get_embedding_service()
-            embedding = await embedding_service.generate_embedding(hyde_doc)
+            # Get embedding of hypothetical doc (uses OpenRouter when configured)
+            from embedding.service import generate_embedding
+            embedding = await generate_embedding(hyde_doc)
 
             # Cache result
             if self.config.cache_enabled:
