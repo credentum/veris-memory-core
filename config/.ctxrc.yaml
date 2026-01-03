@@ -8,10 +8,20 @@ system:
 
 # Embedding configuration - ALIGNED WITH PRODUCTION LOCKED CONFIG
 # Note: Key is "embeddings" (plural) to match EmbeddingConfig expectations
+#
+# Provider options:
+#   - "local": Uses sentence-transformers (all-MiniLM-L6-v2, 384D)
+#   - "openrouter": Uses OpenRouter API (text-embedding-3-large truncated to 384D via Matryoshka)
+#
+# For openrouter provider, set these environment variables:
+#   EMBEDDING_PROVIDER=openrouter
+#   EMBEDDING_MODEL=openai/text-embedding-3-large  (default)
+#   OPENROUTER_API_KEY=sk-or-v1-...
+#
 embeddings:
-  provider: huggingface  # Required: huggingface, openai, or development
-  dimensions: 384
-  model: sentence-transformers/all-MiniLM-L6-v2  # Full HuggingFace model path
+  provider: local  # "local" or "openrouter" (set via EMBEDDING_PROVIDER env var)
+  dimensions: 384  # Unchanged for both providers (Matryoshka truncation preserves quality)
+  model: sentence-transformers/all-MiniLM-L6-v2  # Used when provider=local
   batch_size: 50
   max_retries: 3
   timeout: 30
