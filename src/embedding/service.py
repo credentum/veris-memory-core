@@ -67,6 +67,222 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Embedding provider configuration
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "local")  # "local" or "openrouter"
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "openai/text-embedding-3-large")
+TARGET_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "384"))
+
+
+class OpenRouterEmbeddingProvider:
+    """
+    Generate embeddings via OpenRouter API with Matryoshka truncation.
+
+    Uses text-embedding-3-large (3072D) truncated to 384D for compatibility
+    with existing Qdrant collection while getting higher quality embeddings.
+
+    Matryoshka Representation Learning (MRL) ensures the first N dimensions
+    contain the most important information, allowing truncation with ~95%
+    quality retention.
+    """
+
+    def __init__(self, target_dimensions: int = 384):
+        """
+        Initialize the OpenRouter embedding provider.
+
+        Args:
+            target_dimensions: Number of dimensions to truncate to (default: 384)
+        """
+        self.base_url = "https://openrouter.ai/api/v1"
+        self.model = EMBEDDING_MODEL
+        self.target_dimensions = target_dimensions
+        self._client = None
+        self._initialized = False
+        self._metrics = {
+            "total_requests": 0,
+            "successful_requests": 0,
+            "failed_requests": 0,
+            "average_generation_time": 0.0,
+        }
+
+        logger.info(
+            f"OpenRouterEmbeddingProvider initialized: "
+            f"model={self.model}, target_dims={self.target_dimensions}"
+        )
+
+    async def _get_client(self):
+        """Get or create the AsyncOpenAI client for OpenRouter."""
+        if self._client is None:
+            try:
+                from openai import AsyncOpenAI
+
+                api_key = os.getenv("OPENROUTER_API_KEY")
+                if not api_key:
+                    raise ValueError(
+                        "OPENROUTER_API_KEY environment variable not set. "
+                        "Get a key at https://openrouter.ai/keys"
+                    )
+
+                self._client = AsyncOpenAI(
+                    api_key=api_key,
+                    base_url=self.base_url,
+                    default_headers={
+                        "HTTP-Referer": "https://github.com/credentum/veris-memory",
+                        "X-Title": "Veris Memory Embeddings",
+                    }
+                )
+                self._initialized = True
+                logger.info(f"OpenRouter client initialized for model: {self.model}")
+
+            except ImportError:
+                raise ImportError(
+                    "openai package not installed. Install with: pip install openai"
+                )
+
+        return self._client
+
+    def _truncate_embedding(self, embedding: List[float]) -> List[float]:
+        """
+        Truncate embedding to target dimensions using Matryoshka technique.
+
+        Matryoshka-trained models (like text-embedding-3-large) store the
+        most important information in the first dimensions, so truncation
+        preserves ~95% of quality.
+
+        Args:
+            embedding: Full embedding vector (e.g., 3072D)
+
+        Returns:
+            Truncated embedding (e.g., 384D)
+        """
+        if len(embedding) <= self.target_dimensions:
+            # No truncation needed, but may need padding
+            if len(embedding) < self.target_dimensions:
+                padding = [0.0] * (self.target_dimensions - len(embedding))
+                return embedding + padding
+            return embedding
+
+        return embedding[:self.target_dimensions]
+
+    async def generate_embedding(self, text: str) -> List[float]:
+        """
+        Generate embedding via OpenRouter API with Matryoshka truncation.
+
+        Args:
+            text: Text to embed
+
+        Returns:
+            List[float]: Embedding vector truncated to target dimensions
+        """
+        start_time = time.time()
+        self._metrics["total_requests"] += 1
+
+        try:
+            client = await self._get_client()
+
+            response = await client.embeddings.create(
+                model=self.model,
+                input=text,
+            )
+
+            full_embedding = response.data[0].embedding
+            truncated_embedding = self._truncate_embedding(full_embedding)
+
+            generation_time = time.time() - start_time
+            self._metrics["successful_requests"] += 1
+
+            # Update running average
+            total = self._metrics["total_requests"]
+            current_avg = self._metrics["average_generation_time"]
+            self._metrics["average_generation_time"] = (
+                current_avg * (total - 1) + generation_time
+            ) / total
+
+            logger.debug(
+                f"OpenRouter embedding: {len(full_embedding)}D → {len(truncated_embedding)}D "
+                f"in {generation_time:.3f}s"
+            )
+
+            return truncated_embedding
+
+        except Exception as e:
+            self._metrics["failed_requests"] += 1
+            logger.error(f"OpenRouter embedding generation failed: {e}")
+            raise
+
+    async def generate_batch_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """
+        Generate embeddings for multiple texts in a single API call.
+
+        Args:
+            texts: List of texts to embed
+
+        Returns:
+            List of embedding vectors
+        """
+        if not texts:
+            return []
+
+        start_time = time.time()
+        self._metrics["total_requests"] += len(texts)
+
+        try:
+            client = await self._get_client()
+
+            response = await client.embeddings.create(
+                model=self.model,
+                input=texts,
+            )
+
+            embeddings = [
+                self._truncate_embedding(item.embedding)
+                for item in response.data
+            ]
+
+            generation_time = time.time() - start_time
+            self._metrics["successful_requests"] += len(texts)
+
+            logger.debug(
+                f"OpenRouter batch: {len(texts)} texts in {generation_time:.3f}s "
+                f"({generation_time/len(texts):.3f}s/text)"
+            )
+
+            return embeddings
+
+        except Exception as e:
+            self._metrics["failed_requests"] += len(texts)
+            logger.error(f"OpenRouter batch embedding failed: {e}")
+            raise
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get provider metrics."""
+        return {
+            **self._metrics,
+            "model": self.model,
+            "target_dimensions": self.target_dimensions,
+            "provider": "openrouter",
+            "initialized": self._initialized,
+        }
+
+
+# Global OpenRouter provider instance
+_openrouter_provider: Optional[OpenRouterEmbeddingProvider] = None
+
+
+async def get_openrouter_provider() -> OpenRouterEmbeddingProvider:
+    """Get or create the global OpenRouter embedding provider."""
+    global _openrouter_provider
+
+    if _openrouter_provider is None:
+        _openrouter_provider = OpenRouterEmbeddingProvider(
+            target_dimensions=TARGET_DIMENSIONS
+        )
+        # Verify connection by initializing client
+        await _openrouter_provider._get_client()
+        logger.info("OpenRouter embedding provider initialized successfully")
+
+    return _openrouter_provider
+
+
 class EmbeddingModel(Enum):
     """Supported embedding models with their dimensions."""
     MINI_LM_L6_V2 = ("all-MiniLM-L6-v2", 384)
@@ -805,18 +1021,38 @@ async def get_embedding_service() -> EmbeddingService:
     return _embedding_service
 
 async def generate_embedding(
-    content: Union[str, Dict[str, Any]], 
+    content: Union[str, Dict[str, Any]],
     adjust_dimensions: bool = True
 ) -> List[float]:
     """
     Convenience function to generate embeddings.
-    
+
+    Routes to OpenRouter API when EMBEDDING_PROVIDER=openrouter,
+    otherwise uses the local sentence-transformers model.
+
     Args:
         content: Content to embed
         adjust_dimensions: Whether to adjust dimensions
-        
+
     Returns:
         List[float]: Embedding vector
     """
+    # Check if we should use OpenRouter
+    if EMBEDDING_PROVIDER == "openrouter":
+        provider = await get_openrouter_provider()
+
+        # Extract text from content (reuse EmbeddingService's logic)
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, dict):
+            # Use a temporary service instance just for text extraction
+            temp_service = EmbeddingService()
+            text = temp_service._extract_text(content)
+        else:
+            text = str(content)
+
+        return await provider.generate_embedding(text)
+
+    # Default: use local embedding service
     service = await get_embedding_service()
     return await service.generate_embedding(content, adjust_dimensions)

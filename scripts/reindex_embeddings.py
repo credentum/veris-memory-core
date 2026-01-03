@@ -6,12 +6,18 @@ Re-generates embeddings for all existing documents using the new contextual
 headers extraction method. This is required after updating _extract_text()
 to include metadata fields like severity, verdict, type, etc.
 
+Supports both local (sentence-transformers) and OpenRouter API embeddings
+with Matryoshka truncation for higher quality vectors.
+
 Usage:
     # Dry run (show what would be updated)
     python3 scripts/reindex_embeddings.py --dry-run
 
     # Re-index all documents
     python3 scripts/reindex_embeddings.py
+
+    # Re-index using OpenRouter API (text-embedding-3-large truncated to 384D)
+    python3 scripts/reindex_embeddings.py --provider openrouter
 
     # Re-index specific document
     python3 scripts/reindex_embeddings.py --id "068dce90-b12d-4a88-80ad-b3ad34402564"
@@ -26,6 +32,8 @@ Environment Variables:
     NEO4J_PASSWORD: Neo4j password (required)
     QDRANT_HOST: Qdrant host (default: qdrant)
     QDRANT_PORT: Qdrant port (default: 6333)
+    EMBEDDING_PROVIDER: local or openrouter (default: local)
+    OPENROUTER_API_KEY: Required when provider=openrouter
 """
 
 import asyncio
@@ -57,6 +65,7 @@ class EmbeddingReindexer:
         neo4j_password: str = "",
         qdrant_host: str = "qdrant",
         qdrant_port: int = 6333,
+        provider: str = "local",  # "local" or "openrouter"
     ):
         self.neo4j_host = neo4j_host
         self.neo4j_port = neo4j_port
@@ -64,10 +73,12 @@ class EmbeddingReindexer:
         self.neo4j_password = neo4j_password
         self.qdrant_host = qdrant_host
         self.qdrant_port = qdrant_port
+        self.provider = provider
 
         self._neo4j_driver = None
         self._qdrant_client = None
         self._embedding_service = None
+        self._openrouter_provider = None
 
     async def initialize(self):
         """Initialize connections to Neo4j, Qdrant, and embedding service."""
@@ -88,11 +99,19 @@ class EmbeddingReindexer:
         )
         logger.info(f"Connected to Qdrant at {self.qdrant_host}:{self.qdrant_port}")
 
-        # Dense embedding service
-        from embedding.service import EmbeddingService
-        self._embedding_service = EmbeddingService()
-        await self._embedding_service.initialize()
-        logger.info("Dense embedding service initialized")
+        # Dense embedding service (provider-aware)
+        if self.provider == "openrouter":
+            from embedding.service import OpenRouterEmbeddingProvider, EmbeddingService
+            self._openrouter_provider = OpenRouterEmbeddingProvider(target_dimensions=384)
+            await self._openrouter_provider._get_client()  # Initialize client
+            # Still need EmbeddingService for text extraction
+            self._embedding_service = EmbeddingService()
+            logger.info(f"OpenRouter embedding provider initialized (model: {self._openrouter_provider.model})")
+        else:
+            from embedding.service import EmbeddingService
+            self._embedding_service = EmbeddingService()
+            await self._embedding_service.initialize()
+            logger.info("Local embedding service initialized")
 
         # Sparse embedding service (for hybrid search)
         self._sparse_service = None
@@ -171,8 +190,14 @@ class EmbeddingReindexer:
             return documents
 
     async def generate_new_embedding(self, content: Dict[str, Any]) -> List[float]:
-        """Generate embedding using the new contextual headers method."""
-        embedding = await self._embedding_service.generate_embedding(content)
+        """Generate embedding using the configured provider."""
+        if self._openrouter_provider:
+            # Use OpenRouter with Matryoshka truncation
+            text = self._embedding_service.extract_text_for_embedding(content)
+            embedding = await self._openrouter_provider.generate_embedding(text)
+        else:
+            # Use local sentence-transformers
+            embedding = await self._embedding_service.generate_embedding(content)
         return embedding
 
     def preview_text_extraction(self, content: Dict[str, Any]) -> str:
@@ -333,7 +358,21 @@ async def main():
     parser.add_argument("--dry-run", action="store_true", help="Preview changes without updating")
     parser.add_argument("--id", type=str, help="Re-index specific document by ID")
     parser.add_argument("--batch-size", type=int, default=100, help="Batch size for processing")
+    parser.add_argument(
+        "--provider",
+        type=str,
+        choices=["local", "openrouter"],
+        default=os.environ.get("EMBEDDING_PROVIDER", "local"),
+        help="Embedding provider: 'local' (sentence-transformers) or 'openrouter' (API with Matryoshka)"
+    )
     args = parser.parse_args()
+
+    # Validate OpenRouter API key if using that provider
+    if args.provider == "openrouter":
+        if not os.environ.get("OPENROUTER_API_KEY"):
+            logger.error("OPENROUTER_API_KEY environment variable is required when using --provider openrouter")
+            sys.exit(1)
+        logger.info("Using OpenRouter API for embeddings (text-embedding-3-large truncated to 384D)")
 
     # Get configuration from environment
     neo4j_password = os.environ.get("NEO4J_PASSWORD")
@@ -348,6 +387,7 @@ async def main():
         neo4j_password=neo4j_password,
         qdrant_host=os.environ.get("QDRANT_HOST", "qdrant"),
         qdrant_port=int(os.environ.get("QDRANT_PORT", "6333")),
+        provider=args.provider,
     )
 
     try:
