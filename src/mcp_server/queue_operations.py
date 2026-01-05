@@ -1846,14 +1846,12 @@ def _extract_rejection_details(metadata: Optional[Dict[str, Any]]) -> Optional[D
         return None
 
     # Only include if there was a rejection
-    rejection_reason = metadata.get("rejection_reason")
     review_verdict = metadata.get("review_verdict")
     final_outcome = metadata.get("final_outcome_reason", "")
 
     # If not rejected, return None
-    # Check multiple signals: explicit rejection_reason, review verdict, or FAILURE in outcome
+    # Check multiple signals: review verdict or FAILURE in outcome
     has_rejection = (
-        rejection_reason or
         review_verdict in ("REJECT", "ESCALATE") or
         "FAILURE:" in final_outcome or
         "REJECTED" in final_outcome
@@ -1861,21 +1859,48 @@ def _extract_rejection_details(metadata: Optional[Dict[str, Any]]) -> Optional[D
     if not has_rejection:
         return None
 
-    # Get ao-lens issues: first try structured field, then parse from outcome text
-    ao_lens_issues = (metadata.get("ao_lens") or {}).get("issues", [])[:5]
+    # Extract static analysis summary from array format
+    # Format stored: [{"tool": "luac", "passed": false, "error_count": 2, "top_issues": [...]}]
+    static_analysis_summary = None
+    static_analysis_list = metadata.get("static_analysis", [])
+    if static_analysis_list and isinstance(static_analysis_list, list):
+        failed_tools = [
+            sa.get("tool", "unknown")
+            for sa in static_analysis_list
+            if not sa.get("passed", True)
+        ]
+        if failed_tools:
+            static_analysis_summary = f"Failed: {', '.join(failed_tools)}"
+
+    # Extract ao-lens issues from static_analysis array
+    # ao-lens is stored as one of the tools in static_analysis
+    ao_lens_issues = []
+    for sa in static_analysis_list:
+        if sa.get("tool") == "ao-lens" and not sa.get("passed", True):
+            top_issues = sa.get("top_issues", [])
+            ao_lens_issues.extend(top_issues[:5])
+    # Also try parsing from final_outcome_reason text
     if not ao_lens_issues:
-        ao_lens_issues = _parse_ao_lens_from_outcome(
-            metadata.get("final_outcome_reason", "")
-        )
+        ao_lens_issues = _parse_ao_lens_from_outcome(final_outcome)
+
+    # Extract LLM rejection reason from top_issues or final_outcome_reason
+    llm_rejection = None
+    top_issues = metadata.get("top_issues", [])
+    if top_issues:
+        llm_rejection = "; ".join(str(i) for i in top_issues[:3])
+    elif "LLM" in final_outcome or "Rejected" in final_outcome:
+        # Extract from final_outcome_reason
+        llm_rejection = final_outcome[:300]
+
+    # Get test results (already in correct format)
+    test_results = metadata.get("test_results")
 
     return {
-        "static_analysis": metadata.get("static_analysis_summary"),
+        "static_analysis": static_analysis_summary,
         "ao_lens_issues": ao_lens_issues,
-        "llm_reviewer": metadata.get("rejection_reason"),
-        "ao_panel": _parse_ao_panel_from_outcome(
-            metadata.get("final_outcome_reason", "")
-        ),
-        "test_results": metadata.get("test_results"),
+        "llm_reviewer": llm_rejection,
+        "ao_panel": _parse_ao_panel_from_outcome(final_outcome),
+        "test_results": test_results,
     }
 
 
