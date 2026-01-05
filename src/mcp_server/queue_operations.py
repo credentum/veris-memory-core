@@ -2147,20 +2147,42 @@ async def get_packet_trace(
                 discrepancy = True
                 discrepancy_note = "Saga shows completed but trajectory shows failure - state inconsistency"
 
-            # Detect stuck packets (in_flight or pending_claim for > 2 min with no recent trajectory)
+            # Detect stuck packets (in_flight or pending_claim for > 2 min with no recent activity)
+            # BUT: Check coder WIP heartbeat first - if heartbeat is recent, agent is still working
             is_stuck = False
             if saga_status in ("in_flight", "pending_claim"):
-                # Check if there's been any activity
-                last_activity = claimed_at or completed_at
-                if last_activity:
-                    try:
-                        activity_time = datetime.fromisoformat(last_activity.replace("Z", "+00:00"))
-                        age_seconds = (now - activity_time).total_seconds()
-                        if age_seconds > 120:  # 2 minutes
-                            is_stuck = True
-                            stuck_packets.append(full_wp_id)
-                    except Exception:
-                        pass
+                # First check coder WIP heartbeat - this is the most accurate indicator
+                has_recent_heartbeat = False
+                try:
+                    # Check all coders for this packet (check both full ID and short ID)
+                    all_wip = redis.hgetall(CODER_WIP_KEY)
+                    for agent_id, wip_json in all_wip.items():
+                        wip_data = json.loads(wip_json)
+                        wip_packet = wip_data.get("packet_id", "")
+                        if wip_packet == full_wp_id or wip_packet == wp_id:
+                            # Found WIP for this packet - check heartbeat age
+                            heartbeat_str = wip_data.get("last_heartbeat")
+                            if heartbeat_str:
+                                heartbeat_time = datetime.fromisoformat(heartbeat_str.replace("Z", "+00:00"))
+                                heartbeat_age = (now - heartbeat_time).total_seconds()
+                                if heartbeat_age < 120:  # Heartbeat within 2 minutes
+                                    has_recent_heartbeat = True
+                                    break
+                except Exception as e:
+                    logger.debug(f"Error checking coder WIP for stuck detection: {e}")
+
+                # Only check saga activity if no recent heartbeat
+                if not has_recent_heartbeat:
+                    last_activity = claimed_at or completed_at
+                    if last_activity:
+                        try:
+                            activity_time = datetime.fromisoformat(last_activity.replace("Z", "+00:00"))
+                            age_seconds = (now - activity_time).total_seconds()
+                            if age_seconds > 120:  # 2 minutes
+                                is_stuck = True
+                                stuck_packets.append(full_wp_id)
+                        except Exception:
+                            pass
 
             if saga_status == "completed" or traj_outcome == "success":
                 completed_count += 1
