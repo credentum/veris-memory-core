@@ -1858,9 +1858,11 @@ def _summarize_rejection(rejection_reasons: Optional[Dict[str, Any]]) -> List[st
     if ao_panel:
         summary.append(f"ao_panel:{len(ao_panel)} issues")
 
-    # LLM reviewer
+    # LLM reviewer - only report if rejection reason explicitly mentions LLM
+    # The rejection_reason field is shared for all rejection types, so we need
+    # to check the content to determine if LLM actually rejected
     llm = rejection_reasons.get("llm_reviewer")
-    if llm:
+    if llm and "LLM rejected" in str(llm):
         summary.append("llm_reviewer:rejected")
 
     # Static analysis
