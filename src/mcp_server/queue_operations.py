@@ -2103,17 +2103,35 @@ async def get_packet_trace(
                         # Add to timeline
                         metadata = traj.get("metadata", {}) or {}
                         milestone = metadata.get("milestone", traj.get("outcome", "unknown"))
+
+                        # Build details dict with base info
+                        event_details: Dict[str, Any] = {
+                            "outcome": traj.get("outcome"),
+                            "agent": traj.get("agent"),
+                            "duration_ms": traj.get("duration_ms"),
+                            "error": traj.get("error")
+                        }
+
+                        # For coder_completed: include ao_lens data (what issues were found)
+                        if milestone == "coder_completed":
+                            ao_lens = metadata.get("ao_lens", {})
+                            if ao_lens:
+                                event_details["ao_lens"] = {
+                                    "attempts": ao_lens.get("attempts", 0),
+                                    "issues_fixed": ao_lens.get("issues_fixed", 0),
+                                    "time_ms": ao_lens.get("time_ms", 0),
+                                    # Include actual issues - this is the key learning signal
+                                    "issues": ao_lens.get("issues", [])[:10],
+                                }
+                            # Also include files for visibility
+                            event_details["files_modified"] = metadata.get("files_modified", [])
+
                         timeline.append(TimelineEvent(
                             ts=traj.get("timestamp", ""),
                             event=f"trajectory:{milestone}",
                             packet_id=task_id,
                             source="trajectory",
-                            details={
-                                "outcome": traj.get("outcome"),
-                                "agent": traj.get("agent"),
-                                "duration_ms": traj.get("duration_ms"),
-                                "error": traj.get("error")
-                            }
+                            details=event_details
                         ))
 
                         # NEW: Add rejection event to timeline if this was a rejection
