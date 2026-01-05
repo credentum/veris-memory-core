@@ -87,6 +87,10 @@ class WorkPacket(BaseModel):
         default_factory=dict, description="Additional context slice"
     )
     priority: int = Field(default=0, description="Priority (higher = more urgent)")
+    tech_stack: List[str] = Field(
+        default_factory=list,
+        description="Technologies used (e.g., ['lua', 'ao']) - enables inline ao-lens validation"
+    )
 
 
 class SubmitWorkPacketRequest(BaseModel):
