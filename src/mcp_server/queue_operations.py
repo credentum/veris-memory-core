@@ -869,8 +869,32 @@ async def complete_task(
 
         # If review_verdict is APPROVED, push to approved_completions queue
         # for orchestrator to handle PR creation
+        #
+        # ESCALATED with passing tests also creates a PR for human review
+        # (instead of rejecting the saga). This handles cases where:
+        # - All tests pass
+        # - Static analysis passes (no errors)
+        # - Reviewer is uncertain due to informational findings (LOW/INFO)
         queued_for_publish = False
-        if request.review_verdict == "APPROVED":
+        escalated_with_passing_tests = False
+
+        if request.review_verdict == "ESCALATED":
+            # Check if tests passed and there are no static errors
+            tests_passed = (
+                request.test_results is not None
+                and request.test_results.get("passed", False) is True
+            )
+            # Consider it passing if no error in the output
+            no_critical_errors = request.error is None or request.error == ""
+
+            if tests_passed and no_critical_errors:
+                escalated_with_passing_tests = True
+                logger.info(
+                    f"Task {request.packet_id} ESCALATED with passing tests - "
+                    f"treating as APPROVED for PR creation with human review flag"
+                )
+
+        if request.review_verdict == "APPROVED" or escalated_with_passing_tests:
             approved_queue_key = get_approved_completions_key(request.user_id)
             # Include all fields needed for PR creation + review data for learning
             publish_data = {
@@ -906,18 +930,32 @@ async def complete_task(
                 "reviewer_duration_ms": request.reviewer_duration_ms,
                 # Work packet meta passthrough (ao_panel_fix_attempt, etc.)
                 "meta": request.meta,
+                # Flag for ESCALATED with passing tests - PR needs human review
+                "needs_human_review": escalated_with_passing_tests,
             }
             redis.lpush(approved_queue_key, json.dumps(publish_data))
             queued_for_publish = True
-            logger.info(
-                f"Task {request.packet_id} APPROVED - queued for publish to {approved_queue_key}"
-            )
+            if escalated_with_passing_tests:
+                logger.info(
+                    f"Task {request.packet_id} ESCALATED->APPROVED (tests pass) - "
+                    f"queued for publish with human review flag to {approved_queue_key}"
+                )
+            else:
+                logger.info(
+                    f"Task {request.packet_id} APPROVED - queued for publish to {approved_queue_key}"
+                )
 
-        # If review_verdict is REJECTED or ESCALATED, push to rejected_completions queue
+        # If review_verdict is REJECTED, push to rejected_completions queue
         # so orchestrator can close the saga properly (ADR-007)
-        # Note: ESCALATED is treated as rejection for saga purposes (needs human review)
+        #
+        # ESCALATED is only treated as rejection when tests FAIL.
+        # When tests pass, ESCALATED creates a PR for human review (handled above).
         queued_for_rejection = False
-        if request.review_verdict in ("REJECTED", "ESCALATED"):
+        should_reject = (
+            request.review_verdict == "REJECTED"
+            or (request.review_verdict == "ESCALATED" and not escalated_with_passing_tests)
+        )
+        if should_reject:
             rejected_queue_key = get_rejected_completions_key(request.user_id)
             rejection_data = {
                 "packet_id": request.packet_id,
