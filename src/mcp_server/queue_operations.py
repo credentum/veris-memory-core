@@ -2212,15 +2212,30 @@ async def get_packet_trace(
             if saga_status == "completed" or traj_outcome == "success":
                 completed_count += 1
 
-            # NEW: Build attempts list from completion trajectories only
-            # Only include reviewer_completed (has verdict) or final coder failure (has final_outcome_reason)
+            # Build attempts list: An "attempt" is a coder→reviewer cycle
+            # Count attempts by reviewer_completed events (end of cycle)
+            # or coder failure events (cycle ended before review)
             attempts: List[AttemptDetail] = []
             wp_trajectories = all_trajectories_by_wp.get(full_wp_id) or all_trajectories_by_wp.get(wp_id) or []
             # Sort by timestamp to get chronological order
             wp_trajectories.sort(key=lambda t: t.get("timestamp", ""))
 
-            # Filter to only completion events that represent actual attempts
-            completion_milestones = {"reviewer_completed", "coder_completed"}
+            # First pass: collect coder_completed events by attempt number
+            # (coder tracks attempt number in metadata)
+            coder_data_by_attempt: Dict[int, dict] = {}
+            for traj in wp_trajectories:
+                traj_metadata = traj.get("metadata", {}) or {}
+                milestone = traj_metadata.get("milestone")
+                if milestone == "coder_completed":
+                    # Coder may track attempt_number in metadata
+                    attempt_n = traj_metadata.get("attempt_number", len(coder_data_by_attempt) + 1)
+                    coder_data_by_attempt[attempt_n] = {
+                        "timestamp": traj.get("timestamp", ""),
+                        "duration_ms": traj.get("duration_ms"),
+                        "files_modified": traj_metadata.get("files_modified") or [],
+                    }
+
+            # Second pass: count attempts by reviewer_completed or final failure
             attempt_num = 0
             for attempt_traj in wp_trajectories:
                 attempt_metadata = attempt_traj.get("metadata", {}) or {}
@@ -2228,13 +2243,14 @@ async def get_packet_trace(
                 outcome = attempt_traj.get("outcome")
                 has_final_outcome = bool(attempt_metadata.get("final_outcome_reason"))
 
-                # Only count as attempt if: reviewer_completed, coder_completed, or final failure with outcome
-                is_completion = (
-                    milestone in completion_milestones or
-                    (outcome == "failure" and has_final_outcome) or
-                    (outcome == "success" and attempt_traj.get("agent") == "coding_agent")
+                # An attempt ends when:
+                # 1. reviewer_completed (review finished)
+                # 2. Final failure with outcome (max retries reached)
+                is_attempt_end = (
+                    milestone == "reviewer_completed" or
+                    (outcome == "failure" and has_final_outcome)
                 )
-                if not is_completion:
+                if not is_attempt_end:
                     continue
 
                 attempt_num += 1
@@ -2251,13 +2267,31 @@ async def get_packet_trace(
                         test_results=rejection_details_dict.get("test_results")
                     )
 
+                # Get coder data for this attempt
+                coder_info = coder_data_by_attempt.get(attempt_num, {})
+                files = coder_info.get("files_modified") or attempt_metadata.get("files_modified") or []
+                duration = coder_info.get("duration_ms") or attempt_traj.get("duration_ms")
+
+                # Determine outcome label
+                review_verdict = attempt_metadata.get("review_verdict", "")
+                if outcome == "success" or review_verdict == "APPROVE":
+                    display_outcome = "approved"
+                elif review_verdict == "REJECT":
+                    display_outcome = "rejected"
+                elif review_verdict == "ESCALATE":
+                    display_outcome = "escalated"
+                elif outcome == "failure":
+                    display_outcome = "failed"
+                else:
+                    display_outcome = outcome or "unknown"
+
                 attempts.append(AttemptDetail(
                     attempt=attempt_num,
-                    outcome=attempt_traj.get("outcome", "unknown"),
-                    agent=attempt_traj.get("agent", "unknown"),
-                    timestamp=attempt_traj.get("timestamp", ""),
-                    duration_ms=attempt_traj.get("duration_ms"),
-                    files_modified=attempt_metadata.get("files_modified") or [],
+                    outcome=display_outcome,
+                    agent="coder→reviewer",  # It's a cycle, not a single agent
+                    timestamp=coder_info.get("timestamp") or attempt_traj.get("timestamp", ""),
+                    duration_ms=duration,
+                    files_modified=files,
                     rejection_reasons=rejection_model
                 ))
 
