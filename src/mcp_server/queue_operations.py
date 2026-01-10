@@ -1271,6 +1271,8 @@ async def escalate_intervention(
 
 # Default TTL for packet events (24 hours)
 PACKET_EVENTS_TTL = int(os.environ.get("PACKET_EVENTS_TTL", "86400"))
+# Max events per packet (FIFO eviction when exceeded)
+PACKET_EVENTS_MAX_SIZE = int(os.environ.get("PACKET_EVENTS_MAX_SIZE", "1000"))
 
 
 @router.post("/tools/log_execution_event", response_model=LogExecutionEventResponse)
@@ -1299,10 +1301,18 @@ async def log_execution_event(
         score = time.time()
         redis.zadd(events_key, {json.dumps(event): score})
 
+        # Trim oldest events if exceeding max size (FIFO eviction)
+        # zremrangebyrank removes elements by rank (0 = oldest, -1 = newest)
+        # Keep only the newest PACKET_EVENTS_MAX_SIZE events
+        current_size = redis.zcard(events_key)
+        if current_size > PACKET_EVENTS_MAX_SIZE:
+            # Remove oldest events (those with lowest rank)
+            redis.zremrangebyrank(events_key, 0, current_size - PACKET_EVENTS_MAX_SIZE - 1)
+
         # Set/refresh TTL
         redis.expire(events_key, PACKET_EVENTS_TTL)
 
-        # Get total event count
+        # Get total event count (after trimming)
         event_count = redis.zcard(events_key)
 
         logger.debug(
