@@ -1990,6 +1990,10 @@ class WorkPacketTrace(BaseModel):
     attempts: List[AttemptDetail] = Field(default_factory=list, description="All attempts with rejection details")
     total_attempts: int = Field(0, description="Total number of attempts")
     final_outcome: Optional[str] = Field(None, description="Final outcome: success, failure, escalated")
+    # NEW: Key info surfaced from timeline for quick visibility
+    duration_ms: Optional[int] = Field(None, description="Total duration in milliseconds")
+    files_modified: List[str] = Field(default_factory=list, description="Files created/modified")
+    error: Optional[str] = Field(None, description="Error message if failed")
 
 
 class TimelineEvent(BaseModel):
@@ -2017,6 +2021,10 @@ class PacketTraceResponse(BaseModel):
     total_count: int = Field(0, description="Total number of work packets")
     has_discrepancies: bool = Field(False, description="True if any saga/trajectory discrepancies exist")
     error: Optional[str] = Field(None, description="Error message if failed")
+    # NEW: Human-readable summary for quick understanding
+    summary: Optional[str] = Field(None, description="Quick summary: 'X/Y succeeded, Z failed (reasons)'")
+    # NEW: Real-time coder status for in-progress visibility
+    active_coders: List[CoderWipInfo] = Field(default_factory=list, description="Coders currently working on this packet's work packets")
 
 
 @router.post("/tools/get_packet_trace", response_model=PacketTraceResponse)
@@ -2045,6 +2053,41 @@ async def get_packet_trace(
 
         saga_exists = saga_data is not None
         saga_dict = json.loads(saga_data) if saga_data else {}
+
+        # 1b. Get active coders working on this packet's work packets
+        active_coders: List[CoderWipInfo] = []
+        try:
+            all_wip = redis.hgetall(CODER_WIP_KEY)
+            now = datetime.now(timezone.utc)
+            for agent_id, wip_json in all_wip.items():
+                if isinstance(agent_id, bytes):
+                    agent_id = agent_id.decode("utf-8")
+                if isinstance(wip_json, bytes):
+                    wip_json = wip_json.decode("utf-8")
+                wip_data = json.loads(wip_json)
+                wip_packet = wip_data.get("packet_id", "")
+                # Check if this coder is working on a work packet for this parent
+                if request.packet_id in wip_packet:
+                    started_at = wip_data.get("started_at", "")
+                    elapsed_seconds = 0
+                    if started_at:
+                        try:
+                            start_time = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                            elapsed_seconds = int((now - start_time).total_seconds())
+                        except Exception:
+                            pass
+                    active_coders.append(CoderWipInfo(
+                        agent_id=agent_id,
+                        packet_id=wip_packet,
+                        started_at=started_at,
+                        last_heartbeat=wip_data.get("last_heartbeat", ""),
+                        current_turn=wip_data.get("current_turn", 0),
+                        files_written=wip_data.get("files_written", []),
+                        tool_calls_made=wip_data.get("tool_calls_made", 0),
+                        elapsed_seconds=elapsed_seconds,
+                    ))
+        except Exception as e:
+            logger.warning(f"Failed to get active coders: {e}")
 
         # 2. Get saga events from Redis stream
         events_key = f"{request.user_id}:saga_events:{request.packet_id}"
@@ -2156,6 +2199,21 @@ async def get_packet_trace(
         now = datetime.now(timezone.utc)
         completed_count = 0
 
+        # FALLBACK: If saga doesn't exist, derive work packets from trajectory data
+        # This handles cases where saga TTL expired but trajectories persist
+        if not saga_exists and trajectory_data:
+            logger.info(f"Saga missing for {request.packet_id}, deriving work packets from {len(trajectory_data)} trajectories")
+            # Build pseudo-saga dict from trajectory data
+            for task_id, traj in trajectory_data.items():
+                # Extract work packet ID from task_id
+                # task_id format: "parent-packet-id-wp-xxx" or just "wp-xxx"
+                wp_id = task_id
+                saga_dict[wp_id] = {
+                    "status": "completed" if traj.get("outcome") == "success" else "failed",
+                    "claimed_at": None,  # Unknown from trajectory
+                    "claimed_by": traj.get("agent"),
+                }
+
         for wp_id, wp_data in saga_dict.items():
             saga_status = wp_data.get("status", "unknown")
             claimed_at = wp_data.get("claimed_at")
@@ -2191,31 +2249,48 @@ async def get_packet_trace(
                 discrepancy_note = "Saga shows completed but trajectory shows failure - state inconsistency"
 
             # Detect stuck packets (in_flight or pending_claim for > 2 min with no recent activity)
-            # BUT: Check coder WIP heartbeat first - if heartbeat is recent, agent is still working
+            # Check multiple activity sources:
+            # 1. Coder WIP heartbeat (most accurate for active coding)
+            # 2. Recent trajectory events (catches AO panel review, skills, etc.)
+            # 3. Saga timestamps as fallback
             is_stuck = False
             if saga_status in ("in_flight", "pending_claim"):
-                # First check coder WIP heartbeat - this is the most accurate indicator
-                has_recent_heartbeat = False
+                has_recent_activity = False
+
+                # Check 1: Coder WIP heartbeat
                 try:
-                    # Check all coders for this packet (check both full ID and short ID)
                     all_wip = redis.hgetall(CODER_WIP_KEY)
                     for agent_id, wip_json in all_wip.items():
                         wip_data = json.loads(wip_json)
                         wip_packet = wip_data.get("packet_id", "")
                         if wip_packet == full_wp_id or wip_packet == wp_id:
-                            # Found WIP for this packet - check heartbeat age
                             heartbeat_str = wip_data.get("last_heartbeat")
                             if heartbeat_str:
                                 heartbeat_time = datetime.fromisoformat(heartbeat_str.replace("Z", "+00:00"))
                                 heartbeat_age = (now - heartbeat_time).total_seconds()
                                 if heartbeat_age < 120:  # Heartbeat within 2 minutes
-                                    has_recent_heartbeat = True
+                                    has_recent_activity = True
                                     break
                 except Exception as e:
                     logger.debug(f"Error checking coder WIP for stuck detection: {e}")
 
-                # Only check saga activity if no recent heartbeat
-                if not has_recent_heartbeat:
+                # Check 2: Recent trajectory events for this work packet
+                if not has_recent_activity:
+                    wp_trajectories = all_trajectories_by_wp.get(full_wp_id) or all_trajectories_by_wp.get(wp_id) or []
+                    for traj in wp_trajectories:
+                        traj_ts = traj.get("timestamp", "")
+                        if traj_ts:
+                            try:
+                                traj_time = datetime.fromisoformat(traj_ts.replace("Z", "+00:00"))
+                                traj_age = (now - traj_time).total_seconds()
+                                if traj_age < 120:  # Trajectory event within 2 minutes
+                                    has_recent_activity = True
+                                    break
+                            except Exception:
+                                pass
+
+                # Check 3: Saga timestamps as fallback
+                if not has_recent_activity:
                     last_activity = claimed_at or completed_at
                     if last_activity:
                         try:
@@ -2324,6 +2399,26 @@ async def get_packet_trace(
             elif attempts:
                 final_outcome = attempts[-1].outcome
 
+            # Extract key info from trajectories for quick visibility
+            wp_duration_ms = None
+            wp_files_modified: List[str] = []
+            wp_error = None
+
+            # Scan all trajectories for this work packet to extract info
+            for wp_traj in wp_trajectories:
+                traj_meta = wp_traj.get("metadata", {}) or {}
+                # Get duration from final trajectory (success or failure)
+                if wp_traj.get("duration_ms") and wp_traj.get("outcome") in ("success", "failure"):
+                    wp_duration_ms = wp_traj.get("duration_ms")
+                # Get files from coder_completed milestone
+                if traj_meta.get("milestone") == "coder_completed":
+                    files = traj_meta.get("files_modified", [])
+                    if files:
+                        wp_files_modified = files
+                # Get error from failure trajectory
+                if wp_traj.get("outcome") == "failure" and wp_traj.get("error"):
+                    wp_error = wp_traj.get("error")
+
             work_packets.append(WorkPacketTrace(
                 packet_id=full_wp_id,
                 saga_status=saga_status,
@@ -2336,28 +2431,82 @@ async def get_packet_trace(
                 discrepancy_note=discrepancy_note,
                 attempts=attempts,
                 total_attempts=len(attempts),
-                final_outcome=final_outcome
+                final_outcome=final_outcome,
+                duration_ms=wp_duration_ms,
+                files_modified=wp_files_modified,
+                error=wp_error,
             ))
 
         # 5. Sort timeline by timestamp
         timeline.sort(key=lambda e: e.ts)
 
         # 6. Compute current_state
+        # Priority: completed > in_progress > stuck > pending
+        # "stuck" should NOT override "in_progress" when work is actively happening
         total_count = len(work_packets)
         has_discrepancies = any(wp.discrepancy for wp in work_packets)
 
-        if total_count == 0:
+        # Check for active work: "pending_review" means coder finished, review in progress
+        has_active_review = any(wp.trajectory_status == "pending_review" for wp in work_packets)
+        has_in_flight = any(wp.saga_status in ("in_flight", "pending_claim") for wp in work_packets)
+        has_active_coders = len(active_coders) > 0
+
+        if total_count == 0 and not has_active_coders:
             current_state = "no_work_packets"
-        elif len(stuck_packets) > 0:
-            current_state = "stuck"
-        elif completed_count == total_count:
+        elif completed_count == total_count and total_count > 0:
             current_state = "completed"
-        elif completed_count > 0:
+        elif has_active_coders:
+            # Active coders = definitely in progress (most reliable signal)
             current_state = "in_progress"
-        elif any(wp.saga_status in ("in_flight", "pending_claim") for wp in work_packets):
+        elif completed_count > 0 or has_active_review:
+            # Some packets complete OR some actively being reviewed
             current_state = "in_progress"
+        elif has_in_flight:
+            current_state = "in_progress"
+        elif len(stuck_packets) > 0:
+            # Only report stuck if no active progress
+            current_state = "stuck"
         else:
             current_state = "pending"
+
+        # 7. Build human-readable summary
+        failed_packets = [wp for wp in work_packets if wp.final_outcome in ("failure", "failed")]
+        success_packets = [wp for wp in work_packets if wp.final_outcome == "success"]
+        in_progress_packets = [wp for wp in work_packets if wp.final_outcome not in ("success", "failure", "failed", "escalated")]
+
+        if total_count == 0:
+            summary = "No work packets found"
+        elif completed_count == total_count:
+            summary = f"✓ All {total_count} work packets succeeded"
+        elif len(failed_packets) > 0:
+            # Extract failure reasons from timeline for failed packets
+            failure_details = []
+            for wp in failed_packets:
+                # Find error in timeline for this packet
+                wp_id_short = wp.packet_id.split("-")[-1] if "-wp-" in wp.packet_id else wp.packet_id
+                error_msg = "unknown"
+                for event in timeline:
+                    if event.packet_id == wp.packet_id and event.details:
+                        if event.details.get("error"):
+                            error_msg = event.details.get("error", "")[:50]
+                            break
+                failure_details.append(f"{wp_id_short}: {error_msg}")
+
+            summary = f"{completed_count}/{total_count} succeeded, {len(failed_packets)} failed"
+            if failure_details:
+                summary += f" ({'; '.join(failure_details[:3])})"  # Limit to 3 failures
+        elif len(in_progress_packets) > 0 or len(active_coders) > 0:
+            # Show active coder details in summary
+            if active_coders:
+                coder_details = []
+                for c in active_coders[:3]:  # Limit to 3
+                    wp_short = c.packet_id.split("-wp-")[-1] if "-wp-" in c.packet_id else c.packet_id
+                    coder_details.append(f"{c.agent_id}: {wp_short} turn {c.current_turn} ({c.elapsed_seconds}s)")
+                summary = f"{completed_count}/{total_count} complete, {len(active_coders)} coders active ({'; '.join(coder_details)})"
+            else:
+                summary = f"{completed_count}/{total_count} complete, {len(in_progress_packets)} in progress"
+        else:
+            summary = f"{completed_count}/{total_count} work packets completed"
 
         return PacketTraceResponse(
             success=True,
@@ -2369,7 +2518,9 @@ async def get_packet_trace(
             stuck_packets=stuck_packets,
             completed_count=completed_count,
             total_count=total_count,
-            has_discrepancies=has_discrepancies
+            has_discrepancies=has_discrepancies,
+            summary=summary,
+            active_coders=active_coders,
         )
 
     except Exception as e:
